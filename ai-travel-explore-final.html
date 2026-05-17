@@ -227,6 +227,13 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .lm-social-btn{width:100%;padding:10px;border-radius:9px;border:1.5px solid var(--border);background:var(--surface);font-size:14px;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all .2s;color:var(--ink2);}
 .lm-social-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
 .lm-close{position:absolute;top:14px;right:14px;background:var(--surface2);border:none;color:var(--ink3);width:30px;height:30px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.mode-choice-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px;}
+.mode-choice-card{background:var(--surface2);border:2px solid var(--border);border-radius:16px;padding:24px 16px;cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:inherit;}
+.mode-choice-card:hover{border-color:var(--accent);background:var(--accent-light);transform:translateY(-2px);box-shadow:var(--shadow-sm);}
+.mode-choice-icon{font-size:32px;line-height:1;}
+.mode-choice-name{font-size:15px;font-weight:800;color:var(--ink);}
+.mode-choice-desc{font-size:12px;color:var(--ink3);line-height:1.4;}
+.collab-code-box{font-family:monospace;font-size:28px;font-weight:800;letter-spacing:4px;color:var(--accent);background:var(--accent-light);border:2px dashed var(--accent);border-radius:12px;padding:16px 24px;margin:16px 0;}
 
 /* ─── JOURNEY JOIN MODAL ─── */
 .journey-modal{background:var(--surface);border-radius:20px;width:100%;max-width:460px;padding:34px 34px 30px;box-shadow:var(--shadow-lg);transform:translateY(20px);transition:transform .3s;position:relative;}
@@ -798,6 +805,38 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   </div>
 </div>
 
+<!-- ─── OVERLAY: TRIP MODE CHOICE ─── -->
+<div class="overlay" id="modeChoiceOverlay" onclick="if(event.target===this)closeModeChoice()" style="z-index:300">
+  <div class="login-modal" style="position:relative;max-width:480px;text-align:center;">
+    <button class="lm-close" onclick="closeModeChoice()">✕</button>
+    <div class="lm-title">建立微旅行</div>
+    <div class="lm-sub">選擇你的製作方式</div>
+    <div class="mode-choice-cards">
+      <button class="mode-choice-card" onclick="selectTripMode('solo')">
+        <div class="mode-choice-icon">🧍</div>
+        <div class="mode-choice-name">單人製作</div>
+        <div class="mode-choice-desc">自己規劃，獨享專屬行程</div>
+      </button>
+      <button class="mode-choice-card" onclick="selectTripMode('collab')">
+        <div class="mode-choice-icon">👥</div>
+        <div class="mode-choice-name">多人共作</div>
+        <div class="mode-choice-desc">邀請朋友一起規劃行程</div>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: COLLAB INVITE CODE DISPLAY ─── -->
+<div class="overlay" id="collabCodeOverlay" onclick="if(event.target===this)closeCollabCode()" style="z-index:350">
+  <div class="login-modal" style="position:relative;max-width:380px;text-align:center;">
+    <button class="lm-close" onclick="closeCollabCode()">✕</button>
+    <div class="lm-title">🎉 行程已建立！</div>
+    <div class="lm-sub">分享以下邀請碼，讓朋友加入共作</div>
+    <div class="collab-code-box" id="collabCodeDisplay">WNDR-XXXX</div>
+    <button class="lm-submit" onclick="copyCollabCode()">📋 複製邀請碼</button>
+  </div>
+</div>
+
 <!-- ─── OVERLAY: JOURNEY JOIN ─── -->
 <div class="overlay" id="journeyOverlay" onclick="if(event.target===this)closeJourneyJoin()" style="z-index:300">
   <div class="journey-modal">
@@ -1094,11 +1133,31 @@ async function buildFirebasePoiHintBlock(wizardData) {
       const poi = doc.data();
       const poiLat = Number(poi.lat);
       const poiLng = Number(poi.lng);
-      if (Number.isFinite(poiLat) && Number.isFinite(poiLng)) {
-        poiLines.push(`lat: ${poiLat}, lng: ${poiLng}\n`);
-      }
+      const coordinateHint = Number.isFinite(poiLat) && Number.isFinite(poiLng)
+        ? `景點座標：lat ${poiLat}, lng ${poiLng}`
+        : '景點座標：未知';
       const durationHint = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0 ? `${poi.duration} 分鐘` : '未知';
-      poiLines.push(`景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`);
+      const toiletLines = Array.isArray(poi.nearbyToiletLocations)
+        ? poi.nearbyToiletLocations.slice(0, 3).map((toilet, index) => {
+          if (!toilet || typeof toilet !== 'object') return null;
+          const toiletLat = Number(toilet.lat);
+          const toiletLng = Number(toilet.lng);
+          const toiletCoord = Number.isFinite(toiletLat) && Number.isFinite(toiletLng)
+            ? `lat ${toiletLat}, lng ${toiletLng}`
+            : '座標未知';
+          const toiletName = toilet.name || toilet.title || `廁所 ${index + 1}`;
+          const toiletMeta = [
+            toilet.address || toilet.vicinity || '',
+            toilet.source || toilet.coordinateSource || '',
+            toilet.distanceMeters ? `距離約 ${toilet.distanceMeters}m` : ''
+          ].filter(Boolean).join('；');
+          return `- ${toiletName}：${toiletCoord}${toiletMeta ? `（${toiletMeta}）` : ''}`;
+        }).filter(Boolean)
+        : [];
+      const toiletHint = toiletLines.length
+        ? `附近廁所候選（僅沿用距離景點 500 公尺內且名稱相符者）：\n${toiletLines.join('\n')}`
+        : '附近廁所候選：無可信快取';
+      poiLines.push(`景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n${toiletHint}\n`);
     });
 
     return `從 Firebase 取得的景點資料（若符合請優先使用）：\n${poiLines.join('\n')}`;
@@ -1142,30 +1201,62 @@ function isLongTrip(days) {
   return String(days || '') === '2天';
 }
 
+function getDurationStopRange(days) {
+  if (days === '0.5小時') return { min: 1, max: 2 };
+  if (days === '1小時')  return { min: 2, max: 3 };
+  if (days === '2小時')  return { min: 3, max: 4 };
+  if (days === '半天')   return { min: 4, max: 6 };
+  if (days === '2天')    return { min: 8, max: 12 };
+  return { min: 5, max: 8 }; // 1天 default
+}
+
+function calcTripEndTime(startTime, days) {
+  const durationMap = {
+    '0.5小時': 30, '1小時': 60, '2小時': 120,
+    '半天': 240, '1天': 480, '2天': 960
+  };
+  const duration = durationMap[days] || 480;
+  const startMin = timeStringToMinutes(normalizeClockInput(startTime, '09:00'));
+  return minutesToTimeString(startMin + duration);
+}
+
 function getPromptRuleLines(wizardData, mode) {
   const days = wizardData.days || '1天';
   const people = wizardData.people || '2人';
   const pace = wizardData.pace || '平衡';
   const interests = (wizardData.interests || []).join('、') || '多元';
   const detailed = mode !== 'preview';
+  const startTime = normalizeClockInput(wizardData.startTime, '09:00');
+  const endTime = calcTripEndTime(startTime, days);
   const lines = [
-    `1. 針對 ${days} 的時間量身打造`,
+    `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
     `2. 適合 ${people} 人同行`,
     `3. 符合 ${pace} 的節奏`,
     `4. 強調 ${interests} 面向`
   ];
 
   if (detailed) {
-    lines.push('5. 包含 3-5 個主要停留點');
-    lines.push('6. 每站包含時間、景點名稱、推薦理由、營業時間、附近廁所位置（1-3個）');
-    lines.push('7. 廁所輸出格式：{name:"名稱", lat:數字, lng:數字}，若無法確認座標則省略 lat/lng');
-    lines.push('8. 景點須考慮營業時間，且使用正式可定位名稱');
-    lines.push('9. 請勿自行編造座標，無法確認請省略座標欄位');
-    lines.push('10. 景點座標、景點建議停留時間與廁所座標，優先參考 data.gov.tw 開放資料（https://data.gov.tw）中的相關資料集，例如：觀光景點資料集、公廁位置資料集等');
+    const { min, max } = getDurationStopRange(days);
+    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點，並確保行程從 ${startTime} 開始、安排至接近 ${endTime} 結束，充分利用整段時間`);
+    lines.push('6. 每站包含時間、景點名稱、景點 WGS84 精確座標、推薦理由、營業時間、附近廁所位置（1-3個，必須距離該景點 500 公尺以內）');
+    lines.push('7. 廁所座標必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代');
+    lines.push('8. 廁所輸出格式：{name:"正式名稱", lat:數字, lng:數字, address:"地址或位置描述", source:"資料來源", confidence:"high|medium"}；若無法確認精確座標，請保留 name/address 並省略 lat/lng');
+    lines.push('9. 廁所名稱與座標必須互相對應；若 Firebase 候選、data.gov.tw 公廁資料、Google Maps/Places 名稱或地址互相矛盾，優先使用可定位到實際廁所設施且距離景點最近的資料，無法確認則不要輸出座標');
+    lines.push('10. 景點須考慮營業時間，且使用正式可定位名稱');
+    lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
+    lines.push('12. 景點座標、景點建議停留時間與廁所座標，優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集，以及可交叉驗證的地圖資料');
     if (isLongTrip(days)) {
-      lines.push('11. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
-      lines.push('12. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
-      lines.push('13. 需安排 12:00-13:30 的彈性午餐停留時段');
+      lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
+      lines.push('14. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
+      lines.push('15. 需安排 12:00-13:30 的彈性午餐停留時段');
+    }
+    const startLoc = (wizardData.startLocation || '').trim();
+    const endLoc = (wizardData.endLocation || '').trim();
+    if (startLoc) {
+      lines.push(`${lines.length + 1}. 行程第一站必須從「${startLoc}」出發，這是旅客的集合起始點，需計算從此處到第一景點的移動時間`);
+    }
+    if (endLoc) {
+      lines.push(`${lines.length + 1}. 行程最後一站必須返回「${endLoc}」，這是旅客的結束點，需計算從最後景點返回此處的移動時間`);
     }
   } else {
     lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
@@ -1175,25 +1266,29 @@ function getPromptRuleLines(wizardData, mode) {
 
 function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const destination = wizardData.dest || wizardData.destCustom || '台東';
+  const tripStartTime = normalizeClockInput(wizardData.startTime, '09:00');
+  const tripEndTime = calcTripEndTime(tripStartTime, wizardData.days || '1天');
   const contextBlock = [
     `目的地：${destination}`,
-    `時間長度：${wizardData.days || '1天'}`,
+    `時間長度：${wizardData.days || '1天'}（${tripStartTime} ～ ${tripEndTime}，請安排景點填滿此時段）`,
     `旅伴：${wizardData.people || '2人'}`,
     `行程節奏：${wizardData.pace || '平衡'}`,
     `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
-    `旅程風格：${wizardData.theme || '經典旅人'}`
-  ].join('\n');
+    `旅程風格：${wizardData.theme || '經典旅人'}`,
+    (wizardData.startLocation || '').trim() ? `出發點（集合點）：${wizardData.startLocation.trim()}` : null,
+    (wizardData.endLocation || '').trim() ? `結束點（返回點）：${wizardData.endLocation.trim()}` : null
+  ].filter(Boolean).join('\n');
 
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
     ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
-    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,desc,duration,businessHours,nearbyToiletLocations:[{name,lat,lng}]}]`;
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration,businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
-    ? `\n\n從 Firebase 取得的景點資料（若符合請優先使用）：\n${firebaseHint}`
+    ? `\n\n${firebaseHint}`
     : '';
 
-  const prompt = `你是台東微旅行的 AI 規劃助手。根據用戶需求生成可執行行程。景點座標與廁所座標請優先參考 data.gov.tw（https://data.gov.tw）的開放資料，包含觀光景點資料集與公廁位置資料集。${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}`;
+  const prompt = `你是台東微旅行的 AI 規劃助手。根據用戶需求生成可執行行程。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}`;
 
   return { prompt, contextBlock };
 }
@@ -1597,6 +1692,18 @@ function getDistanceMeters(a, b) {
   return 2 * earthRadius * Math.asin(Math.sqrt(h));
 }
 
+const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
+
+function filterNearbyToiletsByDistance(stop) {
+  const stopCoord = getStopCoordinate(stop);
+  if (!stopCoord || !Array.isArray(stop.nearbyToiletLocations)) return;
+  stop.nearbyToiletLocations = stop.nearbyToiletLocations.filter(toilet => {
+    const toiletCoord = getStopCoordinate(toilet);
+    if (!toiletCoord) return false;
+    return getDistanceMeters(stopCoord, toiletCoord) <= MAX_NEARBY_TOILET_DISTANCE_METERS;
+  });
+}
+
 const DESTINATION_CENTER_MAP = {
   '台北': { lat: 25.033, lng: 121.565 },
   '新北': { lat: 25.016, lng: 121.462 },
@@ -1616,6 +1723,18 @@ const DESTINATION_CENTER_MAP = {
   '日本': { lat: 35.681, lng: 139.767 },
   '韓國': { lat: 37.566, lng: 126.978 },
   '歐洲': { lat: 48.857, lng: 2.352 }
+};
+
+const MILITARY_EXCLUSION_KEYWORDS = ['空軍', '海軍基地', '軍用', '軍港', '軍機場', '基地', '海巡署'];
+
+const CIVIL_TRANSIT_HUB_MAP = {
+  '台東': '台東火車站', '台東縣': '台東火車站', '台東市': '台東火車站',
+  '綠島': '富岡漁港', '蘭嶼': '富岡漁港',
+  '成功': '成功漁港', '長濱': '成功漁港',
+  '卑南': '台東火車站', '知本': '台東火車站',
+  '鹿野': '鹿野車站', '關山': '關山車站',
+  '池上': '池上車站', '富里': '富里車站',
+  '太麻里': '太麻里車站',
 };
 
 const TRAFFIC_RISK_KEYWORDS = [
@@ -1646,6 +1765,14 @@ function getDestinationCenter(destinationText) {
   if (DESTINATION_CENTER_MAP[lookup]) return DESTINATION_CENTER_MAP[lookup];
   const hit = Object.keys(DESTINATION_CENTER_MAP).find((key) => lookup.includes(key));
   return hit ? DESTINATION_CENTER_MAP[hit] : null;
+}
+
+function getDefaultTransitHub(destination) {
+  if (!destination) return '台東火車站';
+  const text = String(destination).trim();
+  if (CIVIL_TRANSIT_HUB_MAP[text]) return CIVIL_TRANSIT_HUB_MAP[text];
+  const hit = Object.keys(CIVIL_TRANSIT_HUB_MAP).find(key => text.includes(key));
+  return hit ? CIVIL_TRANSIT_HUB_MAP[hit] : '台東火車站';
 }
 
 function getDestinationMaxDistanceMeters(destinationText) {
@@ -2084,6 +2211,7 @@ function normalizeGeneratedStop(stop, index, fallbackTime) {
     safeStop.lat = normalizedCoord.lat;
     safeStop.lng = normalizedCoord.lng;
   }
+  filterNearbyToiletsByDistance(safeStop);
   return safeStop;
 }
 
@@ -2099,25 +2227,25 @@ function parseBusinessHoursWindow(value) {
 
 function applyTripPlanningRules(stops, wizardData = {}) {
   const pace = wizardData.pace || '平衡';
-  const gapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
-  const startTime = normalizeClockInput(wizardData.startTime, '09:00');
-  let previousMinutes = null;
+  const maxGapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
+  const startMinutes = timeStringToMinutes(normalizeClockInput(wizardData.startTime, '09:00'));
+  let previousEndMinutes = null;
 
   return stops.map((stop, index) => {
-    const fallbackTime = minutesToTimeString(timeStringToMinutes(startTime) + gapMinutes * index);
-    const normalized = normalizeGeneratedStop(stop, index, fallbackTime);
-    let currentMinutes = timeStringToMinutes(normalized.time);
+    // 第一站從出發時間開始；後續站點接在前一站結束後
+    const defaultStart = index === 0 ? startMinutes : (previousEndMinutes ?? startMinutes);
+    const normalized = normalizeGeneratedStop(stop, index, minutesToTimeString(defaultStart));
+    let currentMinutes = defaultStart;
 
-    if (previousMinutes !== null && currentMinutes <= previousMinutes) {
-      currentMinutes = previousMinutes + gapMinutes;
-    }
-
+    // 營業時間調整：若需等候且等候時長在上限內，推遲開始
     const businessWindow = parseBusinessHoursWindow(normalized.businessHours);
     if (businessWindow && currentMinutes < businessWindow.open) {
-      currentMinutes = businessWindow.open;
-    }
-    if (previousMinutes !== null && currentMinutes <= previousMinutes) {
-      currentMinutes = previousMinutes + gapMinutes;
+      const waitTime = businessWindow.open - currentMinutes;
+      if (waitTime <= maxGapMinutes) {
+        currentMinutes = businessWindow.open;
+      } else {
+        normalized.scheduleWarning = 'outside_business_hours';
+      }
     }
     if (businessWindow && currentMinutes > businessWindow.close) {
       normalized.scheduleWarning = 'outside_business_hours';
@@ -2125,9 +2253,69 @@ function applyTripPlanningRules(stops, wizardData = {}) {
 
     normalized.time = minutesToTimeString(currentMinutes);
     normalized.order = index + 1;
-    previousMinutes = currentMinutes;
+
+    // 以建議停留時長推算結束時間，作為下一站的起點
+    const duration = normalized.duration || 30;
+    previousEndMinutes = currentMinutes + duration;
+
     return normalized;
   });
+}
+
+function assignTransportModes(stops) {
+  const VALID_MODES = ['walk', 'scooter', 'car', 'public'];
+  return stops.map((stop, index) => {
+    if (index >= stops.length - 1) return stop;
+    const existing = String(stop.transitMode || stop.transportMode || '').trim().toLowerCase();
+    if (VALID_MODES.includes(existing)) return stop;
+    const fromCoord = getStopCoordinate(stop);
+    const toCoord = getStopCoordinate(stops[index + 1]);
+    if (!fromCoord || !toCoord) return { ...stop, transitMode: 'car' };
+    const dist = getDistanceMeters(fromCoord, toCoord);
+    const transitMode = dist <= 800 ? 'walk' : dist <= 3000 ? 'scooter' : 'car';
+    return { ...stop, transitMode };
+  });
+}
+
+function fuzzyMatchLocation(stopName, locationName) {
+  if (!stopName || !locationName) return false;
+  const a = stopName.trim().toLowerCase().replace(/\s/g, '');
+  const b = locationName.trim().toLowerCase().replace(/\s/g, '');
+  return a.includes(b) || b.includes(a);
+}
+
+function injectEndpointStops(stops, wizardData = {}) {
+  const startLoc = (wizardData.startLocation || '').trim();
+  const endLoc = (wizardData.endLocation || '').trim();
+  let result = [...stops];
+
+  if (startLoc) {
+    if (result.length && fuzzyMatchLocation(result[0].name, startLoc)) {
+      result[0] = { ...result[0], type: 'start' };
+    } else {
+      result.unshift({
+        order: 0, type: 'start', emoji: '🚩', name: startLoc,
+        time: normalizeClockInput(wizardData.startTime, '09:00'),
+        desc: '旅程起始點，從這裡出發。', duration: 0
+      });
+    }
+  }
+
+  if (endLoc) {
+    const last = result[result.length - 1];
+    if (last && fuzzyMatchLocation(last.name, endLoc)) {
+      result[result.length - 1] = { ...last, type: 'end' };
+    } else {
+      result.push({
+        order: result.length + 1, type: 'end', emoji: '🏁', name: endLoc,
+        time: last ? last.time : normalizeClockInput(wizardData.startTime, '09:00'),
+        desc: '旅程結束點，回到這裡。', duration: 0
+      });
+    }
+  }
+
+  result.forEach((s, i) => { s.order = i + 1; });
+  return result;
 }
 
 async function optimizeGeneratedTripStops(stops, wizardData = {}) {
@@ -2137,7 +2325,15 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const poiCache = await fetchDestinationPoiCache(destination);
   const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
   const geographicallySorted = sortStopsByNearestRoute(sanitizedStops, wizardData);
-  return applyTripPlanningRules(geographicallySorted, wizardData);
+  const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
+  const withTransport = assignTransportModes(ruledStops);
+  const defaultHub = getDefaultTransitHub(destination);
+  const enrichedWizardData = {
+    ...wizardData,
+    startLocation: (wizardData.startLocation || '').trim() || defaultHub,
+    endLocation: (wizardData.endLocation || '').trim() || defaultHub,
+  };
+  return injectEndpointStops(withTransport, enrichedWizardData);
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -2610,12 +2806,24 @@ function renderSideMyTrips() {
 // NEW TRIP WIZARD
 // ══════════════════════════════════════════════════
 function openWizard() {
-  wizStep = 0; wizData = { days: '1天' };
+  document.getElementById('modeChoiceOverlay').classList.add('open');
+}
+function closeModeChoice() {
+  document.getElementById('modeChoiceOverlay').classList.remove('open');
+}
+function selectTripMode(mode) {
+  closeModeChoice();
+  wizStep = 0; wizData = { days: '1天', tripMode: mode };
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
 }
 function closeWizard() { document.getElementById('wizardOverlay').classList.remove('open'); }
+function closeCollabCode() { document.getElementById('collabCodeOverlay').classList.remove('open'); }
+function copyCollabCode() {
+  const code = document.getElementById('collabCodeDisplay').textContent;
+  navigator.clipboard.writeText(code).then(() => showToast('邀請碼已複製！', 'green')).catch(() => showToast(code, 'green'));
+}
 
 function renderWizard() {
   // Steps bar with new class names
@@ -2671,15 +2879,28 @@ function renderWizard() {
         </select>
       </div>
       <div class="wizard-field">
-        <label>預覽時間設定</label>
+        <label>時間設定</label>
         <div class="wizard-time-grid">
           <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
           <select id="wizSlotMinutes" onchange="updateWizardSlotMinutes(this.value)">
-            ${slotOptions.map(min=>`<option value="${min}" ${previewSlot===min?'selected':''}>每站間隔 ${min} 分鐘</option>`).join('')}
+            ${slotOptions.map(min=>`<option value="${min}" ${previewSlot===min?'selected':''}>每站最多間格 ${min} 分鐘</option>`).join('')}
           </select>
         </div>
-        <p style="margin-top:8px;font-size:12px;color:#5f6876;">本時長最大預覽間隔：${maxSlotMinutes} 分鐘。</p>
-      </div>`;
+        <p style="margin-top:8px;font-size:12px;color:#5f6876;">每站間格上限：${maxSlotMinutes} 分鐘</p>
+      </div>
+      ${(()=>{ const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
+        const startHint = autoHub ? `留空自動設為「${autoHub}」` : '例：台東火車站、民宿名稱、停車場入口';
+        const endHint = autoHub ? `留空自動設為「${autoHub}」` : (isLongTrip(wizData.days) ? '例：台東火車站、知本溫泉飯店' : '例：台東火車站、停車場');
+        return `<div class="wizard-field">
+        <label>出發點 / 集合點</label>
+        <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程從這裡開始，系統會計算到第一個景點的移動時間</p>
+      </div>
+      <div class="wizard-field">
+        <label>${isLongTrip(wizData.days) ? '結束點 / 飯店' : '結束點 / 返回車站'}</label>
+        <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程在這裡結束，系統會計算從最後景點返回的時間</p>
+      </div>`; })()}`;
   } else if (wizStep===2) {
     body.innerHTML = `<h3 class="wizard-block-title">🎨 興趣點</h3>
       <p class="wizard-block-help">選擇 2-4 項，AI 會強調這些體驗點在行程中</p>
@@ -2885,7 +3106,7 @@ function updatePreviewNodeTime(index, value) {
   renderFlowPreview();
 }
 
-function buildInterestDrivenStops(dest, interests = [], pace = '平衡') {
+function buildInterestDrivenStops(dest, interests = [], pace = '平衡', startLocation = '', endLocation = '') {
   const interestStops = {
     美食: { title: '在地美食', desc: '安排口碑店家或小吃，保留彈性用餐與休息時間。' },
     文化: { title: '文化散策', desc: '串接歷史街區或展館，讓行程有在地故事線。' },
@@ -2912,11 +3133,13 @@ function buildInterestDrivenStops(dest, interests = [], pace = '平衡') {
       ? '留更多緩衝時間慢慢體驗。'
       : '維持移動與停留的平衡感。';
 
-  return [
-    { title: `${dest}出發點`, desc: `從集合點出發，先確認旅伴與路線重點。` },
-    ...middleStops,
-    { title: '溫暖結尾', desc: `回到方便解散的位置，${paceTail}` }
-  ];
+  const firstStop = startLocation
+    ? { title: startLocation, desc: `從${startLocation}出發，先確認旅伴與路線重點。` }
+    : { title: `${dest}出發點`, desc: `從集合點出發，先確認旅伴與路線重點。` };
+  const lastStop = endLocation
+    ? { title: endLocation, desc: `返回${endLocation}，完成本次旅程。${paceTail}` }
+    : { title: '溫暖結尾', desc: `回到方便解散的位置，${paceTail}` };
+  return [firstStop, ...middleStops, lastStop];
 }
 
 function renderFlowPreview() {
@@ -2932,7 +3155,7 @@ function renderFlowPreview() {
   document.getElementById('themeNote').textContent = `目前主題：${theme}`;
   document.getElementById('flowTitle').textContent = `${dest}・${days}微旅行`;
 
-  const allStops = buildInterestDrivenStops(dest, interests, pace);
+  const allStops = buildInterestDrivenStops(dest, interests, pace, wizData.startLocation || '', wizData.endLocation || '');
   const stopCount = clampPreviewStopsByDuration(days);
   const durationMinutes = getPreviewDurationMinutes(days);
   const previewStops = allStops.slice(0, Math.max(2, stopCount));
@@ -2969,7 +3192,10 @@ function renderFlowPreview() {
 
   const endTime = times.length ? times[times.length - 1] : startTime;
   const interestSummary = interests.length ? interests.join('、') : '多元探索';
-  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（每站約 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。`;
+  const startLocSummary = wizData.startLocation ? `出發：${wizData.startLocation}` : '';
+  const endLocSummary = wizData.endLocation ? `結束：${wizData.endLocation}` : '';
+  const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
+  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（每站最多間格 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
 }
 
 function onDestInput(val) {
@@ -3060,6 +3286,10 @@ async function finishWizard() {
   const dest = wizData.dest || wizData.destCustom || '台東';
   const days = wizData.days || '1天';
   const budgetMap = {'0.5小時':'$200','1小時':'$300','2小時':'$500','半天':'$800','1天':'$1,500','2天':'$3,000'};
+  const tripMode = wizData.tripMode || 'solo';
+  const inviteCode = tripMode === 'collab'
+    ? 'WNDR-' + Math.random().toString(36).substring(2, 6).toUpperCase()
+    : null;
   const newTrip = {
     id:'my_'+Date.now(), title:`${dest} ${days}微旅行`,
     emoji: {台東:'🌊',花蓮:'🏔',台北:'🏙',日本:'⛩️',韓國:'🌸',歐洲:'🏛'}[dest]||'✈️',
@@ -3067,15 +3297,22 @@ async function finishWizard() {
     days, region:dest, budget:wizData.budget||budgetMap[days]||'$1,500',
     people:wizData.people||'2人', status:'planning',
     createdAt:new Date().toLocaleDateString('zh-TW'),
+    tripMode,
+    ...(inviteCode ? { inviteCode } : {}),
     wizardData: {
       dest, days, people: wizData.people||'2人', pace: wizData.pace||'平衡',
-      interests: wizData.interests||[], theme: wizData.theme||'經典旅人'
+      interests: wizData.interests||[], theme: wizData.theme||'經典旅人',
+      startLocation: wizData.startLocation||'', endLocation: wizData.endLocation||''
     },
     stops: []
   };
   newTrip.__saving = true;
 
   closeWizard();
+  if (inviteCode) {
+    document.getElementById('collabCodeDisplay').textContent = inviteCode;
+    document.getElementById('collabCodeOverlay').classList.add('open');
+  }
   showToast(`⏳ 正在生成你的個人化微旅行…`, 'blue');
 
   try {

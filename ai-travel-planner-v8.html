@@ -4083,6 +4083,8 @@ body.prototype-mode .prototype-id-chip {
                 transitMode: normalizedTransitMode,
                 mapPinId: assignedPinId,
                 scenicCoordinates: resolvedPosition,
+                lat: _pos.lat,
+                lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || []
               };
             }));
@@ -4836,6 +4838,7 @@ body.prototype-mode .prototype-id-chip {
     replanStopSerial += 1;
     let assignedPinId = template.mapPinId;
     const scenicCoordinates = template.scenicCoordinates || template['景點座標'] || null;
+    const stopCoordinates = readCoordinateObject(scenicCoordinates || template);
 
     if (!assignedPinId) {
       assignedPinId = `ai-pin-${replanStopSerial}`;
@@ -4888,6 +4891,8 @@ body.prototype-mode .prototype-id-chip {
       transitMode: normalizedMode,
       mapPinId: assignedPinId,
       scenicCoordinates,
+      lat: stopCoordinates ? stopCoordinates.lat : null,
+      lng: stopCoordinates ? stopCoordinates.lng : null,
       nearbyToiletLocations: template.toiletLocations || []
     };
   }
@@ -5868,7 +5873,10 @@ body.prototype-mode .prototype-id-chip {
             toiletLocations.push({
               name: toiletName,
               lat: toiletCoord.lat,
-              lng: toiletCoord.lng
+              lng: toiletCoord.lng,
+              address: toilet.address || toilet.vicinity || toilet.location || '',
+              source: toilet.source || toilet.coordinateSource || '',
+              confidence: toilet.confidence || ''
             });
           }
         } else if (typeof toilet === 'string') {
@@ -6268,13 +6276,15 @@ body.prototype-mode .prototype-id-chip {
       '回傳必須是 JSON，不要使用 markdown code block。',
       '【重要指令】當使用者明確要求「新增」景點或行程時，請務必使用 "add_stop" 動作，千萬不要使用 "replace_stop" 覆蓋原有的行程。',
       '【重要指令】新增景點時，stop 請一併提供 "景點座標"，格式為 {"lat": 數字, "lng": 數字}；若已知 Firebase 中的同名景點，請沿用相同座標與資訊，不要重新生成。',
-      '【廁所座標】新增景點時，請同時提供 "廁所座標" 陣列（最多 3 個附近廁所），格式為 [{"name": "廁所名稱", "lat": 數字, "lng": 數字}, ...]；若無法確認，則傳空陣列 []。',
+      '【廁所座標】新增景點時，請同時提供 "廁所座標" 陣列（最多 3 個附近廁所），格式為 [{"name": "廁所正式名稱", "lat": 數字, "lng": 數字, "address": "地址或位置描述", "source": "資料來源", "confidence": "high|medium"}, ...]。',
+      '【廁所座標精度】廁所 lat/lng 必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數，且距離該景點 500 公尺內；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代。',
+      '【廁所座標查證】若無法確認廁所名稱與座標互相對應，或資料來源互相矛盾，請保留廁所 name/address 但省略 lat/lng；完全無可信資料時傳空陣列 []。',
       'JSON 格式：',
       '{',
       '  "reply": "給使用者看的自然語句",',
       '  "recommendation": {"title": "可選", "subtitle": "可選"},',
       '  "actions": [',
-      '    {"type": "add_stop", "stop": {"name": "景點名", "emoji": "🍜", "stayMin": 30, "景點座標": {"lat": 0, "lng": 0}, "廁所座標": [{"name": "廁所A", "lat": 0, "lng": 0}]}, "insertAfter": "可選"},',
+      '    {"type": "add_stop", "stop": {"name": "景點名", "emoji": "🍜", "stayMin": 30, "景點座標": {"lat": 0, "lng": 0}, "廁所座標": [{"name": "廁所A", "lat": 0, "lng": 0, "address": "地址", "source": "資料來源", "confidence": "high"}]}, "insertAfter": "可選"},',
       '    {"type": "remove_stop", "target": "景點名"},',
       '    {"type": "replace_stop", "target": "景點名", "newStop": {"name": "新景點", "emoji": "🌇", "stayMin": 25, "景點座標": {"lat": 0, "lng": 0}, "廁所座標": []}},',
       '    {"type": "set_time", "target": "景點名", "start": "15:10", "end": "15:40"},',
@@ -7203,9 +7213,144 @@ body.prototype-mode .prototype-id-chip {
       return {
         name: name || `廁所 ${index + 1}`,
         lat: coordinates ? coordinates.lat : null,
-        lng: coordinates ? coordinates.lng : null
+        lng: coordinates ? coordinates.lng : null,
+        address: item.address || item.vicinity || item.location || '',
+        source: item.source || item.coordinateSource || '',
+        confidence: item.confidence || ''
       };
     }).filter(Boolean);
+  }
+
+  const MAX_TRUSTED_TOILET_DISTANCE_METERS = 500;
+  const TOILET_COORDINATE_SEARCH_RADIUS_METERS = 1200;
+
+  function hasUsableCoordinate(item) {
+    return item && Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lng));
+  }
+
+  function normalizeToiletCoordinate(item) {
+    const coordinates = readCoordinateObject(item);
+    return coordinates && hasUsableCoordinate(coordinates) ? coordinates : null;
+  }
+
+  function getStopCoordinateForToiletSearch(stop) {
+    if (!stop) return null;
+    const directCoordinate = normalizeToiletCoordinate(stop)
+      || readCoordinateObject(stop.scenicCoordinates)
+      || readCoordinateObject(stop['景點座標'])
+      || readCoordinateObject(stop.coordinates)
+      || readCoordinateObject(stop.position);
+    if (directCoordinate) return directCoordinate;
+
+    const pinId = stop.mapPinId || stop.pinId;
+    if (pinId && mapPinLocations && mapPinLocations[pinId]) {
+      const pinCoordinate = readCoordinateObject(mapPinLocations[pinId]);
+      if (pinCoordinate) return pinCoordinate;
+    }
+    if (pinId && typeof pinData !== 'undefined' && pinData && pinData[pinId]) {
+      const pinCoordinate = readCoordinateObject(pinData[pinId]);
+      if (pinCoordinate) return pinCoordinate;
+    }
+    return null;
+  }
+
+  function getToiletDistanceFromStop(stop, toilet) {
+    const stopCoordinates = getStopCoordinateForToiletSearch(stop);
+    const toiletCoordinates = normalizeToiletCoordinate(toilet);
+    if (!stopCoordinates || !toiletCoordinates) return Number.POSITIVE_INFINITY;
+    return measureDistanceMeters(stopCoordinates, toiletCoordinates);
+  }
+
+  function isTrustedToiletCoordinate(stop, toilet) {
+    return getToiletDistanceFromStop(stop, toilet) <= MAX_TRUSTED_TOILET_DISTANCE_METERS;
+  }
+
+  function isLikelyToiletText(value) {
+    const text = normalizeText(value);
+    return ['廁所', '厕所', '洗手間', '洗手间', '公廁', '公厕', 'toilet', 'restroom', 'bathroom', 'wc']
+      .some((keyword) => text.includes(normalizeText(keyword)));
+  }
+
+  function getPlaceResultCoordinate(place) {
+    if (!place || !place.geometry || !place.geometry.location) return null;
+    return readCoordinateObject(place);
+  }
+
+  function getToiletNameMatchScore(query, placeName) {
+    const normalizedQuery = normalizeText(query);
+    const normalizedName = normalizeText(placeName);
+    if (!normalizedQuery || !normalizedName) return 0;
+    if (normalizedName === normalizedQuery) return 100;
+    if (normalizedName.includes(normalizedQuery) || normalizedQuery.includes(normalizedName)) return 85;
+
+    const queryHasToilet = isLikelyToiletText(query);
+    const nameHasToilet = isLikelyToiletText(placeName);
+    if (queryHasToilet && nameHasToilet) return 60;
+
+    const minLength = Math.min(normalizedQuery.length, normalizedName.length);
+    let sharedRun = 0;
+    for (let start = 0; start < normalizedQuery.length; start += 1) {
+      for (let end = start + 2; end <= normalizedQuery.length; end += 1) {
+        const segment = normalizedQuery.slice(start, end);
+        if (normalizedName.includes(segment)) {
+          sharedRun = Math.max(sharedRun, segment.length);
+        }
+      }
+    }
+    return minLength > 0 && sharedRun / minLength >= 0.45 ? 45 : 0;
+  }
+
+  function chooseBestToiletPlaceResult(results, stop, query) {
+    const stopCoordinates = getStopCoordinateForToiletSearch(stop);
+    if (!stopCoordinates || !Array.isArray(results)) return null;
+
+    const candidates = results
+      .map((place) => {
+        const coordinates = getPlaceResultCoordinate(place);
+        if (!coordinates) return null;
+        const distance = measureDistanceMeters(stopCoordinates, coordinates);
+        if (distance > MAX_TRUSTED_TOILET_DISTANCE_METERS) return null;
+        const name = String(place.name || '').trim();
+        const nameScore = getToiletNameMatchScore(query, name);
+        const toiletNameScore = isLikelyToiletText(name) ? 20 : 0;
+        const distanceScore = Math.max(0, 40 - Math.round(distance / 15));
+        const score = nameScore + toiletNameScore + distanceScore;
+        return { place, coordinates, distance, score, nameScore, toiletNameScore };
+      })
+      .filter(Boolean)
+      .filter((candidate) => candidate.nameScore >= 45 || candidate.toiletNameScore > 0)
+      .sort((a, b) => b.score - a.score || a.distance - b.distance);
+
+    return candidates[0] || null;
+  }
+
+  async function searchPlacesForToilet(stop, query, service) {
+    const stopCoordinates = getStopCoordinateForToiletSearch(stop);
+    if (!stop || !query || !service || !stopCoordinates) return [];
+
+    const nearbyResults = await new Promise((resolve) => {
+      service.nearbySearch({
+        location: new google.maps.LatLng(stopCoordinates.lat, stopCoordinates.lng),
+        radius: TOILET_COORDINATE_SEARCH_RADIUS_METERS,
+        keyword: query
+      }, (res, status) => {
+        const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+        resolve(status === okStatus && Array.isArray(res) ? res : []);
+      });
+    });
+
+    if (nearbyResults.length) return nearbyResults;
+
+    return new Promise((resolve) => {
+      service.textSearch({
+        query,
+        location: new google.maps.LatLng(stopCoordinates.lat, stopCoordinates.lng),
+        radius: TOILET_COORDINATE_SEARCH_RADIUS_METERS
+      }, (res, status) => {
+        const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+        resolve(status === okStatus && Array.isArray(res) ? res : []);
+      });
+    });
   }
 
   function clearRenderedMapMarkers() {
@@ -7268,66 +7413,75 @@ body.prototype-mode .prototype-id-chip {
   }
 
   async function resolveToiletCoordinatesNearStop(stop, toilet, service) {
-    if (!stop || !toilet || !service) return null;
-    if (Number.isFinite(toilet.lat) && Number.isFinite(toilet.lng)) return toilet;
-    if (!Number.isFinite(stop.lat) || !Number.isFinite(stop.lng)) return null;
+    if (!stop || !toilet) return null;
+    if (!getStopCoordinateForToiletSearch(stop)) return null;
+
+    const existingCoordinates = normalizeToiletCoordinate(toilet);
+    if (existingCoordinates && isTrustedToiletCoordinate(stop, existingCoordinates)) {
+      return {
+        ...toilet,
+        lat: existingCoordinates.lat,
+        lng: existingCoordinates.lng,
+        coordinateSource: toilet.coordinateSource || 'existing_verified',
+        distanceMeters: Math.round(getToiletDistanceFromStop(stop, existingCoordinates))
+      };
+    }
 
     const query = String(toilet.name || toilet.title || toilet.label || '').trim();
-    if (!query) return null;
+    if (!query || !service) return null;
 
-    const results = await new Promise((resolve) => {
+    const results = await searchPlacesForToilet(stop, query, service);
+    const bestMatch = chooseBestToiletPlaceResult(results, stop, query);
+    if (!bestMatch) return null;
+
+    return {
+      name: bestMatch.place.name || query,
+      lat: bestMatch.coordinates.lat,
+      lng: bestMatch.coordinates.lng,
+      vicinity: bestMatch.place.vicinity || toilet.vicinity || '',
+      coordinateSource: existingCoordinates ? 'places_rechecked_bad_existing' : 'places_resolved',
+      distanceMeters: Math.round(bestMatch.distance)
+    };
+  }
+
+  async function fetchFallbackToiletsNearStop(stop, service) {
+    const stopCoordinates = getStopCoordinateForToiletSearch(stop);
+    if (!service || !stopCoordinates) return [];
+
+    const fallbackResults = await new Promise((resolve) => {
       service.nearbySearch({
-        location: new google.maps.LatLng(stop.lat, stop.lng),
-        radius: 1200,
-        keyword: query
+        location: new google.maps.LatLng(stopCoordinates.lat, stopCoordinates.lng),
+        radius: MAX_TRUSTED_TOILET_DISTANCE_METERS,
+        keyword: '廁所'
       }, (res, status) => {
         const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
-        if (status !== okStatus || !Array.isArray(res) || !res.length) {
-          return resolve([]);
-        }
-        resolve(res);
+        resolve(status === okStatus && Array.isArray(res) ? res : []);
       });
     });
 
-    if (!results.length) {
-      const fallback = await new Promise((resolve) => {
-        service.textSearch({
-          query,
-          location: new google.maps.LatLng(stop.lat, stop.lng),
-          radius: 1200
-        }, (res, status) => {
-          const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
-          if (status !== okStatus || !Array.isArray(res) || !res.length) {
-            return resolve([]);
-          }
-          resolve(res);
-        });
-      });
-      results.push(...fallback);
-    }
-
-    if (!results.length) return null;
-
-    const normalizedQuery = normalizeText(query);
-    const exactMatch = results.find((place) => {
-      const placeName = normalizeText(place && place.name);
-      return placeName === normalizedQuery || placeName.includes(normalizedQuery) || normalizedQuery.includes(placeName);
-    }) || results[0];
-
-    if (!exactMatch || !exactMatch.geometry || !exactMatch.geometry.location) return null;
-
-    return {
-      name: exactMatch.name || query,
-      lat: exactMatch.geometry.location.lat(),
-      lng: exactMatch.geometry.location.lng(),
-      vicinity: exactMatch.vicinity || toilet.vicinity || ''
-    };
+    return fallbackResults
+      .map((place) => {
+        const coordinates = getPlaceResultCoordinate(place);
+        if (!coordinates) return null;
+        const distance = getToiletDistanceFromStop(stop, coordinates);
+        if (distance > MAX_TRUSTED_TOILET_DISTANCE_METERS) return null;
+        return {
+          name: place.name || '廁所',
+          lat: coordinates.lat,
+          lng: coordinates.lng,
+          vicinity: place.vicinity || '',
+          coordinateSource: 'places_fallback',
+          distanceMeters: Math.round(distance)
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 3);
   }
 
   function getAllToiletsFromStops() {
     return replanStops
       .map((stop, stopIndex) => ({ stop, stopIndex }))
-      .filter(item => item.stop && (Number.isFinite(item.stop.lat) && Number.isFinite(item.stop.lng) || Array.isArray(item.stop.nearbyToiletLocations)));
+      .filter(item => item.stop && (getStopCoordinateForToiletSearch(item.stop) || Array.isArray(item.stop.nearbyToiletLocations)));
   }
 
   async function renderAllToiletMarkers() {
@@ -7351,32 +7505,9 @@ body.prototype-mode .prototype-id-chip {
         if (resolvedToilet) toilets.push(resolvedToilet);
       }
 
-      // 若 Firebase 內只有名稱或完全沒有可用廁所資料，則用「廁所」作為最後兜底搜尋
-      if (toilets.length === 0 && service && Number.isFinite(stop.lat) && Number.isFinite(stop.lng)) {
-        const fallbackResults = await new Promise((resolve) => {
-          service.nearbySearch({
-            location: new google.maps.LatLng(stop.lat, stop.lng),
-            radius: 500,
-            keyword: '廁所'
-          }, (res, status) => {
-            const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
-            if (status === okStatus && Array.isArray(res)) {
-              resolve(res);
-            } else {
-              resolve([]);
-            }
-          });
-        });
-
-        fallbackResults.slice(0, 3).forEach((place) => {
-          if (!place || !place.geometry || !place.geometry.location) return;
-          toilets.push({
-            name: place.name || '廁所',
-            lat: place.geometry.location.lat(),
-            lng: place.geometry.location.lng(),
-            vicinity: place.vicinity || ''
-          });
-        });
+      // 若 Firebase 內只有名稱或舊座標不可信，則用「廁所」作為最後兜底搜尋。
+      if (toilets.length === 0) {
+        toilets.push(...await fetchFallbackToiletsNearStop(stop, service));
       }
 
       if (toilets.length > 0) {
@@ -7437,33 +7568,25 @@ body.prototype-mode .prototype-id-chip {
     const service = getPlacesService();
 
     for (const { stop, stopIndex } of stopsToRender) {
-      let toilets = getStopToiletLocations(stop).filter((item) => Number.isFinite(item.lat) && Number.isFinite(item.lng));
+      const rawToilets = getStopToiletLocations(stop).slice(0, 3);
+      let toilets = [];
+
+      for (const toilet of rawToilets) {
+        const resolvedToilet = await resolveToiletCoordinatesNearStop(stop, toilet, service);
+        if (resolvedToilet) toilets.push(resolvedToilet);
+      }
       
-      // 若無帶有座標的廁所資料，則使用 Google Places API 動態搜尋附近廁所
-      if (toilets.length === 0 && service && Number.isFinite(stop.lat) && Number.isFinite(stop.lng)) {
-        toilets = await new Promise((resolve) => {
-          service.nearbySearch({
-            location: new google.maps.LatLng(stop.lat, stop.lng),
-            radius: 500,
-            keyword: '廁所'
-          }, (res, status) => {
-            const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
-            if (status === okStatus && Array.isArray(res)) {
-              resolve(res.map(p => ({
-                name: p.name,
-                lat: p.geometry.location.lat(),
-                lng: p.geometry.location.lng()
-              })));
-            } else {
-              resolve([]);
-            }
-          });
-        });
-        // 將動態搜尋到的廁所存回 stop，讓左側列表若重新渲染時也能顯示
+      // 若無可信座標，則使用 Google Places API 動態搜尋附近廁所。
+      if (toilets.length === 0) {
+        toilets = await fetchFallbackToiletsNearStop(stop, service);
+        // 將動態搜尋到的廁所存回 stop；避免在 marker 渲染途中重跑整個列表造成競態清除。
         if (toilets.length > 0) {
           stop.nearbyToiletLocations = toilets;
-          renderItineraryDisplay();
         }
+      }
+
+      if (toilets.length > 0) {
+        stop.nearbyToiletLocations = toilets.slice(0, 3);
       }
 
       toilets.slice(0, 3).forEach((toilet, index) => {

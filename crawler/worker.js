@@ -35,6 +35,7 @@ const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || LOCAL_APP_CONFIG.GOOGLE_MA
 const OPENDATA_URL = process.env.OPENDATA_SOURCE_URL || 'https://media.taiwan.net.tw/XMLReleaseALL_public/scenic_spot_C_f.json';
 const CRAWL_REGION = argv.region || argv.city || process.env.CRAWL_REGION || process.env.CRAWL_CITY || '\u53f0\u6771\u7e23';
 const TOILET_SEARCH_TERMS = ['廁所', '洗手間', '洗手間', '公廁', 'toilet', 'restroom', 'bathroom'];
+const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
 const REGION_ALIASES = {
   '\u53f0\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
   '\u81fa\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
@@ -72,6 +73,26 @@ async function geocodeAddress(address) {
   return null;
 }
 
+function measureDistanceMeters(origin, target) {
+  if (!origin || !target) return Number.POSITIVE_INFINITY;
+  const originLat = Number(origin.lat);
+  const originLng = Number(origin.lng);
+  const targetLat = Number(target.lat);
+  const targetLng = Number(target.lng);
+  if (![originLat, originLng, targetLat, targetLng].every(Number.isFinite)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const toRadians = (degrees) => degrees * Math.PI / 180;
+  const earthRadius = 6371000;
+  const dLat = toRadians(targetLat - originLat);
+  const dLng = toRadians(targetLng - originLng);
+  const lat1 = toRadians(originLat);
+  const lat2 = toRadians(targetLat);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 async function fetchNearbyToilets(lat, lng) {
   if (!GOOGLE_KEY || !lat || !lng) return [];
   try {
@@ -79,7 +100,7 @@ async function fetchNearbyToilets(lat, lng) {
     const seenKeys = new Set();
 
     for (const term of TOILET_SEARCH_TERMS) {
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=1500&keyword=${encodeURIComponent(term)}&key=${GOOGLE_KEY}`;
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${MAX_NEARBY_TOILET_DISTANCE_METERS}&keyword=${encodeURIComponent(term)}&key=${GOOGLE_KEY}`;
       const r = await axios.get(url, { timeout: 15000 });
       const results = Array.isArray(r.data && r.data.results) ? r.data.results : [];
 
@@ -87,13 +108,18 @@ async function fetchNearbyToilets(lat, lng) {
         if (!place || !place.geometry || !place.geometry.location) continue;
         const name = String(place.name || '').trim();
         const vicinity = String(place.vicinity || '').trim();
+        const toiletLocation = {
+          lat: place.geometry.location.lat,
+          lng: place.geometry.location.lng
+        };
+        if (measureDistanceMeters({ lat, lng }, toiletLocation) > MAX_NEARBY_TOILET_DISTANCE_METERS) continue;
         const key = `${normalizeText(name)}|${normalizeText(vicinity)}|${place.place_id || ''}`;
         if (!name || seenKeys.has(key)) continue;
         seenKeys.add(key);
         merged.push({
           name,
-          lat: place.geometry.location.lat,
-          lng: place.geometry.location.lng,
+          lat: toiletLocation.lat,
+          lng: toiletLocation.lng,
           vicinity
         });
         if (merged.length >= 3) break;
@@ -329,6 +355,7 @@ async function buildImportedScenicPoint(spot) {
     official_opendata_name: spot.name,
     official_opendata_match: 'import',
     nearbyToiletLocations: nearbyToiletLocations,
+    toiletCoordinatesVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     last_crawled: admin.firestore.FieldValue.serverTimestamp(),
     needsCrawl: false
@@ -429,9 +456,12 @@ async function processBatch(db) {
     // Fetch nearby toilets if we have coordinates
     if (lat && lng && GOOGLE_KEY) {
       const nearbyToilets = await fetchNearbyToilets(lat, lng);
+      update.nearbyToiletLocations = nearbyToilets;
+      update.toiletCoordinatesVerifiedAt = admin.firestore.FieldValue.serverTimestamp();
       if (nearbyToilets.length > 0) {
-        update.nearbyToiletLocations = nearbyToilets;
         console.log(`Added ${nearbyToilets.length} nearby toilets for ${doc.id}`);
+      } else {
+        console.log(`Cleared nearby toilets for ${doc.id}; no verified toilets within ${MAX_NEARBY_TOILET_DISTANCE_METERS}m`);
       }
       await new Promise((r) => setTimeout(r, 250));
     }
