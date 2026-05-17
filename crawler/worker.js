@@ -270,33 +270,35 @@ function applyLocationUpdate(update, lat, lng, address) {
   if (address) update.formatted_address = address;
 }
 
-function makeDocId(spot) {
-  // Try multiple strategies to generate a valid doc ID
-  const candidates = [
-    // Strategy 1: name + city/town
-    [spot.name, spot.town || spot.city],
-    // Strategy 2: just name
-    [spot.name],
-    // Strategy 3: name + address
-    [spot.name, spot.address],
-    // Strategy 4: use id if available
-    [spot.id],
-    // Strategy 5: use all available text
-    [spot.name, spot.town, spot.city, spot.address]
-  ];
+function normalizeDocKey(text) {
+  return String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
 
-  for (const parts of candidates) {
-    const candidate = parts
-      .filter(Boolean)
-      .join('')
-      .replace(/[\/\\#?]/g, '')
-      .trim();
-    if (candidate.length > 0) {
-      return candidate;
+function makeDocId(spot) {
+  const name = String(spot.name || '').trim();
+  const region = String(spot.town || spot.city || CRAWL_REGION || '').trim();
+
+  if (!name) {
+    // Fallback: generate from coordinates
+    if (spot.lat && spot.lng) {
+      return `spot_${spot.lat.toFixed(4)}_${spot.lng.toFixed(4)}`;
     }
+    return null;
   }
 
-  // Fallback: generate from coordinates
+  // Strip trailing region from name (matches buildScenicPointKey in ai-travel-planner-v8.html)
+  let baseName = name;
+  if (region && baseName.endsWith(region) && baseName.length > region.length) {
+    baseName = baseName.slice(0, -region.length).trim();
+  }
+
+  const key = normalizeDocKey(baseName + region);
+  if (key) return key;
+
+  // Fallback: coordinates
   if (spot.lat && spot.lng) {
     return `spot_${spot.lat.toFixed(4)}_${spot.lng.toFixed(4)}`;
   }

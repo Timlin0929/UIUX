@@ -2356,7 +2356,22 @@ async function saveMicroTripToFirebase(trip) {
 }
 
 function sanitizeFirebaseDocId(text) {
-  return (text || '').toString().trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return (text || '').toString().trim().toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function normalizePoiName(name, destination) {
+  if (!name) return '';
+  let normalized = String(name).trim();
+  if (destination) {
+    const dest = String(destination).trim();
+    // Strip trailing destination city that AI sometimes appends (e.g. "鐵花村台東" → "鐵花村")
+    if (normalized.endsWith(dest) && normalized.length > dest.length) {
+      normalized = normalized.slice(0, -dest.length).trim();
+    }
+  }
+  return normalized;
 }
 
 async function savePoiBusinessHoursToFirebase(stops, destination) {
@@ -2365,7 +2380,8 @@ async function savePoiBusinessHoursToFirebase(stops, destination) {
     const batch = firebaseDb.batch();
     stops.forEach(stop => {
       if (!stop || !stop.name) return;
-      const docId = sanitizeFirebaseDocId(`${destination || 'unknown'}_${stop.name}`);
+      const normalizedName = normalizePoiName(stop.name, destination);
+      const docId = sanitizeFirebaseDocId(`${destination || 'unknown'}_${normalizedName}`);
       if (!docId) return;
       const docRef = firebaseDb.collection('poi_cache').doc(docId);
       const coord = getStopCoordinate(stop);

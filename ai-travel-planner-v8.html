@@ -3245,7 +3245,14 @@ body.prototype-mode .prototype-id-chip {
   }
 
   function buildScenicPointKey(name, region = '') {
-    return normalizeText(`${name || ''}${region || ''}`);
+    const nameTrimmed = String(name || '').trim();
+    const regionTrimmed = String(region || '').trim();
+    // Strip trailing region name that AI sometimes appends to stop names (e.g. "鐵花村音樂聚落台東" with region "台東")
+    let baseName = nameTrimmed;
+    if (regionTrimmed && baseName.endsWith(regionTrimmed) && baseName.length > regionTrimmed.length) {
+      baseName = baseName.slice(0, -regionTrimmed.length).trim();
+    }
+    return normalizeText(`${baseName}${regionTrimmed}`);
   }
 
   function getScenicPointDocRef(name, region = '') {
