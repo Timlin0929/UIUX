@@ -31,11 +31,23 @@ const LIMIT = parseInt(argv.limit || process.env.CRAWL_LIMIT || '50', 10);
 const IMPORT_LIMIT = parseInt(argv.importLimit || process.env.IMPORT_LIMIT || '500', 10);
 const FETCH_LIMIT = parseInt(argv.fetchLimit || process.env.CRAWL_FETCH_LIMIT || String(LIMIT * 5), 10);
 const POI_COLLECTION = process.env.POI_COLLECTION || 'scenic_points';
-const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || LOCAL_APP_CONFIG.GOOGLE_MAPS_API_KEY || LOCAL_APP_CONFIG.GEMINI_API_KEY || null;
+const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || LOCAL_APP_CONFIG.GOOGLE_MAPS_API_KEY || null;
+if (GOOGLE_KEY) {
+  const keySource = process.env.GOOGLE_MAPS_API_KEY ? 'env GOOGLE_MAPS_API_KEY' : 'weather.env.js GOOGLE_MAPS_API_KEY';
+  console.log(`Google Maps key loaded from: ${keySource} (${GOOGLE_KEY.slice(0, 8)}...)`);
+} else {
+  console.warn('GOOGLE_MAPS_API_KEY 未設定，Google Places 廁所搜尋將略過（OSM 仍可用）');
+}
 const OPENDATA_URL = process.env.OPENDATA_SOURCE_URL || 'https://media.taiwan.net.tw/XMLReleaseALL_public/scenic_spot_C_f.json';
 const CRAWL_REGION = argv.region || argv.city || process.env.CRAWL_REGION || process.env.CRAWL_CITY || '\u53f0\u6771\u7e23';
-const TOILET_SEARCH_TERMS = ['廁所', '洗手間', '洗手間', '公廁', 'toilet', 'restroom', 'bathroom'];
 const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
+const OVERPASS_MIRRORS = (process.env.OVERPASS_API_URL
+  ? [process.env.OVERPASS_API_URL]
+  : [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+    ]);
 const REGION_ALIASES = {
   '\u53f0\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
   '\u81fa\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
@@ -93,46 +105,103 @@ function measureDistanceMeters(origin, target) {
   return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function fetchNearbyToilets(lat, lng) {
-  if (!GOOGLE_KEY || !lat || !lng) return [];
-  try {
-    const merged = [];
-    const seenKeys = new Set();
-
-    for (const term of TOILET_SEARCH_TERMS) {
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${MAX_NEARBY_TOILET_DISTANCE_METERS}&keyword=${encodeURIComponent(term)}&key=${GOOGLE_KEY}`;
-      const r = await axios.get(url, { timeout: 15000 });
-      const results = Array.isArray(r.data && r.data.results) ? r.data.results : [];
-
-      for (const place of results) {
-        if (!place || !place.geometry || !place.geometry.location) continue;
-        const name = String(place.name || '').trim();
-        const vicinity = String(place.vicinity || '').trim();
-        const toiletLocation = {
-          lat: place.geometry.location.lat,
-          lng: place.geometry.location.lng
-        };
-        if (measureDistanceMeters({ lat, lng }, toiletLocation) > MAX_NEARBY_TOILET_DISTANCE_METERS) continue;
-        const key = `${normalizeText(name)}|${normalizeText(vicinity)}|${place.place_id || ''}`;
-        if (!name || seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        merged.push({
-          name,
-          lat: toiletLocation.lat,
-          lng: toiletLocation.lng,
-          vicinity
-        });
-        if (merged.length >= 3) break;
-      }
-
-      if (merged.length >= 3) break;
+async function fetchNearbyToiletsOSM(lat, lng) {
+  const query = `[out:json][timeout:10];node["amenity"="toilets"](around:${MAX_NEARBY_TOILET_DISTANCE_METERS},${lat},${lng});out;`;
+  for (const mirror of OVERPASS_MIRRORS) {
+    try {
+      await new Promise((r) => setTimeout(r, 1000));
+      const r = await axios.get(`${mirror}?data=${encodeURIComponent(query)}`, {
+        timeout: 12000
+      });
+      const elements = Array.isArray(r.data && r.data.elements) ? r.data.elements : [];
+      const results = elements
+        .filter(el => el.lat && el.lon)
+        .map(el => ({
+          name: (el.tags && (el.tags['name:zh'] || el.tags.name)) || '公廁',
+          lat: el.lat,
+          lng: el.lon,
+          address: (el.tags && el.tags['addr:full']) || '',
+          source: 'osm',
+          confidence: 'verified'
+        }))
+        .slice(0, 3);
+      if (results.length) console.log(`OSM found ${results.length} toilets near (${lat},${lng}) via ${mirror}`);
+      return results;
+    } catch (e) {
+      console.warn(`OSM mirror ${mirror} failed:`, e.message);
     }
+  }
+  return [];
+}
 
-    return merged.slice(0, 3);
+async function fetchNearbyToiletsGoogle(lat, lng) {
+  if (!GOOGLE_KEY) return [];
+  try {
+    // 使用新版 Places API (v1)，避免 legacy nearbysearch 被拒
+    const r = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      {
+        textQuery: '公廁',
+        locationBias: {
+          circle: {
+            center: { latitude: lat, longitude: lng },
+            radius: MAX_NEARBY_TOILET_DISTANCE_METERS
+          }
+        },
+        languageCode: 'zh-TW',
+        maxResultCount: 5
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': GOOGLE_KEY,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.formattedAddress,places.id'
+        },
+        timeout: 15000
+      }
+    );
+    const places = Array.isArray(r.data && r.data.places) ? r.data.places : [];
+    const seenIds = new Set();
+    const results = [];
+    for (const place of places) {
+      if (!place.location) continue;
+      const pos = { lat: place.location.latitude, lng: place.location.longitude };
+      if (measureDistanceMeters({ lat, lng }, pos) > MAX_NEARBY_TOILET_DISTANCE_METERS) continue;
+      const id = place.id || `${pos.lat}|${pos.lng}`;
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      results.push({
+        name: (place.displayName && place.displayName.text) || '公廁',
+        lat: pos.lat,
+        lng: pos.lng,
+        address: place.formattedAddress || '',
+        source: 'google',
+        confidence: 'verified'
+      });
+      if (results.length >= 3) break;
+    }
+    return results;
   } catch (e) {
-    console.error('fetch nearby toilets error', e.message);
+    if (e.response && e.response.status === 403) {
+      console.warn('Google Places API 403：請至 Google Cloud Console 啟用「Places API (New)」，目前跳過 Google 廁所搜尋。');
+    } else {
+      console.warn('Google Places toilet fetch error:', e.message);
+    }
     return [];
   }
+}
+
+async function fetchNearbyToilets(lat, lng) {
+  if (!lat || !lng) return [];
+  // OSM 優先（免費、無需 key、台灣公廁覆蓋完整）
+  const osmResults = await fetchNearbyToiletsOSM(lat, lng);
+  if (osmResults.length >= 1) return osmResults.slice(0, 3);
+  // OSM 找不到才用 Google Maps
+  if (GOOGLE_KEY) {
+    await new Promise((r) => setTimeout(r, 250));
+    return fetchNearbyToiletsGoogle(lat, lng);
+  }
+  return [];
 }
 
 function normalizeText(value) {
