@@ -1160,7 +1160,7 @@ async function buildFirebasePoiHintBlock(wizardData) {
       poiLines.push(`景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n${toiletHint}\n`);
     });
 
-    return `從 Firebase 取得的景點資料（若符合請優先使用）：\n${poiLines.join('\n')}`;
+    return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
   } catch (error) {
     console.warn('Firebase POI 檢索失敗：', error);
     return '';
@@ -1245,6 +1245,7 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('10. 景點須考慮營業時間，且使用正式可定位名稱');
     lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
     lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點類型合理設定：觀景台/步道 30-60、海灘/公園 45-90、美食/咖啡廳 30-60、博物館/文化館 60-120、市場/夜市 45-90、廟宇/歷史景點 30-60；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
+    lines.push('13. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
     if (isLongTrip(days)) {
       lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
       lines.push('14. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
@@ -1720,6 +1721,12 @@ const DESTINATION_CENTER_MAP = {
   '苗栗': { lat: 24.560, lng: 120.821 },
   '新竹': { lat: 24.804, lng: 120.971 },
   '基隆': { lat: 25.128, lng: 121.739 },
+  '綠島': { lat: 22.666, lng: 121.494 },
+  '蘭嶼': { lat: 22.046, lng: 121.548 },
+  '小琉球': { lat: 22.341, lng: 120.372 },
+  '澎湖': { lat: 23.571, lng: 119.579 },
+  '金門': { lat: 24.432, lng: 118.317 },
+  '馬祖': { lat: 26.160, lng: 119.920 },
   '日本': { lat: 35.681, lng: 139.767 },
   '韓國': { lat: 37.566, lng: 126.978 },
   '歐洲': { lat: 48.857, lng: 2.352 }
@@ -1781,6 +1788,13 @@ function getDestinationMaxDistanceMeters(destinationText) {
   if (/日本|韓國|歐洲/.test(lookup)) return 120000;
   if (/台北|新北|桃園|台中|台南|高雄|基隆|新竹/.test(lookup)) return 40000;
   if (/台東|花蓮|宜蘭|屏東|南投|嘉義|苗栗/.test(lookup)) return 55000;
+  // 離島：地域極小，嚴格限縮半徑防止 AI 座標嚴重偏移通過驗證
+  if (/綠島/.test(lookup)) return 6000;
+  if (/蘭嶼/.test(lookup)) return 7000;
+  if (/小琉球/.test(lookup)) return 4000;
+  if (/澎湖/.test(lookup)) return 20000;
+  if (/金門/.test(lookup)) return 15000;
+  if (/馬祖/.test(lookup)) return 18000;
   return 50000;
 }
 
@@ -2198,11 +2212,89 @@ function sortStopsByNearestRoute(stops, wizardData = {}) {
   });
 }
 
+function inferStopEmoji(name, desc) {
+  const text = `${name || ''} ${desc || ''}`;
+  const rules = [
+    [/燈塔/, '🗼'],
+    [/海灘|沙灘|海水浴場/, '🏖️'],
+    [/博物館|紀念館|展覽館|美術館|文化館|史前/, '🏛️'],
+    [/植物園/, '🌿'],
+    [/公園|森林/, '🌳'],
+    [/廟|宮|寺|佛|觀音/, '⛩️'],
+    [/瀑布/, '💦'],
+    [/步道|登山|健行/, '🥾'],
+    [/溫泉/, '♨️'],
+    [/夜市|市場|老街/, '🛍️'],
+    [/餐廳|食堂|小吃|料理|美食|麵|飯/, '🍽️'],
+    [/咖啡|茶館/, '☕'],
+    [/民宿|飯店|旅館/, '🏨'],
+    [/機場/, '✈️'],
+    [/火車站|車站|鐵路/, '🚉'],
+    [/漁港|港口|碼頭/, '⚓'],
+    [/教堂|教會/, '⛪'],
+    [/湖|水庫/, '🏞️'],
+    [/牧場|草原/, '🌾'],
+    [/農場|果園/, '🌻'],
+    [/藝術|文創/, '🎨'],
+    [/音樂|表演/, '🎵'],
+    [/劇場|電影/, '🎭'],
+    [/潛水|浮潛/, '🤿'],
+    [/衝浪/, '🏄'],
+    [/自行車|腳踏車/, '🚴'],
+    [/觀景台|瞭望台|展望台/, '🔭'],
+    [/夜景/, '🌃'],
+    [/島|嶼/, '🏝️'],
+    [/橋/, '🌉'],
+    [/峽谷|峭壁|懸崖/, '🏔️'],
+    [/洞穴|石窟/, '🕳️'],
+    [/火山/, '🌋'],
+    [/山|嶺|峰/, '⛰️'],
+    [/海岸|海邊|海崖/, '🌊'],
+    [/遊客中心|服務中心/, 'ℹ️'],
+  ];
+  for (const [pattern, emoji] of rules) {
+    if (pattern.test(text)) return emoji;
+  }
+  return null;
+}
+
+function isActualEmoji(str) {
+  if (!str || typeof str !== 'string') return false;
+  const cp = str.codePointAt(0);
+  // Reject CJK ideographs (0x3400–0x9FFF) and plain ASCII — those are text, not emoji
+  if (cp >= 0x3400 && cp <= 0x9FFF) return false;
+  if (cp < 0x2000) return false;
+  return true;
+}
+
 function normalizeGeneratedStop(stop, index, fallbackTime) {
   const safeStop = stop && typeof stop === 'object' ? { ...stop } : {};
   safeStop.order = index + 1;
   safeStop.emoji = safeStop.emoji || '📍';
   safeStop.name = safeStop.name || safeStop.title || `景點 ${index + 1}`;
+
+  // If AI filled emoji field with Chinese text (e.g. "燈塔") instead of an actual emoji,
+  // strip all leading occurrences of that word from the name, then reset to '📍'
+  if (safeStop.emoji !== '📍' && !isActualEmoji(safeStop.emoji)) {
+    let nm = typeof safeStop.name === 'string' ? safeStop.name : '';
+    const fakeEmoji = safeStop.emoji;
+    while (nm.startsWith(fakeEmoji)) {
+      nm = nm.slice(fakeEmoji.length).trimStart();
+    }
+    safeStop.name = nm || `景點 ${index + 1}`;
+    safeStop.emoji = '📍';
+  }
+
+  // Strip leading actual-emoji from name (prevents double-emoji when AI embeds emoji into name field)
+  if (safeStop.emoji !== '📍' && typeof safeStop.name === 'string' && safeStop.name.startsWith(safeStop.emoji)) {
+    safeStop.name = safeStop.name.slice(safeStop.emoji.length).trimStart();
+  }
+  if (!safeStop.name) safeStop.name = `景點 ${index + 1}`;
+  // Infer a meaningful emoji from name/desc keywords when AI provided no specific emoji
+  if (safeStop.emoji === '📍') {
+    const inferred = inferStopEmoji(safeStop.name, safeStop.desc || safeStop.description);
+    if (inferred) safeStop.emoji = inferred;
+  }
   safeStop.time = normalizeClockInput(safeStop.time, fallbackTime);
   safeStop.desc = safeStop.desc || safeStop.description || '依照你的偏好安排的行程停留點。';
   safeStop.duration = Math.max(10, Math.min(180, Number(safeStop.duration) || 30));
@@ -2318,13 +2410,52 @@ function injectEndpointStops(stops, wizardData = {}) {
   return result;
 }
 
+async function fetchCoordinateFromGooglePlaces(name, destination) {
+  const key = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.GOOGLE_MAPS_API_KEY;
+  if (!key || !name) return null;
+  try {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'places.location,places.displayName'
+      },
+      body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 })
+    });
+    const data = await res.json();
+    const place = data.places && data.places[0];
+    if (place && place.location) {
+      return { lat: place.location.latitude, lng: place.location.longitude, source: 'google_places' };
+    }
+  } catch (e) { /* silent */ }
+  return null;
+}
+
+async function enrichMissingCoordinates(stops, destinationText) {
+  if (!Array.isArray(stops) || !destinationText) return stops;
+  await Promise.all(stops.map(async (stop) => {
+    if (!stop || typeof stop !== 'object' || getStopCoordinate(stop)) return;
+    const name = stop.name || stop.title;
+    if (!name) return;
+    const coord = await fetchCoordinateFromGooglePlaces(name, destinationText);
+    if (coord) {
+      stop.lat = coord.lat;
+      stop.lng = coord.lng;
+      stop.coordinateSource = coord.source;
+    }
+  }));
+  return stops;
+}
+
 async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const sourceStops = Array.isArray(stops) ? stops.filter(Boolean) : [];
   if (!sourceStops.length) return [];
   const destination = wizardData.dest || wizardData.destCustom || wizardData.region || '';
   const poiCache = await fetchDestinationPoiCache(destination);
   const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
-  const geographicallySorted = sortStopsByNearestRoute(sanitizedStops, wizardData);
+  const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
+  const geographicallySorted = sortStopsByNearestRoute(enrichedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops);
   const defaultHub = getDefaultTransitHub(destination);
@@ -2366,9 +2497,18 @@ function normalizePoiName(name, destination) {
   let normalized = String(name).trim();
   if (destination) {
     const dest = String(destination).trim();
-    // Strip trailing destination city that AI sometimes appends (e.g. "鐵花村台東" → "鐵花村")
+    // Strip exact destination suffix (e.g. "鐵花村台東" → "鐵花村")
     if (normalized.endsWith(dest) && normalized.length > dest.length) {
       normalized = normalized.slice(0, -dest.length).trim();
+    } else {
+      // Strip destination + admin suffix variant (e.g. "綠島燈塔綠島鄉" with dest="綠島" → "綠島燈塔")
+      for (const suffix of ['縣', '市', '鄉', '鎮', '區', '村']) {
+        const variant = dest + suffix;
+        if (normalized.endsWith(variant) && normalized.length > variant.length) {
+          normalized = normalized.slice(0, -variant.length).trim();
+          break;
+        }
+      }
     }
   }
   return normalized;
@@ -2385,8 +2525,11 @@ async function savePoiBusinessHoursToFirebase(stops, destination) {
       if (!docId) return;
       const docRef = firebaseDb.collection('poi_cache').doc(docId);
       const coord = getStopCoordinate(stop);
+      // Only persist coordinates verified by Google Places API.
+      // firebase_cache is excluded: existing records may already contain bad AI-generated coords.
+      const isTrustedCoord = coord && stop.coordinateSource === 'google_places';
       const payload = {
-        name: stop.name,
+        name: normalizedName || stop.name,
         emoji: stop.emoji || '📍',
         destination: destination || '',
         businessHours: stop.businessHours || '',
@@ -2398,7 +2541,7 @@ async function savePoiBusinessHoursToFirebase(stops, destination) {
           : [],
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       };
-      if (coord) {
+      if (isTrustedCoord) {
         payload.lat = coord.lat;
         payload.lng = coord.lng;
       }

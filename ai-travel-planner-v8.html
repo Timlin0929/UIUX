@@ -3307,9 +3307,15 @@ body.prototype-mode .prototype-id-chip {
     }
 
     const key = buildScenicPointKey(name, region);
+    // Strip trailing region suffix from stored name (same logic as buildScenicPointKey)
+    const regionTrimmed = String(region || '').trim();
+    let cleanName = name;
+    if (regionTrimmed && cleanName.endsWith(regionTrimmed) && cleanName.length > regionTrimmed.length) {
+      cleanName = cleanName.slice(0, -regionTrimmed.length).trim();
+    }
     const record = {
       id: key,
-      name,
+      name: cleanName,
       region: region || '',
       tripTitle: title || '',
       emoji: stop?.emoji || '📍',
@@ -4069,12 +4075,17 @@ body.prototype-mode .prototype-id-chip {
               const normalizedTransitMode = normalizeTransitMode(s.transitMode);
               const persistedTransitMin = normalizeTransitMinutesValue(s.transitMin);
 
-              const _pos = safeLatLng(resolvedPosition);
-              mapPinLocations[assignedPinId] = {
-                lat: _pos.lat,
-                lng: _pos.lng,
-                title: `${s.emoji || scenicRecord?.emoji || '📍'} ${s.name || scenicRecord?.name || s.desc || '景點'}`
-              };
+              // Only place a pin when the stop has a real resolved position.
+              // safeLatLng falls back to the trip centre when pos is null,
+              // which would create a misleading marker at the wrong location.
+              const _pos = resolvedPosition ? safeLatLng(resolvedPosition) : null;
+              if (_pos) {
+                mapPinLocations[assignedPinId] = {
+                  lat: _pos.lat,
+                  lng: _pos.lng,
+                  title: `${s.emoji || scenicRecord?.emoji || '📍'} ${s.name || scenicRecord?.name || s.desc || '景點'}`
+                };
+              }
 
               if (typeof pinData !== 'undefined') {
                 pinData[assignedPinId] = {
@@ -7755,6 +7766,7 @@ body.prototype-mode .prototype-id-chip {
         lat: _pos.lat,
         lng: _pos.lng,
         title: `${stop.emoji || '📍'} ${stop.name || '景點'}`,
+        name: stop.name || '景點',
         stopIndex: index
       };
     }
@@ -7766,6 +7778,7 @@ body.prototype-mode .prototype-id-chip {
         lat: _pos.lat,
         lng: _pos.lng,
         title: `${stop.emoji || (fallbackLocation.title && fallbackLocation.title.split(' ')[0]) || '📍'} ${stop.name || fallbackLocation.title}`,
+        name: stop.name || fallbackLocation.title || '景點',
         stopIndex: index
       };
     }
@@ -7894,7 +7907,7 @@ body.prototype-mode .prototype-id-chip {
     const stages = routeStageCache.filter(Boolean);
     const activeStage = stages.find((stage) => stage.index === activeRouteStage);
     summary.textContent = activeStage
-      ? `目前聚焦第 ${activeStage.index + 1} 段 · ${activeStage.origin.title.split(' ')[1] || activeStage.origin.title} → ${activeStage.destination.title.split(' ')[1] || activeStage.destination.title}`
+      ? `目前聚焦第 ${activeStage.index + 1} 段 · ${activeStage.origin.name || activeStage.origin.title} → ${activeStage.destination.name || activeStage.destination.title}`
       : `${stages.length} 段路徑 · 點開可收合查看`;
 
     list.innerHTML = stages.length ? stages.map((stage) => `
@@ -7902,7 +7915,7 @@ body.prototype-mode .prototype-id-chip {
         <div class="mobile-route-item-main">
           <div class="mobile-route-item-head">
             <div class="mobile-route-item-time">${escapeHtml(getRouteStageTimeText(stage) || '時間計算中')}</div>
-            <div class="mobile-route-item-name">階段 ${stage.index + 1}：${escapeHtml(stage.origin.title.split(' ')[1] || stage.origin.title)} → ${escapeHtml(stage.destination.title.split(' ')[1] || stage.destination.title)}</div>
+            <div class="mobile-route-item-name">階段 ${stage.index + 1}：${escapeHtml(stage.origin.name || stage.origin.title)} → ${escapeHtml(stage.destination.name || stage.destination.title)}</div>
           </div>
           <div class="mobile-route-item-meta">${escapeHtml(getTransitModeMeta(stage.mode).icon)} ${escapeHtml(getTransitModeMeta(stage.mode).label)} · ${escapeHtml(stage.distance || '距離計算中')} · ${escapeHtml(getRouteStageTimeText(stage) || '路線時間計算中')}</div>
         </div>
@@ -8108,7 +8121,7 @@ body.prototype-mode .prototype-id-chip {
 
             stageDiv.innerHTML = `
               <div style="font-weight: 800; font-size: 14px; color: var(--ink); margin-bottom: 4px;">
-                階段 ${i + 1}：${origin.title.split(' ')[1] || origin.title} ➔ ${destination.title.split(' ')[1] || destination.title}
+                階段 ${i + 1}：${origin.name || origin.title} ➔ ${destination.name || destination.title}
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'} · 距離：${legEstimate.distanceText} · 預估 ${legEstimate.durationText}
