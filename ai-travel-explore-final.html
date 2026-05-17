@@ -1244,7 +1244,7 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('9. 廁所名稱與座標必須互相對應；若 Firebase 候選、data.gov.tw 公廁資料、Google Maps/Places 名稱或地址互相矛盾，優先使用可定位到實際廁所設施且距離景點最近的資料，無法確認則不要輸出座標');
     lines.push('10. 景點須考慮營業時間，且使用正式可定位名稱');
     lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
-    lines.push('12. 景點座標、景點建議停留時間與廁所座標，優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集，以及可交叉驗證的地圖資料');
+    lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點類型合理設定：觀景台/步道 30-60、海灘/公園 45-90、美食/咖啡廳 30-60、博物館/文化館 60-120、市場/夜市 45-90、廟宇/歷史景點 30-60；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
     if (isLongTrip(days)) {
       lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
       lines.push('14. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
@@ -1282,7 +1282,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
     ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
-    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration,businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration(必填·正整數·分鐘，例觀景/步道填60、美食/咖啡廳填45、博物館/文化館填90、海灘/公園填60),businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
     ? `\n\n${firebaseHint}`
@@ -2852,11 +2852,7 @@ function renderWizard() {
   } else if (wizStep===1) {
     const days = wizData.days || '1天';
     const stopCount = clampPreviewStopsByDuration(days);
-    const maxSlotMinutes = getMaxSlotMinutes(days, stopCount);
-    const slotOptions = getSlotMinuteOptions(maxSlotMinutes);
-    let previewSlot = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || '平衡');
-    if (previewSlot > maxSlotMinutes) previewSlot = maxSlotMinutes;
-    wizData.slotMinutes = previewSlot;
+    wizData.slotMinutes = getSafeSlotMinutes(days, wizData.pace || '平衡');
 
     body.innerHTML = `<h3 class="wizard-block-title">📅 時間與節奏</h3>
       <p class="wizard-block-help">微旅行的時間長度會決定推薦景點的距離和密度</p>
@@ -2879,14 +2875,9 @@ function renderWizard() {
         </select>
       </div>
       <div class="wizard-field">
-        <label>時間設定</label>
-        <div class="wizard-time-grid">
-          <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
-          <select id="wizSlotMinutes" onchange="updateWizardSlotMinutes(this.value)">
-            ${slotOptions.map(min=>`<option value="${min}" ${previewSlot===min?'selected':''}>每站最多間格 ${min} 分鐘</option>`).join('')}
-          </select>
-        </div>
-        <p style="margin-top:8px;font-size:12px;color:#5f6876;">每站間格上限：${maxSlotMinutes} 分鐘</p>
+        <label>出發時間</label>
+        <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
+        <p style="margin-top:8px;font-size:12px;color:#5f6876;">行程將依「${wizData.pace||'平衡'}」節奏自動計算每站間距</p>
       </div>
       ${(()=>{ const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
         const startHint = autoHub ? `留空自動設為「${autoHub}」` : '例：台東火車站、民宿名稱、停車場入口';
@@ -2973,10 +2964,6 @@ function getMaxSlotMinutes(days, stopCount) {
   return Math.max(15, Math.floor(durationMinutes / (stopCount - 1)));
 }
 
-function getSlotMinuteOptions(maxMinutes) {
-  const presets = [15, 20, 30, 45, 60];
-  return presets.filter((min) => min <= maxMinutes);
-}
 
 function doesScheduleFitDuration(days, slotMinutes) {
   const stopCount = clampPreviewStopsByDuration(days);
@@ -2985,62 +2972,39 @@ function doesScheduleFitDuration(days, slotMinutes) {
   return requiredMinutes <= durationMinutes;
 }
 
-function getSafeSlotMinutes(days, requestedSlotMinutes) {
-  const stopCount = clampPreviewStopsByDuration(days);
-  const maxSlotMinutes = getMaxSlotMinutes(days, stopCount);
-  const availableOptions = getSlotMinuteOptions(maxSlotMinutes);
-  const requested = Number(requestedSlotMinutes) || 0;
-  if (requested && requested <= maxSlotMinutes) return requested;
-  return availableOptions[availableOptions.length - 1] || 15;
+function getSafeSlotMinutes(days, pace) {
+  const stopCount = clampPreviewStopsByDuration(days || '1天');
+  const maxSlotMinutes = getMaxSlotMinutes(days || '1天', stopCount);
+  const defaultSlot = getDefaultSlotMinutes(pace || '平衡');
+  return Math.min(defaultSlot, maxSlotMinutes);
 }
 
 function updateWizardDays(value) {
-  const nextSlot = getSafeSlotMinutes(value, wizData.slotMinutes || getDefaultSlotMinutes(wizData.pace || 'balanced'));
-  if (!doesScheduleFitDuration(value, nextSlot)) return;
   wizData.days = value;
-  wizData.slotMinutes = nextSlot;
+  wizData.slotMinutes = getSafeSlotMinutes(value, wizData.pace || '平衡');
   scheduleWizardPreviewRequest('step2-days');
   renderWizard();
 }
 
 function updateWizardPace(value) {
   wizData.pace = value;
-  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', wizData.slotMinutes || getDefaultSlotMinutes(value));
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', value);
   scheduleWizardPreviewRequest('step2-pace');
   renderWizard();
-}
-
-function updateWizardSlotMinutes(value) {
-  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', Number(value) || 0);
-  renderFlowPreview();
-  syncWizardTimeOptionAvailability();
-  scheduleWizardPreviewRequest('step2-slot');
 }
 
 function syncWizardTimeOptionAvailability() {
   if (wizStep !== 1) return;
   const daysSelect = document.getElementById('wizDays');
-  const slotSelect = document.getElementById('wizSlotMinutes');
-  if (!daysSelect || !slotSelect) return;
+  if (!daysSelect) return;
 
-  const currentDays = wizData.days || daysSelect.value || '';
-  const currentSlot = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || 'balanced');
+  const currentSlot = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || '平衡');
   Array.from(daysSelect.options).forEach((option) => {
     const fits = doesScheduleFitDuration(option.value, currentSlot);
     option.disabled = !fits;
     option.hidden = !fits;
     option.textContent = option.value;
   });
-
-  const maxSlotMinutes = getMaxSlotMinutes(currentDays, clampPreviewStopsByDuration(currentDays));
-  Array.from(slotSelect.options).forEach((option) => {
-    const minutes = Number(option.value) || 0;
-    const fits = minutes <= maxSlotMinutes;
-    option.disabled = !fits;
-    option.hidden = !fits;
-    option.textContent = option.textContent;
-  });
-  slotSelect.value = String(wizData.slotMinutes);
 }
 
 function getDefaultSlotMinutes(pace) {
@@ -3195,7 +3159,7 @@ function renderFlowPreview() {
   const startLocSummary = wizData.startLocation ? `出發：${wizData.startLocation}` : '';
   const endLocSummary = wizData.endLocation ? `結束：${wizData.endLocation}` : '';
   const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
-  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（每站最多間格 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
+  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
 }
 
 function onDestInput(val) {

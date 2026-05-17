@@ -5476,7 +5476,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
-                <div class="spot-tags">${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0 ? `
                 <div class="nearby-toilets-row">
                   <span class="nearby-toilets-label">附近廁所</span>
