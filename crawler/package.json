@@ -1,0 +1,20 @@
+{
+  "name": "poi-crawler",
+  "version": "0.1.0",
+  "description": "Background worker to enrich scenic_points (Firestore) with coordinates and metadata",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js",
+    "dry": "node worker.js --dry-run",
+    "import": "node worker.js --import",
+    "import:dry": "node worker.js --import --dry-run"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.4.0",
+    "firebase": "^12.13.0",
+    "firebase-admin": "^11.10.0",
+    "minimist": "^1.2.8"
+  }
+}

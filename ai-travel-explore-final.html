@@ -1,0 +1,3258 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WanderAI — 找點樂子</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="weather.env.js"></script>
+<style>
+:root{
+  --bg:#f7f5f0;--surface:#fff;--surface2:#f0ede6;
+  --ink:#1a1814;--ink2:#5a5750;--ink3:#9a9590;
+  --accent:#2a6b5e;--accent-dark:#1f5448;--accent-light:#e8f3f0;
+  --accent2:#e8733a;--accent2-light:#fdf0e8;--accent2-dark:#c45c28;
+  --gold:#c9a227;--gold-light:#f5e8c0;
+  --red:#d94040;--red-light:#fdeaea;
+  --border:#e2ddd6;--radius:14px;
+  --shadow:0 2px 16px rgba(26,24,20,.07);
+  --shadow-lg:0 8px 40px rgba(26,24,20,.14);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.7;min-height:100vh;}
+
+/* ─── TOPBAR ─── */
+.topbar{position:sticky;top:0;z-index:80;background:rgba(247,245,240,.94);backdrop-filter:blur(14px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 28px;height:60px;}
+.topbar-logo{font-family:'DM Serif Display',serif;font-size:22px;color:var(--accent);letter-spacing:-.5px;white-space:nowrap;cursor:pointer;}
+.topbar-nav{display:flex;gap:2px;}
+.topbar-nav a{padding:6px 13px;border-radius:8px;font-size:14px;color:var(--ink2);text-decoration:none;transition:all .15s;white-space:nowrap;}
+.topbar-nav a:hover{background:var(--accent-light);color:var(--accent);}
+.topbar-nav a.active{background:var(--accent-light);color:var(--accent);font-weight:500;}
+.topbar-search{flex:1;max-width:320px;margin-left:auto;position:relative;}
+.topbar-search input{width:100%;padding:8px 14px 8px 36px;border:1.5px solid var(--border);border-radius:24px;font-size:14px;font-family:inherit;background:var(--surface);color:var(--ink);outline:none;transition:border-color .2s;}
+.topbar-search input:focus{border-color:var(--accent);}
+.search-icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--ink3);pointer-events:none;}
+.topbar-new-btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;transition:background .2s;white-space:nowrap;display:flex;align-items:center;gap:6px;}
+.topbar-new-btn:hover{background:var(--accent-dark);}
+.topbar-new-btn.secondary{background:var(--surface);color:var(--ink);border:1px solid var(--border);}
+.topbar-new-btn.secondary:hover{background:var(--surface2);}
+
+/* user menu */
+.user-menu-wrap{position:relative;}
+.user-avatar-btn{width:36px;height:36px;border-radius:50%;border:2px solid var(--accent-light);background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;transition:border-color .2s;}
+.user-avatar-btn:hover{border-color:var(--accent);}
+.user-dropdown{position:absolute;top:calc(100% + 8px);right:0;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-lg);min-width:200px;padding:8px;opacity:0;pointer-events:none;transform:translateY(-6px);transition:all .2s;z-index:200;}
+.user-dropdown.open{opacity:1;pointer-events:all;transform:translateY(0);}
+.user-dropdown-header{padding:10px 12px 12px;border-bottom:1px solid var(--border);margin-bottom:6px;}
+.user-dropdown-name{font-weight:500;font-size:14px;}
+.user-dropdown-email{font-size:12px;color:var(--ink3);}
+.user-dd-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;font-size:14px;color:var(--ink2);cursor:pointer;transition:background .15s;}
+.user-dd-item:hover{background:var(--accent-light);color:var(--accent);}
+.user-dd-sep{height:1px;background:var(--border);margin:6px 0;}
+.user-dd-item.danger{color:var(--red);}
+.user-dd-item.danger:hover{background:var(--red-light);}
+
+/* login prompt */
+.login-prompt-btn{padding:7px 16px;border-radius:8px;border:1.5px solid var(--accent);background:transparent;color:var(--accent);font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;transition:all .2s;}
+.login-prompt-btn:hover{background:var(--accent);color:#fff;}
+
+/* ─── HERO STRIP ─── */
+.hero-strip{background:var(--accent);padding:36px 32px 30px;display:flex;align-items:center;justify-content:space-between;gap:24px;}
+.hero-strip-text h1{font-family:'DM Serif Display',serif;font-size:clamp(22px,3vw,34px);color:#fff;line-height:1.2;margin-bottom:8px;}
+.hero-strip-text p{font-size:14px;color:rgba(255,255,255,.8);max-width:460px;line-height:1.6;}
+.hero-btns{display:flex;gap:10px;margin-top:18px;}
+.hero-btn-primary{padding:11px 22px;background:#fff;color:var(--accent);border:none;border-radius:10px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:600;transition:all .2s;}
+.hero-btn-primary:hover{background:var(--accent-light);}
+.hero-btn-secondary{padding:11px 22px;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:10px;font-size:14px;font-family:inherit;cursor:pointer;transition:all .2s;}
+.hero-btn-secondary:hover{background:rgba(255,255,255,.25);}
+.hero-stats{display:flex;gap:28px;flex-shrink:0;}
+.hstat{text-align:center;}
+.hstat-num{font-family:'DM Serif Display',serif;font-size:30px;color:#fff;line-height:1;}
+.hstat-label{font-size:12px;color:rgba(255,255,255,.7);margin-top:3px;}
+
+/* ─── FILTER BAR ─── */
+.filter-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 28px;display:flex;align-items:center;overflow-x:auto;gap:0;}
+.filter-tab{padding:14px 18px;font-size:14px;color:var(--ink2);cursor:pointer;border-bottom:2.5px solid transparent;white-space:nowrap;transition:all .15s;font-weight:500;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit;}
+.filter-tab:hover{color:var(--accent);}
+.filter-tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+.filter-sep{width:1px;height:20px;background:var(--border);margin:0 2px;flex-shrink:0;}
+.sort-wrap{margin-left:auto;display:flex;align-items:center;gap:8px;padding:10px 0;flex-shrink:0;}
+.sort-label{font-size:13px;color:var(--ink3);}
+.sort-select{padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--ink);outline:none;cursor:pointer;}
+
+
+/* ─── NEWS SECTION ─── */
+.news-section { padding: 24px 28px 0; max-width: 1400px; margin: 0 auto; }
+.news-title { font-family: 'DM Serif Display', serif; font-size: 20px; margin-bottom: 16px; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.news-grid { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 12px; scrollbar-width: none; }
+.news-grid::-webkit-scrollbar { display: none; }
+.news-card {
+    min-width: 280px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+    display: flex; flex-direction: column; gap: 8px; transition: transform 0.2s, box-shadow 0.2s; cursor: pointer;
+}
+.news-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--accent); }
+.news-tag { font-size: 11px; background: var(--red-light); color: var(--red); padding: 2px 8px; border-radius: 8px; align-self: flex-start; font-weight: 500; }
+.news-headline { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.4; display: -webkit-box; line-clamp: 2; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.news-meta { font-size: 12px; color: var(--ink3); display: flex; justify-content: space-between; }
+
+/* ─── LAYOUT ─── */
+.explore-layout{display:grid;grid-template-columns:1fr 280px;gap:0;align-items:start;max-width:1400px;margin:0 auto;}
+.trips-section{padding:24px 28px;}
+.trips-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:18px;}
+
+/* ─── TRIP CARD ─── */
+.trip-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:transform .2s,box-shadow .2s;}
+.trip-card:hover{transform:translateY(-4px);box-shadow:var(--shadow-lg);}
+.trip-card-cover{height:136px;position:relative;display:flex;align-items:center;justify-content:center;font-size:52px;}
+.trip-card-cover.c0{background:linear-gradient(135deg,#e8f3f0,#d0ebe3);}
+.trip-card-cover.c1{background:linear-gradient(135deg,#fdf0e8,#fde3c8);}
+.trip-card-cover.c2{background:linear-gradient(135deg,#dce8f4,#c8ddf0);}
+.trip-card-cover.c3{background:linear-gradient(135deg,#f5e8c0,#f0dca0);}
+.trip-card-cover.c4{background:linear-gradient(135deg,#ede8fb,#ddd0f5);}
+.tc-badge{position:absolute;top:10px;left:10px;background:rgba(26,24,20,.5);color:#fff;font-size:11px;font-weight:500;padding:3px 9px;border-radius:10px;backdrop-filter:blur(4px);}
+.tc-copy-badge{position:absolute;top:10px;right:10px;background:rgba(26,24,20,.5);color:#fff;font-size:11px;padding:3px 8px;border-radius:10px;backdrop-filter:blur(4px);}
+.trip-card-body{padding:14px 16px;}
+.tc-tags{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;}
+.tc-tag{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;}
+.tc-tag.g{background:var(--accent-light);color:var(--accent);}
+.tc-tag.o{background:var(--accent2-light);color:var(--accent2-dark);}
+.tc-tag.b{background:#dce8f4;color:#3a5f8a;}
+.tc-tag.gold{background:var(--gold-light);color:#7a5e10;}
+.tc-tag.p{background:#ede8fb;color:#5a3aaa;}
+.tc-tag.copied{background:var(--gold-light);color:#7a5e10;}
+.tc-title{font-family:'DM Serif Display',serif;font-size:17px;color:var(--ink);line-height:1.25;margin-bottom:6px;}
+.tc-meta{font-size:12px;color:var(--ink3);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.tc-author-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);}
+.tc-ava{width:26px;height:26px;border-radius:50%;background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;}
+.tc-author{font-size:13px;color:var(--ink2);flex:1;}
+.tc-actions{display:flex;gap:6px;}
+.tc-like-btn{display:flex;align-items:center;gap:3px;padding:5px 9px;border-radius:20px;border:1.5px solid var(--border);background:transparent;font-size:12px;font-family:inherit;cursor:pointer;color:var(--ink2);transition:all .2s;}
+.tc-like-btn:hover,.tc-like-btn.liked{border-color:var(--red);color:var(--red);background:var(--red-light);}
+.tc-preview-btn{padding:5px 11px;border-radius:20px;border:1.5px solid var(--accent);background:transparent;font-size:12px;font-family:inherit;cursor:pointer;color:var(--accent);transition:all .2s;font-weight:500;}
+.tc-preview-btn:hover{background:var(--accent);color:#fff;}
+
+/* ─── SIDEBAR ─── */
+.explore-sidebar{padding:24px 24px 24px 4px;position:sticky;top:60px;max-height:calc(100vh - 60px);overflow-y:auto;}
+.sw{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:14px;}
+.sw-title{font-size:12px;font-weight:500;color:var(--ink3);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:12px;}
+.trending-item{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(226,221,214,.5);cursor:pointer;}
+.trending-item:last-child{border-bottom:none;}
+.trending-item:hover .tr-name{color:var(--accent);}
+.tr-rank{font-family:'DM Serif Display',serif;font-size:18px;color:var(--border);width:20px;text-align:center;flex-shrink:0;}
+.tr-rank.hot{color:var(--accent2);}
+.tr-name{font-size:13px;font-weight:500;color:var(--ink);transition:color .15s;}
+.tr-meta{font-size:11px;color:var(--ink3);}
+.tr-likes{font-size:12px;color:var(--ink3);margin-left:auto;}
+.tag-cloud{display:flex;flex-wrap:wrap;gap:6px;}
+.tc-cloud{padding:5px 11px;border-radius:20px;font-size:12px;border:1.5px solid var(--border);background:transparent;color:var(--ink2);cursor:pointer;transition:all .15s;font-family:inherit;}
+.tc-cloud:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
+.my-trips-list{display:flex;flex-direction:column;gap:0;}
+.my-trip-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(226,221,214,.4);cursor:pointer;}
+.my-trip-row:last-child{border-bottom:none;}
+.my-trip-row:hover .my-trip-name{color:var(--accent);}
+.my-trip-emoji{font-size:18px;flex-shrink:0;}
+.my-trip-name{font-size:13px;font-weight:500;color:var(--ink);transition:color .15s;}
+.my-trip-sub{font-size:11px;color:var(--ink3);}
+
+/* ─── PREVIEW MODAL ─── */
+.overlay{position:fixed;inset:0;background:rgba(26,24,20,.5);z-index:200;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .25s;padding:20px;}
+.overlay.open{opacity:1;pointer-events:all;}
+.preview-modal{background:var(--bg);border-radius:20px;width:100%;max-width:740px;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);transform:translateY(20px);transition:transform .3s;}
+.overlay.open .preview-modal{transform:translateY(0);}
+.pm-header{border-radius:20px 20px 0 0;padding:26px 28px 22px;position:relative;}
+.pm-header.c0{background:var(--accent);}
+.pm-header.c1{background:var(--accent2);}
+.pm-header.c2{background:#3a5f8a;}
+.pm-header.c3{background:var(--gold);}
+.pm-header.c4{background:#6b4aaa;}
+.pm-close{position:absolute;top:14px;right:14px;background:rgba(255,255,255,.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.pm-close:hover{background:rgba(255,255,255,.35);}
+.pm-title{font-family:'DM Serif Display',serif;font-size:24px;color:#fff;margin-bottom:8px;padding-right:36px;}
+.pm-tags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.pm-tag{font-size:12px;padding:3px 10px;border-radius:10px;background:rgba(255,255,255,.2);color:#fff;}
+.pm-stats{display:flex;gap:18px;margin-bottom:14px;}
+.pmstat-val{font-size:17px;font-weight:700;color:#fff;}
+.pmstat-label{font-size:11px;color:rgba(255,255,255,.7);}
+.pm-author-row{display:flex;align-items:center;gap:8px;padding-top:12px;border-top:1px solid rgba(255,255,255,.2);}
+.pm-author-ava{width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center;font-size:15px;}
+.pm-author-info{flex:1;}
+.pm-author-name{font-size:13px;color:rgba(255,255,255,.9);}
+.pm-author-sub{font-size:11px;color:rgba(255,255,255,.6);}
+.pm-stars-row{display:flex;align-items:center;gap:2px;}
+.pm-star{background:none;border:none;font-size:20px;cursor:pointer;transition:transform .15s;padding:0 1px;line-height:1;}
+.pm-star:hover{transform:scale(1.3);}
+.pm-body{flex:1;overflow-y:auto;padding:20px 28px;}
+.pm-day{margin-bottom:16px;}
+.pm-day-hdr{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border-radius:10px;border:1px solid var(--border);margin-bottom:6px;}
+.pm-day-icon{font-size:18px;}
+.pm-day-label{font-size:12px;color:var(--ink3);}
+.pm-day-title{font-size:14px;font-weight:500;color:var(--ink);}
+.pm-spots{display:flex;flex-direction:column;gap:5px;padding-left:12px;}
+.pm-spot{display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--surface);border-radius:8px;border:1px solid var(--border);font-size:13px;}
+.pm-spot-emoji{font-size:15px;flex-shrink:0;}
+.pm-spot-name{flex:1;font-weight:500;}
+.pm-spot-time{font-size:12px;color:var(--ink3);min-width:40px;}
+.pm-spot-tag{font-size:11px;padding:2px 7px;border-radius:8px;}
+.pm-spot-tag.sight{background:var(--accent-light);color:var(--accent);}
+.pm-spot-tag.food{background:var(--accent2-light);color:var(--accent2-dark);}
+.pm-spot-tag.nature{background:#e0f0e8;color:#1f6b4a;}
+.pm-spot-tag.walk{background:#e8f0e8;color:#3a6b3a;}
+.pm-spot-tag.transit{background:var(--surface2);color:var(--ink2);}
+.pm-footer{padding:16px 28px;border-top:1px solid var(--border);background:var(--surface);border-radius:0 0 20px 20px;display:flex;gap:10px;align-items:center;}
+.pm-like-btn{display:flex;align-items:center;gap:5px;padding:10px 16px;border-radius:10px;border:1.5px solid var(--border);background:transparent;font-size:14px;font-family:inherit;cursor:pointer;color:var(--ink2);transition:all .2s;}
+.pm-like-btn:hover,.pm-like-btn.liked{border-color:var(--red);color:var(--red);background:var(--red-light);}
+.pm-copy-btn{flex:1;padding:11px;border-radius:10px;background:var(--accent);color:#fff;border:none;font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;transition:background .2s;}
+.pm-copy-btn:hover{background:var(--accent-dark);}
+.pm-copy-btn.done{background:var(--gold);}
+
+/* ─── LOGIN MODAL ─── */
+.login-modal{background:var(--surface);border-radius:20px;width:100%;max-width:400px;padding:36px;box-shadow:var(--shadow-lg);transform:translateY(20px);transition:transform .3s;}
+.overlay.open .login-modal{transform:translateY(0);}
+.lm-title{font-family:'DM Serif Display',serif;font-size:26px;color:var(--ink);margin-bottom:6px;}
+.lm-sub{font-size:14px;color:var(--ink3);margin-bottom:24px;}
+.lm-tabs{display:flex;background:var(--surface2);border-radius:10px;padding:3px;margin-bottom:20px;}
+.lm-tab{flex:1;padding:8px;text-align:center;border-radius:8px;font-size:14px;cursor:pointer;font-family:inherit;background:transparent;border:none;color:var(--ink2);font-weight:500;transition:all .2s;}
+.lm-tab.active{background:var(--surface);color:var(--ink);box-shadow:var(--shadow);}
+.lm-field{margin-bottom:14px;}
+.lm-field label{display:block;font-size:13px;font-weight:500;color:var(--ink2);margin-bottom:5px;}
+.lm-field input{width:100%;padding:10px 14px;border:1.5px solid var(--border);border-radius:9px;font-size:14px;font-family:inherit;color:var(--ink);background:var(--bg);outline:none;transition:border-color .2s;}
+.lm-field input:focus{border-color:var(--accent);}
+.lm-submit{width:100%;padding:12px;border-radius:10px;background:var(--accent);color:#fff;border:none;font-size:15px;font-family:inherit;cursor:pointer;font-weight:500;margin-top:6px;transition:background .2s;}
+.lm-submit:hover{background:var(--accent-dark);}
+.lm-divider{display:flex;align-items:center;gap:10px;margin:16px 0;font-size:13px;color:var(--ink3);}
+.lm-divider::before,.lm-divider::after{content:'';flex:1;height:1px;background:var(--border);}
+.lm-social-btn{width:100%;padding:10px;border-radius:9px;border:1.5px solid var(--border);background:var(--surface);font-size:14px;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all .2s;color:var(--ink2);}
+.lm-social-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
+.lm-close{position:absolute;top:14px;right:14px;background:var(--surface2);border:none;color:var(--ink3);width:30px;height:30px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+
+/* ─── JOURNEY JOIN MODAL ─── */
+.journey-modal{background:var(--surface);border-radius:20px;width:100%;max-width:460px;padding:34px 34px 30px;box-shadow:var(--shadow-lg);transform:translateY(20px);transition:transform .3s;position:relative;}
+.overlay.open .journey-modal{transform:translateY(0);}
+.journey-kicker{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--accent);background:var(--accent-light);padding:4px 10px;border-radius:999px;margin-bottom:14px;}
+.journey-title{font-family:'DM Serif Display',serif;font-size:26px;color:var(--ink);line-height:1.2;margin-bottom:8px;}
+.journey-sub{font-size:14px;color:var(--ink3);margin-bottom:18px;}
+.journey-preview{background:linear-gradient(135deg,var(--accent-light),#f7fbfa);border:1px solid #cfe2dc;border-radius:14px;padding:14px 16px;margin-bottom:16px;}
+.journey-preview-label{font-size:12px;color:var(--ink3);margin-bottom:4px;}
+.journey-preview-title{font-size:16px;font-weight:600;color:var(--ink);margin-bottom:2px;}
+.journey-preview-meta{font-size:13px;color:var(--ink2);}
+.journey-code-row{display:flex;gap:10px;align-items:center;margin-top:10px;}
+.journey-code-row input{flex:1;padding:11px 14px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;font-family:inherit;color:var(--ink);background:var(--bg);outline:none;letter-spacing:1.5px;text-transform:uppercase;}
+.journey-code-row input:focus{border-color:var(--accent);}
+.journey-actions{display:flex;gap:10px;margin-top:16px;}
+.journey-actions button{flex:1;}
+.journey-note{font-size:12px;color:var(--ink3);margin-top:12px;line-height:1.6;}
+
+/* ─── NEW TRIP WIZARD ─── */
+.journey-itinerary-modal{background:var(--bg);border-radius:24px;width:100%;max-width:560px;max-height:88vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);transform:translateY(20px);transition:transform .3s;}
+.overlay.open .journey-itinerary-modal{transform:translateY(0);}
+.journey-itinerary-hero{padding:28px 28px 22px;background:linear-gradient(145deg,#214b42 0%,#2f7a69 58%,#d8efe8 160%);color:#fff;position:relative;}
+.journey-itinerary-kicker{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;background:rgba(255,255,255,.14);font-size:12px;font-weight:600;margin-bottom:14px;}
+.journey-itinerary-title{font-family:'DM Serif Display',serif;font-size:30px;line-height:1.15;margin-bottom:8px;}
+.journey-itinerary-sub{font-size:14px;line-height:1.7;color:rgba(255,255,255,.78);}
+.journey-itinerary-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:18px 28px;background:var(--surface);border-bottom:1px solid var(--border);}
+.journey-itinerary-stat{background:var(--surface2);border:1px solid var(--border);border-radius:14px;padding:12px 14px;}
+.journey-itinerary-stat-label{font-size:12px;color:var(--ink3);margin-bottom:4px;}
+.journey-itinerary-stat-value{font-size:14px;font-weight:600;color:var(--ink);}
+.journey-itinerary-body{padding:22px 28px 8px;overflow-y:auto;}
+.journey-itinerary-section-title{font-size:13px;font-weight:700;letter-spacing:.04em;color:var(--ink3);margin-bottom:14px;}
+.journey-stop{display:grid;grid-template-columns:64px 1fr;gap:14px;padding:0 0 18px 0;position:relative;}
+.journey-stop:not(:last-child)::after{content:'';position:absolute;left:31px;top:34px;bottom:4px;width:2px;background:linear-gradient(180deg,#b5d6ce,#e5f1ed);}
+.journey-stop-time{display:flex;align-items:flex-start;justify-content:center;font-size:12px;font-weight:700;color:var(--accent);}
+.journey-stop-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:14px 16px;box-shadow:0 10px 24px rgba(16,24,40,.05);}
+.journey-stop-title{font-size:16px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+.journey-stop-desc{font-size:13px;color:var(--ink2);line-height:1.65;margin-bottom:10px;}
+.journey-stop-tags{display:flex;flex-wrap:wrap;gap:8px;}
+.journey-stop-tag{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:var(--accent-light);color:var(--accent-dark);font-size:12px;font-weight:600;}
+.journey-itinerary-footer{display:flex;gap:10px;padding:18px 28px 26px;background:var(--bg);}
+.journey-itinerary-footer button{flex:1;}
+@media(max-width:640px){
+  .journey-itinerary-modal{max-width:calc(100vw - 24px);}
+  .journey-itinerary-hero,.journey-itinerary-body,.journey-itinerary-footer{padding-left:20px;padding-right:20px;}
+  .journey-itinerary-meta{grid-template-columns:1fr;padding:16px 20px;}
+  .journey-stop{grid-template-columns:56px 1fr;gap:10px;}
+  .journey-stop:not(:last-child)::after{left:27px;}
+}
+
+.wizard-modal{background:linear-gradient(135deg,#fff4de 0%,#e9f8f4 100%);border-radius:24px;width:100%;max-width:1000px;max-height:90vh;overflow:hidden;box-shadow:0 16px 44px rgba(25,32,45,.12);transform:translateY(20px);transition:transform .3s;display:flex;flex-direction:column;}
+.overlay.open .wizard-modal{transform:translateY(0);}
+.wizard-header{padding:32px 28px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px;border-bottom:1px solid rgba(255,255,255,.68);}
+.wizard-hero{flex:1;}
+.wizard-title{font-family:'DM Serif Display',serif;font-size:28px;line-height:1.2;margin:0 0 8px;color:#173648;}
+.wizard-sub{font-size:14px;color:#3d4b56;margin:0;}
+.wizard-badge{background:rgba(255,255,255,.76);border:1px solid rgba(255,255,255,.7);box-shadow:0 8px 22px rgba(25,32,45,.08);border-radius:999px;padding:8px 14px;font-weight:700;color:#1d5f5b;font-size:14px;backdrop-filter:blur(8px);white-space:nowrap;}
+.wizard-body{display:grid;grid-template-columns:1.02fr 0.98fr;gap:18px;padding:18px;overflow-y:auto;flex:1;}
+.wizard-panel{background:rgba(255,255,255,.82);border:1px solid rgba(255,255,255,.68);border-radius:22px;box-shadow:0 16px 44px rgba(25,32,45,.12);backdrop-filter:blur(12px);overflow:hidden;display:flex;flex-direction:column;}
+.wizard-panel-head{padding:16px 20px;border-bottom:1px solid #e6e3dc;background:linear-gradient(90deg,#ffffff 0%,#f6fffc 100%);}
+.wizard-panel-title{font-size:18px;font-weight:900;margin:0;color:#222126;}
+.wizard-panel-sub{margin:6px 0 0;font-size:13px;color:#64636e;}
+.wizard-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:14px 16px;border-bottom:1px solid #e6e3dc;background:#fff;}
+.wizard-step{border:1px solid #ddd;border-radius:12px;font-size:11px;padding:8px 6px;text-align:center;color:#666;font-weight:700;transition:all .24s ease;display:flex;flex-direction:column;align-items:center;gap:3px;}
+.step-num{font-size:14px;font-weight:900;line-height:1;}
+.step-label{font-size:10px;line-height:1.2;display:block;}
+.wizard-step.active{border-color:transparent;background:linear-gradient(135deg,#0f7c6b 0%,#1f8efa 100%);color:#fff;transform:translateY(-1px);box-shadow:0 8px 16px rgba(27,115,147,.3);}
+.wizard-step.done{background:#ebf8f2;color:#22865d;border-color:#caefd9;}
+.wizard-form{padding:18px;flex:1;overflow-y:auto;}
+.wizard-card{background:#ffffff;border:1px solid #e6e3dc;border-radius:18px;padding:14px;animation:riseIn .34s ease;}
+@keyframes riseIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+.wizard-block-title{margin:0 0 4px;font-weight:900;font-size:19px;color:#2b3043;}
+.wizard-block-help{margin:0 0 12px;color:#6b6f79;font-size:13px;line-height:1.5;}
+.wizard-field{margin-bottom:12px;}
+.wizard-field label{display:block;margin-bottom:6px;font-size:13px;font-weight:700;color:#2f3448;}
+.wizard-field input,.wizard-field select,.wizard-field textarea{width:100%;border:1px solid #d9dde4;border-radius:12px;padding:10px 12px;font-size:15px;font-family:inherit;color:#1e2430;background:#fff;}
+.wizard-field input:focus,.wizard-field select:focus,.wizard-field textarea:focus{outline:3px solid rgba(31,142,250,.18);border-color:#7db8ee;}
+.wizard-time-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+.wizard-choice-grid{display:grid;gap:8px;grid-template-columns:repeat(2,minmax(0,1fr));}
+.wizard-check-pill{display:flex;align-items:center;gap:8px;background:#f8fafc;border:1px solid #dce6f2;border-radius:11px;padding:8px 10px;font-size:13px;cursor:pointer;}
+.wizard-hint-box{background:#fff4ec;border:1px solid #ffd9c6;border-radius:12px;padding:10px;font-size:13px;color:#9a4f2d;margin-bottom:10px;}
+.wizard-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+.wizard-tag{border:1px solid #d8e2ef;background:#f7fbff;color:#2b4c6b;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;}
+.wizard-tag:hover{background:#dff1ff;transform:translateY(-1px);}
+.wizard-tag.active{background:#dff1ff;border-color:#7db8ee;color:#134566;box-shadow:0 4px 10px rgba(17,118,201,.14);}
+.wizard-nav{display:flex;justify-content:space-between;padding:14px 18px 18px;border-top:1px solid #e6e3dc;background:#fff;gap:10px;}
+.wizard-btn{border:none;border-radius:12px;padding:11px 18px;font-size:14px;font-weight:800;cursor:pointer;transition:all .2s ease;}
+.wizard-btn.secondary{background:#edf2f7;color:#495061;}
+.wizard-btn.secondary:hover{background:#dde5f1;}
+.wizard-btn.primary{background:linear-gradient(135deg,#11796b 0%,#1176c9 100%);color:#fff;box-shadow:0 10px 24px rgba(17,118,201,.25);}
+.wizard-btn.primary:hover{transform:translateY(-1px);}
+.wizard-flow-wrap{padding:18px;background:linear-gradient(180deg,#ffffff 0%,#f9fcff 100%);min-height:530px;overflow-y:auto;}
+.wizard-theme-note{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 12px;margin-bottom:10px;font-size:12px;font-weight:800;color:#095668;background:#dbf4f8;border:1px solid #bbe5ea;}
+.wizard-flow-title{margin:0 0 12px;font-family:'DM Serif Display',serif;font-size:28px;color:#25324f;letter-spacing:.4px;}
+.wizard-flow-col{display:grid;gap:10px;}
+.wizard-node{position:relative;border-radius:16px;border:1px solid #dfe6f0;background:#ffffff;box-shadow:0 8px 22px rgba(25,32,45,.08);padding:10px 12px;transform:translateY(0);animation:fadeNode .36s ease both;}
+.wizard-node:nth-child(1){animation-delay:.05s;}
+.wizard-node:nth-child(2){animation-delay:.12s;}
+.wizard-node:nth-child(3){animation-delay:.18s;}
+.wizard-node:nth-child(4){animation-delay:.24s;}
+.wizard-node:nth-child(5){animation-delay:.3s;}
+@keyframes fadeNode{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:translateY(0);}}
+.wizard-node:not(:last-child)::after{content:"";position:absolute;left:50%;transform:translateX(-50%);bottom:-12px;width:2px;height:12px;background:linear-gradient(180deg,#7cbde3 0%,#d9ecf9 100%);}
+.wizard-node-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;gap:8px;}
+.wizard-node-time{font-size:12px;font-weight:800;color:#576071;background:#f1f5fa;border-radius:999px;padding:3px 9px;}
+.wizard-node-time-input{
+  font-size:12px;
+  font-weight:800;
+  color:#576071;
+  background:#f1f5fa;
+  border:1px solid #d8e3ef;
+  border-radius:999px;
+  padding:3px 9px;
+  min-width:84px;
+  text-align:center;
+  font-family:inherit;
+}
+.wizard-node-time-input:focus{outline:2px solid rgba(31,142,250,.2);border-color:#7db8ee;background:#fff;}
+.wizard-node-title{margin:0;font-size:16px;font-weight:900;color:#1e2940;}
+.wizard-node-desc{margin:3px 0 0;font-size:13px;color:#5f6876;}
+.wizard-summary{background:#e8fff5;border:1px solid #c4f0d8;color:#1a6f49;border-radius:12px;padding:10px;margin-top:12px;font-size:13px;}
+@media(max-width:980px){.wizard-body{grid-template-columns:1fr;}.wizard-flow-wrap{min-height:auto;}}
+@media(max-width:620px){.wizard-steps{grid-template-columns:repeat(2,minmax(0,1fr));}.wizard-choice-grid{grid-template-columns:1fr;}.wizard-time-grid{grid-template-columns:1fr;}}
+
+/* ─── MY TRIPS PAGE ─── */
+.my-page{max-width:1000px;margin:0 auto;padding:28px;}
+.my-page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;}
+.my-page-title{font-family:'DM Serif Display',serif;font-size:26px;color:var(--ink);}
+.my-trips-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:18px;}
+.my-trip-card{
+  background:linear-gradient(180deg,#ffffff 0%,#fbfaf7 100%);
+  border:1px solid #dcd6cb;
+  border-radius:18px;
+  overflow:hidden;
+  transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease;
+  box-shadow:0 10px 28px rgba(33,29,24,.07);
+}
+.my-trip-card:hover{
+  transform:translateY(-5px);
+  box-shadow:0 18px 42px rgba(33,29,24,.14);
+  border-color:#d0c8ba;
+}
+.mt-cover{
+  height:112px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:44px;
+  position:relative;
+  overflow:hidden;
+}
+.mt-cover::after{
+  content:'';
+  position:absolute;
+  inset:auto 0 0 0;
+  height:44px;
+  background:linear-gradient(180deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.32) 100%);
+  pointer-events:none;
+}
+.mt-cover.c0{background:linear-gradient(135deg,#e8f3f0,#d0ebe3);}
+.mt-cover.c1{background:linear-gradient(135deg,#fdf0e8,#fde3c8);}
+.mt-cover.c2{background:linear-gradient(135deg,#dce8f4,#c8ddf0);}
+.mt-cover.c3{background:linear-gradient(135deg,#f5e8c0,#f0dca0);}
+.mt-body{padding:15px 14px 14px;}
+.mt-title{font-size:26px;font-weight:700;color:var(--ink);margin-bottom:6px;line-height:1.2;letter-spacing:.2px;}
+.mt-meta{font-size:13px;color:#867f75;margin-bottom:14px;line-height:1.5;}
+.mt-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;margin-bottom:12px;}
+.mt-status.planning{background:var(--accent-light);color:var(--accent);}
+.mt-status.upcoming{background:var(--gold-light);color:#7a5e10;}
+.mt-status.copied{background:#ede8fb;color:#5a3aaa;}
+.mt-actions{display:grid;grid-template-columns:minmax(86px,1fr) minmax(96px,1fr) minmax(72px,.9fr) 44px;gap:8px;}
+.mt-action-btn{
+  min-height:44px;
+  padding:8px 10px;
+  border-radius:10px;
+  font-size:13px;
+  font-family:inherit;
+  font-weight:700;
+  cursor:pointer;
+  border:1px solid #d8d1c5;
+  background:#fff;
+  color:#6b6459;
+  transition:all .2s;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+  white-space:nowrap;
+  word-break:keep-all;
+}
+.mt-action-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
+.mt-action-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.mt-action-btn.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark);color:#fff;}
+.mt-action-btn.replan{color:#2f6f97;}
+.mt-action-btn.share{color:#434f7a;}
+.mt-action-btn.delete{width:44px;padding:0;color:var(--red);font-size:16px;}
+.mt-action-btn.delete:hover{border-color:var(--red);color:var(--red);background:var(--red-light);}
+.new-trip-card{border:2px dashed var(--border);background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;height:200px;border-radius:var(--radius);cursor:pointer;transition:all .2s;color:var(--ink3);}
+.new-trip-card:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
+.new-trip-card-icon{font-size:36px;margin-bottom:8px;}
+.new-trip-card-label{font-size:14px;font-weight:500;}
+
+/* ─── COPY SUCCESS ─── */
+.copy-success-modal{background:var(--surface);border-radius:20px;width:100%;max-width:400px;padding:36px;text-align:center;box-shadow:var(--shadow-lg);transform:scale(.9);transition:transform .3s;}
+.overlay.open .copy-success-modal{transform:scale(1);}
+.cs-icon{font-size:52px;margin-bottom:14px;}
+.cs-title{font-family:'DM Serif Display',serif;font-size:22px;color:var(--ink);margin-bottom:8px;}
+.cs-desc{font-size:14px;color:var(--ink2);line-height:1.6;margin-bottom:22px;}
+.cs-actions{display:flex;flex-direction:column;gap:10px;}
+.cs-primary{padding:12px;border-radius:10px;background:var(--accent);color:#fff;border:none;font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;}
+.cs-primary:hover{background:var(--accent-dark);}
+.cs-secondary{padding:10px;border-radius:10px;background:transparent;color:var(--ink2);border:1.5px solid var(--border);font-size:13px;font-family:inherit;cursor:pointer;}
+.cs-secondary:hover{border-color:var(--accent);color:var(--accent);}
+
+/* ─── TOAST ─── */
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:10px 20px;border-radius:30px;font-size:14px;opacity:0;transition:all .3s;z-index:999;pointer-events:none;white-space:nowrap;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.toast.green{background:var(--accent);}
+.toast.orange{background:var(--accent2);}
+.toast.red{background:var(--red);}
+
+@media(max-width:1200px){
+  .my-trips-grid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));}
+}
+
+@media(min-width:701px) and (max-width:1180px){
+  body{font-size:17px;line-height:1.72;}
+
+  .topbar{
+    min-height:64px;
+    height:auto;
+    padding:10px 18px;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .topbar-logo{font-size:27px;}
+  .topbar-nav{order:3;width:100%;gap:8px;overflow-x:auto;padding:2px 0 0;}
+  .topbar-nav a{
+    min-height:42px;
+    display:inline-flex;
+    align-items:center;
+    padding:9px 14px;
+    font-size:15px;
+    border-radius:12px;
+  }
+  .topbar-search{max-width:280px;margin-left:auto;}
+  .topbar-search input{min-height:44px;font-size:15px;padding-top:9px;padding-bottom:9px;}
+  .topbar-new-btn,.login-prompt-btn{
+    min-height:44px;
+    padding:10px 14px;
+    font-size:15px;
+    border-radius:12px;
+  }
+  .user-avatar-btn{width:44px;height:44px;font-size:20px;}
+  .user-dropdown{min-width:240px;}
+  .user-dropdown-name,.user-dd-item{font-size:15px;}
+  .user-dropdown-email{font-size:13px;}
+
+  .hero-strip{
+    padding:34px 28px 30px;
+    gap:20px;
+  }
+  .hero-strip-text h1{font-size:38px;}
+  .hero-strip-text p{font-size:16px;max-width:560px;}
+  .hero-btns{gap:12px;flex-wrap:wrap;}
+  .hero-btn-primary,.hero-btn-secondary{
+    min-height:48px;
+    padding:12px 20px;
+    font-size:16px;
+    border-radius:14px;
+  }
+  .hstat-num{font-size:34px;}
+  .hstat-label{font-size:13px;}
+
+  .filter-bar{padding:0 22px;}
+  .filter-tab{
+    min-height:50px;
+    padding:14px 18px;
+    font-size:15px;
+  }
+  .sort-label,.sort-select{font-size:14px;}
+  .sort-select{min-height:40px;padding:8px 12px;}
+
+  .news-section,.trips-section,.my-page{padding-left:22px;padding-right:22px;}
+  .news-title{font-size:24px;}
+  .news-card{min-width:320px;padding:18px;border-radius:16px;}
+  .news-tag{font-size:12px;padding:4px 10px;}
+  .news-headline{font-size:16px;}
+  .news-meta{font-size:13px;}
+
+  .explore-layout{grid-template-columns:minmax(0,1fr) 240px;}
+  .trips-grid{grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px;}
+  .trip-card{border-radius:18px;}
+  .trip-card-cover{height:158px;font-size:58px;}
+  .tc-badge,.tc-copy-badge{font-size:12px;padding:5px 10px;}
+  .trip-card-body{padding:18px;}
+  .tc-title{font-size:22px;}
+  .tc-meta,.tc-author{font-size:14px;}
+  .tc-tag{font-size:12px;padding:4px 10px;}
+  .tc-ava{width:34px;height:34px;font-size:16px;}
+  .tc-actions{gap:8px;}
+  .tc-like-btn,.tc-preview-btn,.tc-cloud{
+    min-height:40px;
+    font-size:14px;
+    padding:8px 12px;
+  }
+
+  .explore-sidebar{top:104px;max-height:calc(100vh - 104px);padding:22px 18px 22px 0;}
+  .sw{padding:18px;border-radius:18px;}
+  .sw-title{font-size:13px;}
+  .trending-item,.my-trip-row{min-height:48px;}
+  .tr-name,.my-trip-name{font-size:14px;}
+  .tr-meta,.my-trip-sub{font-size:12px;}
+  .tr-rank{font-size:20px;}
+
+  .preview-modal{max-width:min(820px,calc(100vw - 40px));border-radius:24px;}
+  .pm-header{padding:30px 32px 24px;}
+  .pm-close,.lm-close{width:40px;height:40px;font-size:18px;}
+  .pm-title{font-size:30px;}
+  .pm-tag,.pmstat-label,.pm-spot-tag{font-size:12px;}
+  .pmstat-val{font-size:19px;}
+  .pm-author-name,.pm-day-title,.pm-spot{font-size:15px;}
+  .pm-author-sub,.pm-day-label,.pm-spot-time{font-size:13px;}
+  .pm-body{padding:24px 32px;}
+  .pm-day-hdr{padding:13px 16px;}
+  .pm-spot{min-height:44px;padding:10px 14px;border-radius:12px;}
+  .pm-footer{padding:18px 32px;}
+  .pm-like-btn,.pm-copy-btn{min-height:48px;font-size:15px;}
+  .pm-star{font-size:24px;padding:2px;}
+
+  .login-modal,.copy-success-modal{max-width:460px;padding:40px;border-radius:24px;}
+  .journey-modal{max-width:540px;padding:40px;border-radius:24px;}
+  .lm-title,.journey-title{font-size:31px;}
+  .lm-sub,.journey-sub,.cs-desc{font-size:16px;}
+  .lm-tab,.lm-field label,.lm-social-btn,.cs-primary,.cs-secondary{font-size:15px;}
+  .lm-field input,.journey-code-row input{
+    min-height:48px;
+    font-size:16px;
+    border-radius:12px;
+  }
+  .lm-submit{min-height:50px;font-size:16px;border-radius:12px;}
+  .journey-preview-title{font-size:18px;}
+  .journey-preview-label,.journey-preview-meta,.journey-note{font-size:14px;}
+
+  .journey-itinerary-modal{max-width:min(720px,calc(100vw - 40px));border-radius:26px;}
+  .journey-itinerary-hero{padding:32px;}
+  .journey-itinerary-title{font-size:36px;}
+  .journey-itinerary-sub{font-size:16px;}
+  .journey-itinerary-meta{padding:20px 32px;}
+  .journey-itinerary-stat-label,.journey-itinerary-section-title,.journey-stop-time,.journey-stop-tag{font-size:13px;}
+  .journey-itinerary-stat-value{font-size:16px;}
+  .journey-itinerary-body{padding:26px 32px 10px;}
+  .journey-stop-card{padding:18px 20px;border-radius:18px;}
+  .journey-stop-title{font-size:18px;}
+  .journey-stop-desc{font-size:15px;}
+  .journey-itinerary-footer{padding:20px 32px 28px;}
+
+  .wizard-modal{
+    max-width:min(1040px,calc(100vw - 32px));
+    max-height:92vh;
+    border-radius:28px;
+  }
+  .wizard-header{padding:30px;align-items:center;}
+  .wizard-title{font-size:34px;}
+  .wizard-sub{font-size:16px;}
+  .wizard-badge{font-size:15px;padding:9px 16px;}
+  .wizard-body{gap:16px;padding:16px;}
+  .wizard-panel{border-radius:22px;}
+  .wizard-panel-head{padding:18px 22px;}
+  .wizard-panel-title{font-size:21px;}
+  .wizard-panel-sub{font-size:14px;}
+  .wizard-step{min-height:58px;font-size:12px;padding:10px 8px;}
+  .step-num{font-size:16px;}
+  .step-label{font-size:11px;}
+  .wizard-form{padding:20px;}
+  .wizard-card{padding:18px;border-radius:20px;}
+  .wizard-block-title{font-size:22px;}
+  .wizard-block-help,.wizard-field label,.wizard-check-pill,.wizard-hint-box,.wizard-node-desc,.wizard-summary{font-size:15px;}
+  .wizard-field input,.wizard-field select,.wizard-field textarea{
+    min-height:48px;
+    font-size:16px;
+    padding:12px 14px;
+  }
+  .wizard-check-pill,.wizard-tag{
+    min-height:44px;
+    font-size:14px;
+    padding:10px 12px;
+  }
+  .wizard-nav{padding:16px 20px 20px;}
+  .wizard-btn{min-height:48px;font-size:16px;padding:12px 20px;}
+  .wizard-flow-wrap{padding:20px;min-height:560px;}
+  .wizard-flow-title{font-size:32px;}
+  .wizard-node{padding:14px 16px;border-radius:18px;}
+  .wizard-node-time,.wizard-node-time-input{font-size:13px;min-height:30px;}
+  .wizard-node-title{font-size:18px;}
+
+  .my-page-title{font-size:32px;}
+  .my-trips-grid{grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:20px;}
+  .my-trip-card{border-radius:22px;}
+  .mt-cover{height:136px;font-size:52px;}
+  .mt-body{padding:18px;}
+  .mt-title{font-size:28px;}
+  .mt-meta{font-size:15px;}
+  .mt-status{font-size:13px;padding:6px 12px;}
+  .mt-actions{grid-template-columns:repeat(3,minmax(0,1fr)) 48px;gap:10px;}
+  .mt-action-btn{min-height:48px;font-size:14px;padding:10px 12px;}
+  .mt-action-btn.delete{width:48px;}
+  .new-trip-card{height:230px;border-radius:22px;}
+  .new-trip-card-icon{font-size:44px;}
+  .new-trip-card-label{font-size:16px;}
+
+  .toast{font-size:15px;padding:12px 22px;}
+}
+
+@media(min-width:901px) and (max-width:1180px){
+  .explore-sidebar{display:block;}
+}
+
+@media(min-width:701px) and (max-width:980px){
+  .topbar-search{order:4;max-width:none;width:100%;margin-left:0;}
+  .hero-strip{align-items:flex-start;flex-direction:column;}
+  .hero-stats{display:flex;width:100%;justify-content:flex-start;}
+  .explore-layout{grid-template-columns:1fr;}
+  .explore-sidebar{display:none;}
+  .trips-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .wizard-body{grid-template-columns:1fr;}
+  .wizard-flow-wrap{min-height:auto;}
+}
+
+@media(max-width:700px){
+  .my-page{padding:18px 14px 22px;}
+  .my-page-header{flex-direction:column;align-items:stretch;gap:10px;}
+  .my-trips-grid{grid-template-columns:1fr;}
+  .mt-title{font-size:22px;}
+  .mt-actions{grid-template-columns:repeat(3,minmax(0,1fr));}
+  .mt-action-btn{min-height:40px;font-size:13px;padding:8px 6px;}
+  .mt-action-btn.delete{width:auto;}
+}
+
+@media(max-width:900px){
+  .explore-layout{grid-template-columns:1fr;}
+  .explore-sidebar{display:none;}
+  .hero-stats{display:none;}
+}
+</style>
+</head>
+<body>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- ─── OVERLAY: PREVIEW ─── -->
+<div class="overlay" id="previewOverlay" onclick="if(event.target===this)closePreview()">
+  <div class="preview-modal" id="previewModal">
+    <div class="pm-header" id="pmHeader">
+      <button class="pm-close" onclick="closePreview()">✕</button>
+      <div class="pm-title" id="pmTitle"></div>
+      <div class="pm-tags" id="pmTags"></div>
+      <div class="pm-stats" id="pmStats"></div>
+      <div class="pm-author-row">
+        <div class="pm-author-ava" id="pmAva"></div>
+        <div class="pm-author-info">
+          <div class="pm-author-name" id="pmAuthor"></div>
+          <div class="pm-author-sub" id="pmAuthorSub"></div>
+        </div>
+        <div class="pm-stars-row" id="pmStars"></div>
+      </div>
+    </div>
+    <div class="pm-body" id="pmBody"></div>
+    <div class="pm-footer">
+      <button class="pm-like-btn" id="pmLikeBtn" onclick="togglePreviewLike()">
+        <span id="pmLikeIcon">🤍</span><span id="pmLikeCount">0</span>
+      </button>
+      <button class="pm-copy-btn" id="pmCopyBtn" onclick="copyTrip()">📋 複製這份行程</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: LOGIN ─── -->
+<div class="overlay" id="loginOverlay" onclick="if(event.target===this)closeLogin()" style="z-index:300">
+  <div class="login-modal" style="position:relative">
+    <button class="lm-close" onclick="closeLogin()">✕</button>
+    <div class="lm-title">歡迎回來 🗺</div>
+    <div class="lm-sub">登入後可以儲存行程、複製他人規劃</div>
+    <div class="lm-tabs">
+      <button class="lm-tab active" id="loginTab" onclick="switchAuthTab('login')">登入</button>
+      <button class="lm-tab" id="registerTab" onclick="switchAuthTab('register')">註冊</button>
+    </div>
+    <div id="loginForm">
+      <div class="lm-field"><label>電子信箱</label><input type="email" id="loginEmail" placeholder="you@example.com"></div>
+      <div class="lm-field"><label>密碼</label><input type="password" id="loginPwd" placeholder="••••••••"></div>
+      <button class="lm-submit" onclick="doLogin()">登入</button>
+    </div>
+    <div id="registerForm" style="display:none">
+      <div class="lm-field"><label>暱稱</label><input type="text" id="regName" placeholder="旅遊達人小美"></div>
+      <div class="lm-field"><label>電子信箱</label><input type="email" id="regEmail" placeholder="you@example.com"></div>
+      <div class="lm-field"><label>密碼</label><input type="password" id="regPwd" placeholder="至少 8 個字元"></div>
+      <button class="lm-submit" onclick="doRegister()">建立帳號</button>
+    </div>
+    <div class="lm-divider">或</div>
+    <button class="lm-social-btn" onclick="doSocialLogin('Google')">🌐 以 Google 帳號登入</button>
+    <button class="lm-social-btn" style="margin-top:8px" onclick="doSocialLogin('Facebook')">📘 以 Facebook 帳號登入</button>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: NEW TRIP WIZARD ─── -->
+<div class="overlay" id="wizardOverlay" onclick="if(event.target===this)closeWizard()" style="z-index:250">
+  <div class="wizard-modal">
+    <div class="wizard-header">
+      <div class="wizard-hero">
+        <h1 class="wizard-title">建立微旅行</h1>
+        <p class="wizard-sub">0.5小時～2天的輕便旅程，讓 AI 根據你的喜好、節奏與角色風格規劃最適合的在地體驗</p>
+      </div>
+      <div class="wizard-badge" id="wizardBadge">Step 1 / 4</div>
+    </div>
+    <div class="wizard-body">
+      <div class="wizard-panel">
+        <div class="wizard-panel-head">
+          <h2 class="wizard-panel-title">微旅行規劃</h2>
+          <p class="wizard-panel-sub">4 步驟設定，AI 根據你的偏好客製化</p>
+        </div>
+        <div class="wizard-steps" id="wizSteps"></div>
+        <div class="wizard-form">
+          <div class="wizard-card" id="wizBody"></div>
+        </div>
+        <div class="wizard-nav">
+          <button class="wizard-btn secondary" id="wizBackBtn" onclick="wizPrev()">← 上一步</button>
+          <button class="wizard-btn primary" id="wizNextBtn" onclick="wizNext()">下一步 →</button>
+        </div>
+      </div>
+      <div class="wizard-panel">
+        <div class="wizard-panel-head">
+          <h2 class="wizard-panel-title">行程預覽</h2>
+          <p class="wizard-panel-sub">即時看到你的微旅行大綱在成形</p>
+        </div>
+        <div class="wizard-flow-wrap">
+          <div class="wizard-theme-note" id="themeNote">目前主題：經典旅人風格</div>
+          <h3 class="wizard-flow-title" id="flowTitle">台東・1天微旅行</h3>
+          <div class="wizard-flow-col" id="flowNodes"></div>
+          <div class="wizard-summary" id="flowSummary">先完成左側步驟，AI 會在這裡生成你的個人化微旅行流程故事。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: COPY SUCCESS ─── -->
+<div class="overlay" id="copySuccessOverlay" onclick="if(event.target===this)closeCopySuccess()" style="z-index:300">
+  <div class="copy-success-modal">
+    <div class="cs-icon">🎉</div>
+    <div class="cs-title" id="csTitle">行程複製成功！</div>
+    <div class="cs-desc" id="csDesc"></div>
+    <div class="cs-actions">
+      <button class="cs-primary" onclick="goToMyTrips()">📋 前往我的微旅行</button>
+      <button class="cs-secondary" onclick="closeCopySuccess()">繼續瀏覽</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: INVITE CODE ─── -->
+<div class="overlay" id="inviteOverlay" onclick="if(event.target===this)closeInvite()" style="z-index:300">
+  <div class="login-modal" style="position:relative">
+    <button class="lm-close" onclick="closeInvite()">✕</button>
+    <div class="lm-title">加入共編行程 🔑</div>
+    <div class="lm-sub">請輸入朋友分享的 8 碼邀請碼</div>
+    <div class="lm-field">
+      <input type="text" id="inviteCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:18px; text-align:center;">
+    </div>
+    <button class="lm-submit" onclick="submitInviteCode()">確認加入</button>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: JOURNEY JOIN ─── -->
+<div class="overlay" id="journeyOverlay" onclick="if(event.target===this)closeJourneyJoin()" style="z-index:300">
+  <div class="journey-modal">
+    <button class="lm-close" onclick="closeJourneyJoin()">✕</button>
+    <div class="journey-kicker">📱 手機快速進入</div>
+    <div class="journey-title">輸入流程碼，直接進入旅遊</div>
+    <div class="journey-preview">
+      <div class="journey-preview-label">目前綁定的旅程</div>
+      <div class="journey-preview-title" id="journeyPreviewTitle">左營站外 2 小時微旅行</div>
+      <div class="journey-preview-meta" id="journeyPreviewMeta">14:00 - 15:45 · 邀請碼 WNDR-88A</div>
+    </div>
+    <div class="lm-field" style="margin-bottom:0;">
+      <label for="journeyCodeInput">流程碼</label>
+      <input type="text" id="journeyCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:18px; text-align:center;">
+    </div>
+    <div class="journey-actions">
+      <button class="lm-submit" onclick="submitJourneyCode()">進入旅遊</button>
+    </div>
+    <div class="journey-note">輸入正確後，系統會先帶你看這次旅程的預覽行程。手機上可以直接從群組訊息複製後貼上。</div>
+  </div>
+</div>
+
+<div class="overlay" id="journeyItineraryOverlay" onclick="if(event.target===this)closeJourneyItineraryPreview()" style="z-index:320">
+  <div class="journey-itinerary-modal">
+    <div class="journey-itinerary-hero">
+      <button class="lm-close" onclick="closeJourneyItineraryPreview()">✕</button>
+      <div class="journey-itinerary-kicker">行前預覽</div>
+      <div class="journey-itinerary-title" id="journeyItineraryTitle">左營站外 2 小時微旅行</div>
+      <div class="journey-itinerary-sub" id="journeyItinerarySub">先快速確認集合資訊與沿途節奏，進入旅遊前就知道這段路線會怎麼走。</div>
+    </div>
+    <div class="journey-itinerary-meta">
+      <div class="journey-itinerary-stat">
+        <div class="journey-itinerary-stat-label">旅程時間</div>
+        <div class="journey-itinerary-stat-value" id="journeyItineraryTime">14:00 - 15:45</div>
+      </div>
+      <div class="journey-itinerary-stat">
+        <div class="journey-itinerary-stat-label">集合地點</div>
+        <div class="journey-itinerary-stat-value" id="journeyItineraryMeeting">左營站 1 號出口</div>
+      </div>
+      <div class="journey-itinerary-stat">
+        <div class="journey-itinerary-stat-label">流程碼</div>
+        <div class="journey-itinerary-stat-value" id="journeyItineraryCode">WNDR-88A</div>
+      </div>
+    </div>
+    <div class="journey-itinerary-body">
+      <div class="journey-itinerary-section-title">本次行程安排</div>
+      <div id="journeyItineraryStops"></div>
+    </div>
+    <div class="journey-itinerary-footer">
+      <button class="topbar-new-btn secondary" onclick="closeJourneyItineraryPreview()">返回</button>
+      <button class="lm-submit" onclick="confirmJourneyEntry()">開始旅遊</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── TOPBAR ─── -->
+<header class="topbar">
+  <div class="topbar-logo" onclick="showMainView('explore')">🗺 WanderAI</div>
+  <nav class="topbar-nav">
+    <a href="#" id="navExplore" class="active" onclick="showMainView('explore');return false">🧭 探索</a>
+    <a href="#" id="navMyTrips" onclick="showMainView('mytrips');return false">📋 我的微旅行</a>
+    <a href="ai-travel-planner-v8.html" id="navPlan">✈️ 行程編輯</a>
+  </nav>
+  <div class="topbar-search">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="搜尋目的地、行程名稱…" oninput="handleSearch()">
+  </div>
+  <button class="topbar-new-btn" onclick="openWizard()">＋ 建立微旅行</button>
+  <button class="topbar-new-btn secondary" onclick="openJourneyJoin()">📱 流程碼進入</button>
+  <div class="user-menu-wrap" id="userMenuWrap">
+    <!-- injected by JS -->
+  </div>
+</header>
+
+<!-- ─── EXPLORE VIEW ─── -->
+<div id="exploreView">
+  <div class="hero-strip">
+    <div class="hero-strip-text">
+      <h1>探索社群行程，一鍵複製出發</h1>
+      <p>瀏覽真實旅人分享的完整行程，預覽景點安排後直接複製，再用 AI 個人化調整。</p>
+      <div class="hero-btns">
+        <button class="hero-btn-primary" onclick="openWizard()">＋ 建立微旅行</button>
+        <button class="hero-btn-secondary" onclick="document.querySelector('.trips-grid').scrollIntoView({behavior:'smooth'})">探索熱門行程 ↓</button>
+      </div>
+    </div>
+    <div class="hero-stats">
+      <div class="hstat"><div class="hstat-num">2,481</div><div class="hstat-label">行程分享</div></div>
+      <div class="hstat"><div class="hstat-num">18,340</div><div class="hstat-label">次複製</div></div>
+      <div class="hstat"><div class="hstat-num" id="totalRating">4.8</div><div class="hstat-label">平均評分</div></div>
+    </div>
+  </div>
+  <div class="filter-bar">
+    <button class="filter-tab active" onclick="filterCat(this,'all')">全部</button>
+    <div class="filter-sep"></div>
+    <button class="filter-tab" onclick="filterCat(this,'台東')">🌊 台東</button>
+    <button class="filter-tab" onclick="filterCat(this,'台北')">🏙 台北</button>
+    <button class="filter-tab" onclick="filterCat(this,'花蓮')">🏔 花蓮</button>
+    <button class="filter-tab" onclick="filterCat(this,'日本')">🇯🇵 日本</button>
+    <button class="filter-tab" onclick="filterCat(this,'韓國')">🇰🇷 韓國</button>
+    <button class="filter-tab" onclick="filterCat(this,'歐洲')">✈️ 歐洲</button>
+    <div class="sort-wrap">
+      <span class="sort-label">排序</span>
+      <select class="sort-select" onchange="handleSort(this.value)">
+        <option value="hot">🔥 最熱門</option>
+        <option value="new">✨ 最新上傳</option>
+        <option value="rating">⭐ 評分最高</option>
+        <option value="copy">📋 複製最多</option>
+      </select>
+    </div>
+  </div>
+  <div class="explore-layout">
+    <div class="trips-section">
+      <div class="trips-grid" id="tripsGrid"></div>
+    </div>
+    <aside class="explore-sidebar">
+      <div class="sw">
+        <div class="sw-title">🔥 熱門打發時間地點</div>
+        <div class="trending-item" onclick="filterCatByName('台東')"><div class="tr-rank hot">1</div><div><div class="tr-name">台東</div><div class="tr-meta">348 份行程</div></div><div class="tr-likes">❤️ 4.2k</div></div>
+        <div class="trending-item" onclick="filterCatByName('花蓮')"><div class="tr-rank hot">2</div><div><div class="tr-name">花蓮</div><div class="tr-meta">276 份行程</div></div><div class="tr-likes">❤️ 3.8k</div></div>
+        <div class="trending-item" onclick="filterCatByName('日本')"><div class="tr-rank">3</div><div><div class="tr-name">日本（京都/大阪）</div><div class="tr-meta">512 份行程</div></div><div class="tr-likes">❤️ 6.1k</div></div>
+        <div class="trending-item" onclick="filterCatByName('韓國')"><div class="tr-rank">4</div><div><div class="tr-name">韓國首爾</div><div class="tr-meta">198 份行程</div></div><div class="tr-likes">❤️ 2.9k</div></div>
+        <div class="trending-item" onclick="filterCatByName('歐洲')"><div class="tr-rank">5</div><div><div class="tr-name">歐洲（義大利）</div><div class="tr-meta">163 份行程</div></div><div class="tr-likes">❤️ 2.4k</div></div>
+      </div>
+      <div class="sw">
+        <div class="sw-title">🏷 熱門標籤</div>
+        <div class="tag-cloud">
+          <button class="tc-cloud" onclick="searchTag('親子')">👨‍👩‍👧 親子</button>
+          <button class="tc-cloud" onclick="searchTag('都市')">🏙️ 都市</button>
+          <button class="tc-cloud" onclick="searchTag('美食')">🍱 美食</button>
+          <button class="tc-cloud" onclick="searchTag('自然')">🌿 自然</button>
+          <button class="tc-cloud" onclick="searchTag('海岸')">🌊 海岸</button>
+          <button class="tc-cloud" onclick="searchTag('低預算')">💰 低預算</button>
+          <button class="tc-cloud" onclick="searchTag('蜜月')">💑 蜜月</button>
+          <button class="tc-cloud" onclick="searchTag('單人')">🎒 單人</button>
+        </div>
+      </div>
+      <div class="sw">
+        <div class="sw-title">📋 我的微旅行</div>
+        <div id="sideMyTrips"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ─── MY TRIPS VIEW ─── -->
+<div id="myTripsView" style="display:none">
+  <div class="my-page">
+    <div class="my-page-header">
+      <div class="my-page-title" id="myPageTitle">我的微旅行</div>
+      <div style="display:flex;gap:12px">
+        <button class="topbar-new-btn" style="background:var(--surface);color:var(--ink);border:1px solid var(--border);" onclick="openInvite()">🔑 輸入邀請碼</button>
+        <button class="topbar-new-btn" onclick="openWizard()">＋ 建立微旅行</button>
+      </div>
+    </div>
+    <div class="my-trips-grid" id="myTripsGrid"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════
+// DATA
+// ══════════════════════════════════════════════════
+const COMMUNITY_TRIPS = [
+  {id:'t1',cover:'🌊',cc:'c0',title:'台東海岸半日放空之旅',region:'台東',tags:['自然','海岸','半日'],author:'小美 🌿',ava:'👩',authorTrips:12,days:1,budget:'$1,500',people:'2人',likes:284,rating:4.8,copies:156,desc:'只有一個下午的空檔？從海濱公園到觀光夜市，感受台東最純粹的自然魅力。',
+    days_data:[
+      {icon:'🌊',label:'第 1 天',title:'抵達台東·海濱漫步',spots:[{emoji:'🚄',name:'台東車站出發',time:'14:00',tag:'transit'},{emoji:'🚲',name:'租單車騎行',time:'14:30',tag:'walk'},{emoji:'🌅',name:'海濱公園看夕陽',time:'16:30',tag:'sight'},{emoji:'🍜',name:'觀光夜市',time:'18:30',tag:'food'}]}
+    ]},
+  {id:'t2',cover:'⛩️',cc:'c2',title:'京都嵐山一日文化散策',region:'日本',tags:['文化','都市','1天'],author:'Ken 🎌',ava:'👨',authorTrips:28,days:1,budget:'$3,500',people:'2人',likes:521,rating:4.9,copies:342,desc:'善用一天的時間，從嵐山竹林到金閣寺，濃縮京都最精華的文化體驗。',
+    days_data:[
+      {icon:'⛩️',label:'第 1 天',title:'京都·嵐山·金閣寺',spots:[{emoji:'🎋',name:'嵐山竹林步道',time:'09:00',tag:'nature'},{emoji:'🍱',name:'嵐山商店街午餐',time:'12:00',tag:'food'},{emoji:'🏯',name:'金閣寺',time:'14:30',tag:'sight'},{emoji:'🚉',name:'準備回程',time:'16:30',tag:'transit'}]}
+    ]},
+  {id:'t3',cover:'🌸',cc:'c4',title:'首爾弘大半日美食巡禮',region:'韓國',tags:['美食','購物','半日'],author:'Jenny ☕',ava:'👧',authorTrips:9,days:1,budget:'$2,000',people:'3人',likes:398,rating:4.7,copies:228,desc:'轉機或短暫停留首爾？5小時走訪弘大咖啡廳與特色小店。',
+    days_data:[
+      {icon:'🌸',label:'第 1 天',title:'弘大商圈',spots:[{emoji:'☕',name:'弘大特色咖啡廳',time:'13:00',tag:'food'},{emoji:'🛍',name:'弘大商圈逛街',time:'15:00',tag:'walk'},{emoji:'🍱',name:'延南洞小吃',time:'17:00',tag:'food'}]}
+    ]},
+  {id:'t4',cover:'🌿',cc:'c0',title:'花蓮七星潭半日親子遊',region:'花蓮',tags:['親子','自然','半日'],author:'大雄家族 🏔',ava:'👨‍👩‍👧',authorTrips:5,days:1,budget:'$1,800',people:'4人',likes:187,rating:4.6,copies:94,desc:'抵達花蓮後的第一個下午，輕鬆走訪七星潭與漁港，適合親子的短暫放風。',
+    days_data:[
+      {icon:'🚞',label:'第 1 天',title:'抵達花蓮·七星潭',spots:[{emoji:'🚞',name:'搭車抵達花蓮',time:'13:00',tag:'transit'},{emoji:'🌊',name:'七星潭石灘散步',time:'14:30',tag:'nature'},{emoji:'🐟',name:'柴魚博物館',time:'16:30',tag:'sight'},{emoji:'🍱',name:'花蓮港漁市晚餐',time:'18:00',tag:'food'}]}
+    ]},
+  {id:'t5',cover:'🏛',cc:'c1',title:'羅馬競技場周邊半日遊',region:'歐洲',tags:['深度遊','文化','半日'],author:'Marco旅遊 🇮🇹',ava:'🧑',authorTrips:31,days:1,budget:'$2,500',people:'2人',likes:612,rating:4.9,copies:445,desc:'羅馬轉車的短暫空檔，用 4.5 小時快速巡禮古羅馬競技場與周邊遺跡。',
+    days_data:[
+      {icon:'🏛',label:'第 1 天',title:'特米尼車站周邊',spots:[{emoji:'🚉',name:'羅馬特米尼車站出發',time:'14:00',tag:'transit'},{emoji:'🏟',name:'羅馬競技場外觀',time:'14:30',tag:'sight'},{emoji:'🏛',name:'古羅馬廣場漫步',time:'16:00',tag:'walk'},{emoji:'🍦',name:'享用義式冰淇淋',time:'17:30',tag:'food'}]}
+    ]},
+  {id:'t6',cover:'🌆',cc:'c3',title:'台北週末都市兩日遊',region:'台北',tags:['文青','都市','2天'],author:'Yuki ☕',ava:'👩‍🎨',authorTrips:7,days:2,budget:'$4,500',people:'2人',likes:143,rating:4.5,copies:87,desc:'大稻埕老街、松山文創、中山站咖啡廳，台北最有質感的週末。',
+    days_data:[
+      {icon:'🏙',label:'第 1 天',title:'大稻埕·中山',spots:[{emoji:'🏘',name:'大稻埕迪化街',time:'10:00',tag:'walk'},{emoji:'☕',name:'中山站咖啡廳',time:'14:00',tag:'food'},{emoji:'🍸',name:'赤峰街酒吧',time:'20:00',tag:'food'}]},
+      {icon:'🎨',label:'第 2 天',title:'松山文創·信義',spots:[{emoji:'🎨',name:'松山文創園區',time:'10:30',tag:'sight'},{emoji:'🏬',name:'信義區逛街',time:'14:00',tag:'walk'},{emoji:'🌆',name:'象山夜景',time:'18:30',tag:'nature'}]}
+    ]},
+];
+
+// wizard step definitions
+const WIZ_TOTAL = 4;
+const WIZ_STYLES = [
+  {emoji:'🌿',label:'自然探索'},{emoji:'🍱',label:'美食之旅'},{emoji:'🎨',label:'深度文化'},
+  {emoji:'👨‍👩‍👧',label:'親子同遊'},{emoji:'🏖',label:'海灘渡假'},{emoji:'💑',label:'蜜月浪漫'}
+];
+const WIZ_DESTS = [
+  {emoji:'🌊',label:'台東'},{emoji:'�',label:'綠島'},{emoji:'🏝',label:'蘭嶼'},
+  {emoji:'🏔',label:'知本'},{emoji:'🌅',label:'三仙台'},{emoji:'⛱️',label:'海濱公園'}
+];
+
+// ── STATE ──
+let likedTrips = new Set();
+let ratedTrips = {};
+let copiedTrips = [];
+let currentPreviewId = null;
+let activeCat = 'all';
+let activeSort = 'hot';
+let searchQ = '';
+let isLoggedIn = false;
+let currentUser = null;
+let myTrips = [];  // user's own trips
+const currentItineraryId = 'TRIP-ZUOYING-240410-A';
+const currentTripTitle = '左營站外 2 小時微旅行';
+const currentTripWindow = { start: '14:00', end: '15:45' };
+const currentInviteCode = 'WNDR-88A';
+const currentJourneyMeetingPoint = '左營站 1 號出口';
+const currentJourneyPreviewStops = [
+  { time: '14:00', title: '左營站外集合', desc: '先在站外完成報到與旅伴確認，領隊會用 5 分鐘說明今天的步行節奏與拍照停留點。', tags: ['集合', '報到'] },
+  { time: '14:20', title: '龍虎塔周邊散步', desc: '沿著蓮池潭外圍慢慢走，先看經典地標，再帶你抓到適合拍照的轉角視角。', tags: ['散步', '拍照', '地標'] },
+  { time: '15:00', title: '果貿小吃短停', desc: '中段安排 20 分鐘自由覓食，可以補充飲料，也能快速買一份在地點心邊走邊吃。', tags: ['小吃', '休息'] },
+  { time: '15:25', title: '回到站區結束', desc: '最後一段帶回左營站周邊，方便直接解散或銜接下一段行程，不用再繞路。', tags: ['返回', '解散'] }
+];
+let pendingJourneyEntry = null;
+let wizStep = 0;
+let wizData = {};
+
+// ── GEMINI & FIREBASE CONFIG ──
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
+let firebaseDb = null;
+let firebaseEnabled = false;
+let isGeneratingTrip = false;
+let firebasePoiHintCache = { destination: '', block: '', updatedAt: 0 };
+let wizardPrefetchPromise = null;
+let wizardPreviewPromise = null;
+let wizardPreviewPlan = null;
+let wizardPreviewCacheKey = '';
+let wizardPreviewStreamBuffer = '';
+let wizardPreviewRequestKey = '';
+let wizardPreviewDebounceTimer = null;
+
+// ── INIT ──
+(async () => {
+  initFirebaseIfConfigured();
+  await loadState();
+
+  // Show welcome toast for fresh login (flag set by landing page)
+  if (sessionStorage.getItem('wai_just_logged_in')) {
+    sessionStorage.removeItem('wai_just_logged_in');
+    setTimeout(() => {
+      if (currentUser) showToast(`👋 歡迎，${currentUser.name}！開始規劃你的旅程吧`, 'green');
+    }, 400);
+  }
+
+  renderUserMenu();
+  renderGrid();
+  renderSideMyTrips();
+  renderMyTrips();
+})();
+
+// ══════════════════════════════════════════════════
+// FIREBASE & GEMINI
+// ══════════════════════════════════════════════════
+function initFirebaseIfConfigured() {
+  const config = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.FIREBASE_CONFIG;
+  if (!window.firebase || !config) return false;
+  if (!config.apiKey || !config.projectId) return false;
+  try {
+    if (!firebase.apps.length) {
+      firebase.initializeApp(config);
+    }
+    firebaseDb = firebase.firestore();
+    firebaseEnabled = true;
+    return true;
+  } catch (error) {
+    console.warn('Firebase 初始化失敗：', error);
+    firebaseEnabled = false;
+    return false;
+  }
+}
+
+async function buildFirebasePoiHintBlock(wizardData) {
+  if (!firebaseEnabled || !firebaseDb) return '';
+  const destination = (wizardData.dest || wizardData.destCustom || '').trim();
+  if (!destination) return '';
+  try {
+    const snapshot = await firebaseDb.collection('poi_cache').where('destination', '==', destination).limit(20).get();
+    if (snapshot.empty) return '';
+
+    const poiLines = [];
+    snapshot.forEach(doc => {
+      const poi = doc.data();
+      const poiLat = Number(poi.lat);
+      const poiLng = Number(poi.lng);
+      if (Number.isFinite(poiLat) && Number.isFinite(poiLng)) {
+        poiLines.push(`lat: ${poiLat}, lng: ${poiLng}\n`);
+      }
+      const durationHint = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0 ? `${poi.duration} 分鐘` : '未知';
+      poiLines.push(`景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`);
+    });
+
+    return `從 Firebase 取得的景點資料（若符合請優先使用）：\n${poiLines.join('\n')}`;
+  } catch (error) {
+    console.warn('Firebase POI 檢索失敗：', error);
+    return '';
+  }
+}
+
+function getWizardDestination(wizardData) {
+  return String((wizardData && (wizardData.dest || wizardData.destCustom)) || '').trim();
+}
+
+async function prefetchFirebasePoiHint(wizardData, force = false) {
+  const destination = getWizardDestination(wizardData);
+  if (!destination) return '';
+  if (!force && firebasePoiHintCache.destination === destination && firebasePoiHintCache.block) {
+    return firebasePoiHintCache.block;
+  }
+  if (wizardPrefetchPromise && !force) return wizardPrefetchPromise;
+  wizardPrefetchPromise = buildFirebasePoiHintBlock(wizardData)
+    .then((block) => {
+      firebasePoiHintCache = {
+        destination,
+        block: String(block || ''),
+        updatedAt: Date.now()
+      };
+      return firebasePoiHintCache.block;
+    })
+    .catch((error) => {
+      console.warn('Firebase hint prefetch failed:', error);
+      return '';
+    })
+    .finally(() => {
+      wizardPrefetchPromise = null;
+    });
+  return wizardPrefetchPromise;
+}
+
+function isLongTrip(days) {
+  return String(days || '') === '2天';
+}
+
+function getPromptRuleLines(wizardData, mode) {
+  const days = wizardData.days || '1天';
+  const people = wizardData.people || '2人';
+  const pace = wizardData.pace || '平衡';
+  const interests = (wizardData.interests || []).join('、') || '多元';
+  const detailed = mode !== 'preview';
+  const lines = [
+    `1. 針對 ${days} 的時間量身打造`,
+    `2. 適合 ${people} 人同行`,
+    `3. 符合 ${pace} 的節奏`,
+    `4. 強調 ${interests} 面向`
+  ];
+
+  if (detailed) {
+    lines.push('5. 包含 3-5 個主要停留點');
+    lines.push('6. 每站包含時間、景點名稱、推薦理由、營業時間、附近廁所位置（1-3個）');
+    lines.push('7. 廁所輸出格式：{name:"名稱", lat:數字, lng:數字}，若無法確認座標則省略 lat/lng');
+    lines.push('8. 景點須考慮營業時間，且使用正式可定位名稱');
+    lines.push('9. 請勿自行編造座標，無法確認請省略座標欄位');
+    lines.push('10. 景點座標、景點建議停留時間與廁所座標，優先參考 data.gov.tw 開放資料（https://data.gov.tw）中的相關資料集，例如：觀光景點資料集、公廁位置資料集等');
+    if (isLongTrip(days)) {
+      lines.push('11. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
+      lines.push('12. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
+      lines.push('13. 需安排 12:00-13:30 的彈性午餐停留時段');
+    }
+  } else {
+    lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
+  }
+  return lines;
+}
+
+function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
+  const destination = wizardData.dest || wizardData.destCustom || '台東';
+  const contextBlock = [
+    `目的地：${destination}`,
+    `時間長度：${wizardData.days || '1天'}`,
+    `旅伴：${wizardData.people || '2人'}`,
+    `行程節奏：${wizardData.pace || '平衡'}`,
+    `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
+    `旅程風格：${wizardData.theme || '經典旅人'}`
+  ].join('\n');
+
+  const rules = getPromptRuleLines(wizardData, mode).join('\n');
+  const outputSchema = mode === 'preview'
+    ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,desc,duration,businessHours,nearbyToiletLocations:[{name,lat,lng}]}]`;
+
+  const firebaseSection = mode === 'final' && firebaseHint
+    ? `\n\n從 Firebase 取得的景點資料（若符合請優先使用）：\n${firebaseHint}`
+    : '';
+
+  const prompt = `你是台東微旅行的 AI 規劃助手。根據用戶需求生成可執行行程。景點座標與廁所座標請優先參考 data.gov.tw（https://data.gov.tw）的開放資料，包含觀光景點資料集與公廁位置資料集。${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}`;
+
+  return { prompt, contextBlock };
+}
+
+function extractGeminiResponseText(data) {
+  return data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0]
+    ? String(data.candidates[0].content.parts[0].text || '')
+    : '';
+}
+
+function parsePlanJsonFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) throw new Error('AI 回傳內容為空。');
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+    throw new Error('AI 回傳格式不是有效 JSON。');
+  }
+}
+
+async function fetchGeminiJson({ apiKey, model, payload }) {
+  const endpoint = `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(`Gemini API 失敗（${response.status}）`);
+  }
+  return response.json();
+}
+
+async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
+  const endpoint = `${GEMINI_API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Gemini stream 失敗（${response.status}）`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText = '';
+  let sseBuffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+    const lines = sseBuffer.split('\n');
+    sseBuffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) continue;
+      const payloadText = trimmed.slice(5).trim();
+      if (!payloadText || payloadText === '[DONE]') continue;
+      try {
+        const eventJson = JSON.parse(payloadText);
+        const chunkText = extractGeminiResponseText(eventJson);
+        if (!chunkText) continue;
+        fullText += chunkText;
+        if (typeof onChunk === 'function') onChunk(chunkText, fullText);
+      } catch (error) {
+        console.warn('Ignored non-json stream chunk:', error);
+      }
+    }
+  }
+
+  return fullText;
+}
+
+function getGeminiApiKey() {
+  const fromEnv = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.GEMINI_API_KEY;
+  if (typeof fromEnv === 'string' && fromEnv.trim()) {
+    return fromEnv.trim();
+  }
+  const fromStorage = window.localStorage.getItem(GEMINI_LOCAL_KEY);
+  if (typeof fromStorage === 'string' && fromStorage.trim()) {
+    return fromStorage.trim();
+  }
+  return '';
+}
+
+function setGeminiApiKey(apiKey) {
+  const next = String(apiKey || '').trim();
+  if (!next) return;
+  window.localStorage.setItem(GEMINI_LOCAL_KEY, next);
+}
+
+function ensureGeminiApiKey() {
+  const existing = getGeminiApiKey();
+  if (existing) return existing;
+  const input = window.prompt('請先輸入 Gemini API Key（只會保存在你的瀏覽器 localStorage）');
+  const apiKey = String(input || '').trim();
+  if (!apiKey) return '';
+  setGeminiApiKey(apiKey);
+  return apiKey;
+}
+
+function getWizardPlanCacheKey(wizardData, mode) {
+  return [
+    mode || 'final',
+    wizardData.dest || wizardData.destCustom || '',
+    wizardData.days || '',
+    wizardData.people || '',
+    wizardData.pace || '',
+    (wizardData.interests || []).join('|'),
+    wizardData.theme || ''
+  ].join('::');
+}
+
+function renderAiSkeletonPreview(plan) {
+  if (!plan || !Array.isArray(plan.stops) || !plan.stops.length) return;
+  const flowNodes = document.getElementById('flowNodes');
+  const flowSummary = document.getElementById('flowSummary');
+  const flowTitle = document.getElementById('flowTitle');
+  if (!flowNodes || !flowSummary || !flowTitle) return;
+
+  const stops = plan.stops.slice(0, 6);
+  flowTitle.textContent = plan.title || flowTitle.textContent;
+  flowNodes.innerHTML = stops.map((spot, index) => {
+    const name = spot && spot.name ? spot.name : `景點 ${index + 1}`;
+    const desc = spot && spot.desc ? spot.desc : 'AI 預覽骨架';
+    const time = spot && spot.time ? spot.time : '--:--';
+    return `
+    <div class="wizard-node">
+      <div class="wizard-node-top">
+        <h4 class="wizard-node-title">🧭 ${name}</h4>
+        <span style="font-size:12px;color:#4e6b87;">${time}</span>
+      </div>
+      <p class="wizard-node-desc">${desc}</p>
+    </div>`;
+  }).join('');
+  flowSummary.textContent = plan.reply || 'AI 已先生成預覽骨架，按下建立行程後會在背景補齊完整細節。';
+}
+
+function setWizardStreamingHint(text) {
+  const flowSummary = document.getElementById('flowSummary');
+  if (!flowSummary) return;
+  flowSummary.textContent = text;
+}
+
+function clearWizardPrefetchState() {
+  wizardPreviewPlan = null;
+  wizardPreviewPromise = null;
+  wizardPreviewCacheKey = '';
+  wizardPreviewRequestKey = '';
+  wizardPreviewStreamBuffer = '';
+  if (wizardPreviewDebounceTimer) {
+    clearTimeout(wizardPreviewDebounceTimer);
+    wizardPreviewDebounceTimer = null;
+  }
+}
+
+function triggerFirebaseHintPrefetch() {
+  const destination = getWizardDestination(wizData);
+  if (!destination) return;
+  prefetchFirebasePoiHint(wizData).catch((error) => {
+    console.warn('Prefetch firebase hint failed:', error);
+  });
+}
+
+function requestWizardPreviewInBackground(reason = 'wizard') {
+  const destination = getWizardDestination(wizData);
+  if (!destination) return;
+  if (!getGeminiApiKey()) return;
+
+  const requestKey = getWizardPlanCacheKey(wizData, 'preview');
+  if (wizardPreviewCacheKey === requestKey && wizardPreviewPlan) return;
+  wizardPreviewRequestKey = requestKey;
+  setWizardStreamingHint(`AI 預覽生成中（${reason}）...`);
+
+  const requestData = {
+    dest: wizData.dest,
+    destCustom: wizData.destCustom,
+    days: wizData.days,
+    people: wizData.people,
+    pace: wizData.pace,
+    interests: Array.isArray(wizData.interests) ? [...wizData.interests] : [],
+    theme: wizData.theme
+  };
+
+  wizardPreviewPromise = requestGeminiMicroTravelPlan(requestData, {
+    mode: 'preview',
+    includeFirebase: false,
+    useStreaming: true,
+    promptForKey: false,
+    onChunk: (_chunk, fullText) => {
+      wizardPreviewStreamBuffer = fullText;
+      const size = fullText.length;
+      if (size > 0) {
+        setWizardStreamingHint(`AI 預覽生成中（${reason}）... 已接收 ${size} 字`);
+      }
+    }
+  })
+    .then((plan) => {
+      if (wizardPreviewRequestKey !== requestKey) return;
+      wizardPreviewPlan = plan;
+      wizardPreviewCacheKey = requestKey;
+      renderAiSkeletonPreview(plan);
+    })
+    .catch((error) => {
+      if (wizardPreviewRequestKey !== requestKey) return;
+      console.warn('Preview prewarm failed:', error);
+    })
+    .finally(() => {
+      if (wizardPreviewRequestKey === requestKey) {
+        wizardPreviewPromise = null;
+      }
+    });
+}
+
+function scheduleWizardPreviewRequest(reason = 'wizard') {
+  if (wizardPreviewDebounceTimer) clearTimeout(wizardPreviewDebounceTimer);
+  wizardPreviewDebounceTimer = setTimeout(() => {
+    requestWizardPreviewInBackground(reason);
+  }, 450);
+}
+
+function getCachedWizardPreviewPlan() {
+  const key = getWizardPlanCacheKey(wizData, 'preview');
+  if (wizardPreviewPlan && wizardPreviewCacheKey === key) return wizardPreviewPlan;
+  return null;
+}
+
+async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
+  const shouldPromptForKey = options.promptForKey !== false;
+  const apiKey = shouldPromptForKey ? ensureGeminiApiKey() : getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error('尚未設定 Gemini API Key。');
+  }
+
+  const mode = options.mode === 'preview' ? 'preview' : 'final';
+  const includeFirebase = options.includeFirebase !== false && mode === 'final';
+  const useStreaming = options.useStreaming === true;
+  const firebasePromptBlock = includeFirebase
+    ? (await prefetchFirebasePoiHint(wizardData).catch(() => ''))
+    : '';
+
+  const built = buildPrompt(wizardData, firebasePromptBlock, mode);
+  const preferredModel = GEMINI_MODEL;
+  const payload = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: built.prompt }]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.6
+    }
+  };
+
+  async function requestOnce(model, streamMode) {
+    if (streamMode) {
+      return fetchGeminiStream({
+        apiKey,
+        model,
+        payload,
+        onChunk: options.onChunk
+      });
+    }
+    const data = await fetchGeminiJson({ apiKey, model, payload });
+    return extractGeminiResponseText(data);
+  }
+
+  let text = '';
+  try {
+    text = await requestOnce(preferredModel, useStreaming);
+  } catch (error) {
+    const is404 = /\(404\)/.test(String(error && error.message || ''));
+    if (!is404) throw error;
+
+    if (useStreaming) {
+      // Fallback 1: same model without streaming.
+      try {
+        text = await requestOnce(preferredModel, false);
+      } catch (fallbackError) {
+        const fallback404 = /\(404\)/.test(String(fallbackError && fallbackError.message || ''));
+        if (!fallback404) throw fallbackError;
+        // Fallback 2: stable default model without streaming.
+        text = await requestOnce(GEMINI_MODEL, false);
+      }
+    } else {
+      // Non-stream 404: fallback to stable default model.
+      text = await requestOnce(GEMINI_MODEL, false);
+    }
+  }
+  return parsePlanJsonFromText(text);
+}
+
+function getStopCoordinate(stop) {
+  if (!stop || typeof stop !== 'object') return null;
+
+  function parseCoordinateValue(rawValue) {
+    if (rawValue === null || rawValue === undefined) return null;
+    if (typeof rawValue === 'number') return Number.isFinite(rawValue) ? rawValue : null;
+    const source = String(rawValue).trim();
+    if (!source) return null;
+    const marker = /[SWsw]/.test(source) ? -1 : 1;
+    const match = source.replace(/，/g, ',').match(/[-+]?\d+(?:[\.,]\d+)?/);
+    if (!match) return null;
+    const parsed = Number(match[0].replace(',', '.'));
+    if (!Number.isFinite(parsed)) return null;
+    return marker < 0 ? -Math.abs(parsed) : parsed;
+  }
+
+  function parseCoordinatePairFromText(rawValue) {
+    const source = String(rawValue || '').trim();
+    if (!source) return null;
+    const pairMatch = source.match(/([-+]?\d+(?:\.\d+)?)\s*[,|\/]\s*([-+]?\d+(?:\.\d+)?)/);
+    if (!pairMatch) return null;
+    const first = parseCoordinateValue(pairMatch[1]);
+    const second = parseCoordinateValue(pairMatch[2]);
+    if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+
+    if (first >= -90 && first <= 90 && second >= -180 && second <= 180) {
+      return { lat: first, lng: second };
+    }
+    if (first >= -180 && first <= 180 && second >= -90 && second <= 90) {
+      return { lat: second, lng: first };
+    }
+    return null;
+  }
+
+  const directLat = parseCoordinateValue(
+    stop.lat
+    ?? stop.latitude
+    ?? (stop.location && stop.location.lat)
+    ?? (stop.coordinate && stop.coordinate.lat)
+    ?? (stop.coordinates && stop.coordinates.lat)
+    ?? (stop.geo && stop.geo.lat)
+  );
+  const directLng = parseCoordinateValue(
+    stop.lng
+    ?? stop.longitude
+    ?? (stop.location && stop.location.lng)
+    ?? (stop.coordinate && stop.coordinate.lng)
+    ?? (stop.coordinates && stop.coordinates.lng)
+    ?? (stop.geo && stop.geo.lng)
+  );
+
+  let lat = directLat;
+  let lng = directLng;
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    if (Array.isArray(stop.coordinates) && stop.coordinates.length >= 2) {
+      const first = parseCoordinateValue(stop.coordinates[0]);
+      const second = parseCoordinateValue(stop.coordinates[1]);
+      if (Number.isFinite(first) && Number.isFinite(second)) {
+        if (first >= -90 && first <= 90 && second >= -180 && second <= 180) {
+          lat = first;
+          lng = second;
+        } else if (first >= -180 && first <= 180 && second >= -90 && second <= 90) {
+          lat = second;
+          lng = first;
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    const textPair = parseCoordinatePairFromText(
+      stop.coordinate
+      || stop.coordinates
+      || stop.location
+      || stop.mapUrl
+      || stop.googleMapsUrl
+      || ''
+    );
+    if (textPair) {
+      lat = textPair.lat;
+      lng = textPair.lng;
+    }
+  }
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+
+function getDistanceMeters(a, b) {
+  const earthRadius = 6371000;
+  const toRad = (value) => value * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
+const DESTINATION_CENTER_MAP = {
+  '台北': { lat: 25.033, lng: 121.565 },
+  '新北': { lat: 25.016, lng: 121.462 },
+  '桃園': { lat: 24.993, lng: 121.301 },
+  '台中': { lat: 24.147, lng: 120.674 },
+  '台南': { lat: 22.999, lng: 120.227 },
+  '高雄': { lat: 22.627, lng: 120.301 },
+  '台東': { lat: 22.755, lng: 121.144 },
+  '花蓮': { lat: 23.987, lng: 121.601 },
+  '宜蘭': { lat: 24.759, lng: 121.754 },
+  '屏東': { lat: 22.676, lng: 120.494 },
+  '南投': { lat: 23.960, lng: 120.972 },
+  '嘉義': { lat: 23.480, lng: 120.449 },
+  '苗栗': { lat: 24.560, lng: 120.821 },
+  '新竹': { lat: 24.804, lng: 120.971 },
+  '基隆': { lat: 25.128, lng: 121.739 },
+  '日本': { lat: 35.681, lng: 139.767 },
+  '韓國': { lat: 37.566, lng: 126.978 },
+  '歐洲': { lat: 48.857, lng: 2.352 }
+};
+
+const TRAFFIC_RISK_KEYWORDS = [
+  '交流道', '匝道', '國道', '快速道路', '高架', '環河', '環東', '環南', '橋', '隧道',
+  '中山路', '中正路', '民權路', '民族路', '復興路', '建國路', '成功路', '忠孝路',
+  '火車站', '車站', '轉運站', '機場', '港口', '商圈', '夜市'
+];
+
+function normalizeLookupText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, '').replace(/[()（）,，.。·•\-_/]/g, '');
+}
+
+function clearStopCoordinates(stop) {
+  if (!stop || typeof stop !== 'object') return;
+  delete stop.lat;
+  delete stop.lng;
+  delete stop.latitude;
+  delete stop.longitude;
+  if (stop.location && typeof stop.location === 'object') {
+    delete stop.location.lat;
+    delete stop.location.lng;
+  }
+}
+
+function getDestinationCenter(destinationText) {
+  const lookup = String(destinationText || '').trim();
+  if (!lookup) return null;
+  if (DESTINATION_CENTER_MAP[lookup]) return DESTINATION_CENTER_MAP[lookup];
+  const hit = Object.keys(DESTINATION_CENTER_MAP).find((key) => lookup.includes(key));
+  return hit ? DESTINATION_CENTER_MAP[hit] : null;
+}
+
+function getDestinationMaxDistanceMeters(destinationText) {
+  const lookup = String(destinationText || '').trim();
+  if (!lookup) return 45000;
+  if (/日本|韓國|歐洲/.test(lookup)) return 120000;
+  if (/台北|新北|桃園|台中|台南|高雄|基隆|新竹/.test(lookup)) return 40000;
+  if (/台東|花蓮|宜蘭|屏東|南投|嘉義|苗栗/.test(lookup)) return 55000;
+  return 50000;
+}
+
+function getDurationMaxLegDistanceMeters(days) {
+  if (days === '0.5小時') return 6000;
+  if (days === '1小時') return 10000;
+  if (days === '2小時') return 16000;
+  if (days === '半天') return 30000;
+  if (days === '2天') return 90000;
+  return 50000;
+}
+
+function getPoiCacheCenter(poiCache) {
+  const list = Array.isArray(poiCache) ? poiCache : [];
+  if (!list.length) return null;
+  const points = list
+    .map((poi) => ({ lat: Number(poi.lat), lng: Number(poi.lng) }))
+    .filter((coord) => Number.isFinite(coord.lat) && Number.isFinite(coord.lng));
+  if (!points.length) return null;
+  return {
+    lat: points.reduce((sum, point) => sum + point.lat, 0) / points.length,
+    lng: points.reduce((sum, point) => sum + point.lng, 0) / points.length
+  };
+}
+
+function getDepartureMinutesByLeg(legIndex, wizardData = {}) {
+  const startMinutes = timeStringToMinutes(normalizeClockInput(wizardData.startTime, '09:00'));
+  const pace = wizardData.pace || '平衡';
+  const gapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
+  return startMinutes + Math.max(0, legIndex) * gapMinutes;
+}
+
+function getPeakTrafficMultiplier(minutesOfDay) {
+  const minutes = ((Number(minutesOfDay) % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const morningPeak = minutes >= (7 * 60) && minutes < (9 * 60 + 30);
+  const eveningPeak = minutes >= (17 * 60) && minutes < (19 * 60 + 30);
+  const shoulder = (minutes >= (6 * 60 + 30) && minutes < (7 * 60)) || (minutes >= (9 * 60 + 30) && minutes < (10 * 60 + 30))
+    || (minutes >= (16 * 60 + 30) && minutes < (17 * 60)) || (minutes >= (19 * 60 + 30) && minutes < (20 * 60));
+  if (morningPeak || eveningPeak) return 1.35;
+  if (shoulder) return 1.15;
+  return 1;
+}
+
+function getStopTrafficRiskScore(stop) {
+  if (!stop || typeof stop !== 'object') return 0;
+  const marker = normalizeLookupText([
+    stop.name,
+    stop.title,
+    stop.desc,
+    stop.description,
+    stop.address,
+    stop.location && stop.location.address
+  ].filter(Boolean).join(' '));
+  if (!marker) return 0;
+
+  let score = 0;
+  TRAFFIC_RISK_KEYWORDS.forEach((keyword) => {
+    if (marker.includes(normalizeLookupText(keyword))) score += 1;
+  });
+  return Math.min(5, score);
+}
+
+function getWeightedLegCostMeters(fromStop, toStop, legIndex, wizardData = {}) {
+  const fromCoord = getStopCoordinate(fromStop);
+  const toCoord = getStopCoordinate(toStop);
+  if (!fromCoord || !toCoord) return Infinity;
+
+  const baseDistance = getDistanceMeters(fromCoord, toCoord);
+  const departureMinutes = getDepartureMinutesByLeg(legIndex, wizardData);
+  const peakMultiplier = getPeakTrafficMultiplier(departureMinutes);
+  const riskScore = (getStopTrafficRiskScore(fromStop) + getStopTrafficRiskScore(toStop)) / 2;
+  const riskMultiplier = 1 + (riskScore * 0.06);
+  return baseDistance * peakMultiplier * riskMultiplier;
+}
+
+function getRouteDistanceMeters(stops, wizardData = {}) {
+  if (!Array.isArray(stops) || stops.length < 2) return 0;
+  const coords = stops.map(getStopCoordinate);
+  if (coords.some(coord => !coord)) return Infinity;
+
+  let totalDistance = 0;
+  for (let index = 1; index < coords.length; index += 1) {
+    totalDistance += getWeightedLegCostMeters(stops[index - 1], stops[index], index - 1, wizardData);
+  }
+  return totalDistance;
+}
+
+function buildNearestNeighborRoute(stops, startIndex, wizardData = {}) {
+  const seed = Array.isArray(stops) ? stops : [];
+  if (!seed.length) return [];
+  const safeStartIndex = Math.max(0, Math.min(seed.length - 1, Number(startIndex) || 0));
+  const route = [seed[safeStartIndex]];
+  const remaining = seed.filter((_, index) => index !== safeStartIndex);
+
+  while (remaining.length) {
+    const currentCoord = getStopCoordinate(route[route.length - 1]);
+    if (!currentCoord) return [...seed];
+
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    remaining.forEach((candidateStop, index) => {
+      const candidateCoord = getStopCoordinate(candidateStop);
+      if (!candidateCoord) return;
+      const distance = getWeightedLegCostMeters(route[route.length - 1], candidateStop, route.length - 1, wizardData);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    route.push(remaining.splice(nearestIndex, 1)[0]);
+  }
+
+  return route;
+}
+
+function improveRouteWithTwoOpt(route, lockFirstStop = false, wizardData = {}) {
+  if (!Array.isArray(route) || route.length < 4) return Array.isArray(route) ? [...route] : [];
+  let bestRoute = [...route];
+  let bestDistance = getRouteDistanceMeters(bestRoute, wizardData);
+  if (!Number.isFinite(bestDistance)) return [...route];
+
+  const segmentStart = lockFirstStop ? 1 : 0;
+  let improved = true;
+
+  while (improved) {
+    improved = false;
+    for (let i = segmentStart; i < bestRoute.length - 2; i += 1) {
+      for (let j = i + 1; j < bestRoute.length; j += 1) {
+        const candidate = [...bestRoute];
+        const reversedSegment = candidate.slice(i, j + 1).reverse();
+        candidate.splice(i, reversedSegment.length, ...reversedSegment);
+
+        const candidateDistance = getRouteDistanceMeters(candidate, wizardData);
+        if (candidateDistance + 1e-6 < bestDistance) {
+          bestRoute = candidate;
+          bestDistance = candidateDistance;
+          improved = true;
+        }
+      }
+    }
+  }
+
+  return bestRoute;
+}
+
+async function fetchDestinationPoiCache(destinationText) {
+  if (!firebaseEnabled || !firebaseDb) return [];
+  const destination = String(destinationText || '').trim();
+  if (!destination) return [];
+
+  try {
+    const snapshot = await firebaseDb.collection('poi_cache').where('destination', '==', destination).limit(80).get();
+    if (snapshot.empty) return [];
+    const pois = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      const coord = getStopCoordinate(data);
+      if (!coord) return;
+      pois.push({
+        name: data.name || '',
+        address: data.address || data.location || '',
+        lat: coord.lat,
+        lng: coord.lng
+      });
+    });
+    return pois;
+  } catch (error) {
+    console.warn('Firebase POI cache 讀取失敗：', error);
+    return [];
+  }
+}
+
+function splitLookupTerms(value) {
+  const source = String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[()（）,，.。·•\-_/|]/g, ' ')
+    .trim();
+  if (!source) return [];
+  const tokens = source
+    .split(/\s+/)
+    .filter(Boolean)
+    .flatMap((token) => (token.length > 2 ? [token, ...token.split('').filter((char) => char.trim())] : [token]));
+  return Array.from(new Set(tokens));
+}
+
+function getPoiMatchScore(stop, poi) {
+  if (!stop || !poi) return 0;
+
+  const stopNameRaw = String(stop.name || stop.title || '').trim();
+  const stopAddressRaw = String(stop.address || (stop.location && stop.location.address) || '').trim();
+  const stopDescRaw = String(stop.desc || stop.description || '').trim();
+  const poiNameRaw = String(poi.name || '').trim();
+  const poiAddressRaw = String(poi.address || '').trim();
+  const poiDescRaw = String(poi.desc || poi.description || '').trim();
+
+  const stopName = normalizeLookupText(stopNameRaw);
+  const poiName = normalizeLookupText(poiNameRaw);
+  if (!stopName || !poiName) return 0;
+
+  let score = 0;
+  if (stopName === poiName) score += 120;
+  else if (stopName.includes(poiName) || poiName.includes(stopName)) score += 90;
+
+  const stopAddress = normalizeLookupText(stopAddressRaw);
+  const poiAddress = normalizeLookupText(poiAddressRaw);
+  if (stopAddress && poiAddress) {
+    if (stopAddress === poiAddress) score += 60;
+    else if (stopAddress.includes(poiAddress) || poiAddress.includes(stopAddress)) score += 40;
+  }
+
+  const stopDesc = normalizeLookupText(stopDescRaw);
+  const poiDesc = normalizeLookupText(poiDescRaw);
+  if (stopDesc && poiDesc) {
+    if (stopDesc.includes(poiName) || poiDesc.includes(stopName)) score += 20;
+    if (stopDesc.includes(poiAddress) || poiDesc.includes(stopAddress)) score += 12;
+  }
+
+  const stopTokens = splitLookupTerms([stopNameRaw, stopAddressRaw, stopDescRaw].filter(Boolean).join(' '));
+  const poiTokens = splitLookupTerms([poiNameRaw, poiAddressRaw, poiDescRaw].filter(Boolean).join(' '));
+  const sharedTokens = stopTokens.filter((token) => poiTokens.includes(token));
+  score += Math.min(28, sharedTokens.length * 4);
+
+  const genericPattern = /(景點|公園|市場|老街|商圈|車站|夜市|海灘|步道|寺|廟|館)$/;
+  if (genericPattern.test(poiNameRaw) && !stopAddress && !poiAddress) {
+    score -= 8;
+  }
+
+  if (stopName.length <= 3 || poiName.length <= 3) {
+    score -= 6;
+  }
+
+  return score;
+}
+
+function isBroadPlaceLabel(value) {
+  const normalized = normalizeLookupText(value);
+  if (!normalized) return true;
+  if (normalized.length <= 2) return true;
+  return /^(公園|景點|市場|老街|商圈|車站|夜市|海灘|步道|寺|廟|館|橋|港|湖|山|公路|道路|大道)$/.test(String(value || '').trim());
+}
+
+function findPoiCacheCoordinate(stop, poiCache) {
+  const list = Array.isArray(poiCache) ? poiCache : [];
+  if (!list.length) return null;
+  const stopNameRaw = String(stop && (stop.name || stop.title) || '').trim();
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const poi of list) {
+    const score = getPoiMatchScore(stop, poi);
+    if (score > bestScore) {
+      const lat = Number(poi.lat);
+      const lng = Number(poi.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      bestScore = score;
+      bestMatch = { lat, lng, source: 'firebase_cache', score };
+    }
+  }
+
+  if (!bestMatch) return null;
+  const minScore = isBroadPlaceLabel(stopNameRaw) ? 100 : 70;
+  if (bestScore < minScore) return null;
+  return bestMatch;
+}
+
+function sanitizeStopCoordinates(stops, wizardData = {}, poiCache = []) {
+  const sourceStops = Array.isArray(stops) ? stops : [];
+  const destinationText = wizardData.dest || wizardData.destCustom || wizardData.region || '';
+  const destinationCenter = getDestinationCenter(destinationText) || getPoiCacheCenter(poiCache);
+  const maxDistanceToCenterMeters = getDestinationMaxDistanceMeters(destinationText);
+  const maxLegDistanceMeters = getDurationMaxLegDistanceMeters(wizardData.days || '1天');
+  const maxCacheDisagreementMeters = Math.min(15000, Math.floor(maxDistanceToCenterMeters * 0.35));
+
+  const normalized = sourceStops.map((rawStop) => {
+    const stop = rawStop && typeof rawStop === 'object' ? { ...rawStop } : rawStop;
+    if (!stop || typeof stop !== 'object') return stop;
+
+    const fallbackCoord = findPoiCacheCoordinate(stop, poiCache);
+    let coord = getStopCoordinate(stop);
+
+    if (!coord && fallbackCoord) {
+      stop.lat = fallbackCoord.lat;
+      stop.lng = fallbackCoord.lng;
+      stop.coordinateSource = fallbackCoord.source;
+      coord = getStopCoordinate(stop);
+    }
+
+    if (coord && fallbackCoord) {
+      const disagreement = getDistanceMeters(coord, fallbackCoord);
+      if (disagreement > maxCacheDisagreementMeters) {
+        stop.lat = fallbackCoord.lat;
+        stop.lng = fallbackCoord.lng;
+        stop.coordinateSource = fallbackCoord.source;
+        stop.coordinateWarning = 'replaced_with_cache_coordinate';
+        coord = getStopCoordinate(stop);
+      }
+    }
+
+    if (coord && destinationCenter) {
+      const distanceToCenter = getDistanceMeters(coord, destinationCenter);
+      if (distanceToCenter > maxDistanceToCenterMeters) {
+        if (fallbackCoord) {
+          stop.lat = fallbackCoord.lat;
+          stop.lng = fallbackCoord.lng;
+          stop.coordinateSource = fallbackCoord.source;
+        } else {
+          clearStopCoordinates(stop);
+          stop.coordinateWarning = 'out_of_destination_range';
+        }
+      }
+    }
+
+    return stop;
+  });
+
+  const validCoords = normalized
+    .map((stop) => ({ stop, coord: getStopCoordinate(stop) }))
+    .filter((item) => item.coord);
+
+  if (validCoords.length >= 3) {
+    const centroid = {
+      lat: validCoords.reduce((sum, item) => sum + item.coord.lat, 0) / validCoords.length,
+      lng: validCoords.reduce((sum, item) => sum + item.coord.lng, 0) / validCoords.length
+    };
+    const maxDistanceToCentroidMeters = Math.min(maxDistanceToCenterMeters, Math.max(12000, Math.floor(maxLegDistanceMeters * 1.2)));
+
+    normalized.forEach((stop) => {
+      if (!stop || typeof stop !== 'object') return;
+      const coord = getStopCoordinate(stop);
+      if (!coord) return;
+      const distanceToCentroid = getDistanceMeters(coord, centroid);
+      if (distanceToCentroid > maxDistanceToCentroidMeters) {
+        const fallbackCoord = findPoiCacheCoordinate(stop, poiCache);
+        if (fallbackCoord) {
+          stop.lat = fallbackCoord.lat;
+          stop.lng = fallbackCoord.lng;
+          stop.coordinateSource = fallbackCoord.source;
+        } else {
+          clearStopCoordinates(stop);
+          stop.coordinateWarning = 'outlier_coordinate';
+        }
+      }
+    });
+  }
+
+  for (let index = 1; index < normalized.length; index += 1) {
+    const currentStop = normalized[index];
+    const previousStop = normalized[index - 1];
+    if (!currentStop || !previousStop) continue;
+    const currentCoord = getStopCoordinate(currentStop);
+    const previousCoord = getStopCoordinate(previousStop);
+    if (!currentCoord || !previousCoord) continue;
+
+    const legDistance = getDistanceMeters(previousCoord, currentCoord);
+    if (legDistance > maxLegDistanceMeters) {
+      const fallbackCoord = findPoiCacheCoordinate(currentStop, poiCache);
+      if (fallbackCoord) {
+        currentStop.lat = fallbackCoord.lat;
+        currentStop.lng = fallbackCoord.lng;
+        currentStop.coordinateSource = fallbackCoord.source;
+        currentStop.coordinateWarning = 'long_leg_replaced_with_cache_coordinate';
+      } else {
+        clearStopCoordinates(currentStop);
+        currentStop.coordinateWarning = 'long_leg_outlier_coordinate';
+      }
+    }
+  }
+
+  return normalized;
+}
+
+function shouldKeepFirstStopAsAnchor(stop) {
+  if (!stop || typeof stop !== 'object') return false;
+  const marker = `${stop.name || ''} ${stop.title || ''} ${(stop.tags || []).join(' ')}`;
+  return /集合|出發|起點|報到|車站|機場|港口/.test(marker);
+}
+
+function sortStopsByNearestRoute(stops, wizardData = {}) {
+  if (!Array.isArray(stops) || stops.length < 3) return Array.isArray(stops) ? [...stops] : [];
+
+  const indexedStops = stops.map((stop, index) => ({
+    index,
+    stop,
+    coord: getStopCoordinate(stop)
+  }));
+  const coordinateStops = indexedStops.filter((item) => item.coord);
+  if (coordinateStops.length < 3) return [...stops];
+
+  const routeCandidates = coordinateStops.map((item) => item.stop);
+  const lockFirstStop = shouldKeepFirstStopAsAnchor(routeCandidates[0]);
+  const startIndexes = lockFirstStop
+    ? [0]
+    : routeCandidates.map((_, index) => index);
+
+  let bestRoute = [...routeCandidates];
+  let bestDistance = getRouteDistanceMeters(bestRoute, wizardData);
+
+  startIndexes.forEach((startIndex) => {
+    const nearestRoute = buildNearestNeighborRoute(routeCandidates, startIndex, wizardData);
+    const optimizedRoute = improveRouteWithTwoOpt(nearestRoute, lockFirstStop, wizardData);
+    const optimizedDistance = getRouteDistanceMeters(optimizedRoute, wizardData);
+    if (optimizedDistance < bestDistance) {
+      bestRoute = optimizedRoute;
+      bestDistance = optimizedDistance;
+    }
+  });
+
+  const sortedKnownQueue = [...bestRoute];
+  return indexedStops.map((item) => {
+    if (!item.coord) return item.stop;
+    return sortedKnownQueue.shift() || item.stop;
+  });
+}
+
+function normalizeGeneratedStop(stop, index, fallbackTime) {
+  const safeStop = stop && typeof stop === 'object' ? { ...stop } : {};
+  safeStop.order = index + 1;
+  safeStop.emoji = safeStop.emoji || '📍';
+  safeStop.name = safeStop.name || safeStop.title || `景點 ${index + 1}`;
+  safeStop.time = normalizeClockInput(safeStop.time, fallbackTime);
+  safeStop.desc = safeStop.desc || safeStop.description || '依照你的偏好安排的行程停留點。';
+  safeStop.duration = Math.max(10, Math.min(180, Number(safeStop.duration) || 30));
+  const normalizedCoord = getStopCoordinate(safeStop);
+  if (normalizedCoord) {
+    safeStop.lat = normalizedCoord.lat;
+    safeStop.lng = normalizedCoord.lng;
+  }
+  return safeStop;
+}
+
+function parseBusinessHoursWindow(value) {
+  const source = String(value || '');
+  const match = source.match(/(\d{1,2}):(\d{2})\s*(?:-|~|to)\s*(\d{1,2}):(\d{2})/i);
+  if (!match) return null;
+  const open = Number(match[1]) * 60 + Number(match[2]);
+  const close = Number(match[3]) * 60 + Number(match[4]);
+  if (!Number.isFinite(open) || !Number.isFinite(close) || close <= open) return null;
+  return { open, close };
+}
+
+function applyTripPlanningRules(stops, wizardData = {}) {
+  const pace = wizardData.pace || '平衡';
+  const gapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
+  const startTime = normalizeClockInput(wizardData.startTime, '09:00');
+  let previousMinutes = null;
+
+  return stops.map((stop, index) => {
+    const fallbackTime = minutesToTimeString(timeStringToMinutes(startTime) + gapMinutes * index);
+    const normalized = normalizeGeneratedStop(stop, index, fallbackTime);
+    let currentMinutes = timeStringToMinutes(normalized.time);
+
+    if (previousMinutes !== null && currentMinutes <= previousMinutes) {
+      currentMinutes = previousMinutes + gapMinutes;
+    }
+
+    const businessWindow = parseBusinessHoursWindow(normalized.businessHours);
+    if (businessWindow && currentMinutes < businessWindow.open) {
+      currentMinutes = businessWindow.open;
+    }
+    if (previousMinutes !== null && currentMinutes <= previousMinutes) {
+      currentMinutes = previousMinutes + gapMinutes;
+    }
+    if (businessWindow && currentMinutes > businessWindow.close) {
+      normalized.scheduleWarning = 'outside_business_hours';
+    }
+
+    normalized.time = minutesToTimeString(currentMinutes);
+    normalized.order = index + 1;
+    previousMinutes = currentMinutes;
+    return normalized;
+  });
+}
+
+async function optimizeGeneratedTripStops(stops, wizardData = {}) {
+  const sourceStops = Array.isArray(stops) ? stops.filter(Boolean) : [];
+  if (!sourceStops.length) return [];
+  const destination = wizardData.dest || wizardData.destCustom || wizardData.region || '';
+  const poiCache = await fetchDestinationPoiCache(destination);
+  const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
+  const geographicallySorted = sortStopsByNearestRoute(sanitizedStops, wizardData);
+  return applyTripPlanningRules(geographicallySorted, wizardData);
+}
+
+async function saveMicroTripToFirebase(trip) {
+  if (!firebaseEnabled || !firebaseDb) return false;
+  try {
+    const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
+    await tripRef.set({
+      ...trip,
+      stops: trip.stops || [],
+      userEmail: currentUser && currentUser.email ? currentUser.email : 'unknown',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    console.log('微旅行已保存到 Firebase:', trip.id);
+    return true;
+  } catch (error) {
+    console.warn('Firebase 寫入失敗：', error);
+    return false;
+  }
+}
+
+function sanitizeFirebaseDocId(text) {
+  return (text || '').toString().trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+async function savePoiBusinessHoursToFirebase(stops, destination) {
+  if (!firebaseEnabled || !firebaseDb || !Array.isArray(stops) || !stops.length) return false;
+  try {
+    const batch = firebaseDb.batch();
+    stops.forEach(stop => {
+      if (!stop || !stop.name) return;
+      const docId = sanitizeFirebaseDocId(`${destination || 'unknown'}_${stop.name}`);
+      if (!docId) return;
+      const docRef = firebaseDb.collection('poi_cache').doc(docId);
+      const coord = getStopCoordinate(stop);
+      const payload = {
+        name: stop.name,
+        emoji: stop.emoji || '📍',
+        destination: destination || '',
+        businessHours: stop.businessHours || '',
+        duration: Number(stop.duration) || 30,
+        address: stop.address || stop.location || '',
+        desc: stop.desc || stop.description || '',
+        nearbyToiletLocations: Array.isArray(stop.nearbyToiletLocations)
+          ? stop.nearbyToiletLocations
+          : [],
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      };
+      if (coord) {
+        payload.lat = coord.lat;
+        payload.lng = coord.lng;
+      }
+      batch.set(docRef, payload, { merge: true });
+    });
+    await batch.commit();
+    return true;
+  } catch (error) {
+    console.warn('Firebase POI 保存失敗：', error);
+    return false;
+  }
+}
+
+// ══════════════════════════════════════════════════
+// PERSIST STATE
+// ══════════════════════════════════════════════════
+function serializeTripForStorage(trip) {
+  if (!trip || typeof trip !== 'object') return trip;
+  const { __saving, ...rest } = trip;
+  return rest;
+}
+
+function saveState() {
+  try {
+    localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
+    localStorage.setItem('wai_likes', JSON.stringify([...likedTrips]));
+    localStorage.setItem('wai_ratings', JSON.stringify(ratedTrips));
+    localStorage.setItem('wai_copied', JSON.stringify(copiedTrips));
+    localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+  } catch(e){}
+}
+async function loadState() {
+  try {
+    const u = JSON.parse(localStorage.getItem('wai_user')||'{}');
+    if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
+    likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
+    ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
+    copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
+    myTrips = JSON.parse(localStorage.getItem('wai_mytrips')||'[]').map(serializeTripForStorage);
+    
+    if (isLoggedIn && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb && currentUser && currentUser.email) {
+      try {
+        const snapshot = await firebaseDb.collection('micro_trips')
+          .where('userEmail', '==', currentUser.email)
+          .orderBy('createdAt', 'desc')
+          .get();
+        if (!snapshot.empty) {
+           const fbTrips = snapshot.docs.map(doc => {
+               const data = doc.data();
+               if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+                 data.createdAt = data.createdAt.toDate().toLocaleDateString('zh-TW');
+               } else if (data.createdAt && typeof data.createdAt === 'object' && data.createdAt.seconds) {
+                 data.createdAt = new Date(data.createdAt.seconds * 1000).toLocaleDateString('zh-TW');
+               }
+               return data;
+           });
+           const mergedTrips = [...fbTrips];
+           myTrips.forEach(localTrip => {
+              if (!mergedTrips.find(t => t.id === localTrip.id)) {
+                  mergedTrips.push(localTrip);
+              }
+           });
+           myTrips = mergedTrips;
+           localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+           if (document.getElementById('myTripsView').style.display !== 'none') {
+             renderMyTrips();
+           }
+           renderSideMyTrips();
+        }
+      } catch(err) {
+        console.warn('Failed to sync trips from Firebase:', err);
+      }
+    }
+  } catch(e){}
+}
+
+// ══════════════════════════════════════════════════
+// NAV VIEWS
+// ══════════════════════════════════════════════════
+function showMainView(view) {
+  document.getElementById('exploreView').style.display = view==='explore' ? '' : 'none';
+  document.getElementById('myTripsView').style.display = view==='mytrips' ? '' : 'none';
+  document.getElementById('navExplore').classList.toggle('active', view==='explore');
+  document.getElementById('navMyTrips').classList.toggle('active', view==='mytrips');
+  if (view==='mytrips') renderMyTrips();
+}
+
+// ══════════════════════════════════════════════════
+// USER AUTH
+// ══════════════════════════════════════════════════
+function renderUserMenu() {
+  const wrap = document.getElementById('userMenuWrap');
+  if (!isLoggedIn) {
+    wrap.innerHTML = `<button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>`;
+  } else {
+    const u = currentUser;
+    wrap.innerHTML = `
+      <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${u.name}">
+        ${u.emoji||'😊'}
+      </div>
+      <div class="user-dropdown" id="userDropdown">
+        <div class="user-dropdown-header">
+          <div class="user-dropdown-name">${u.name}</div>
+          <div class="user-dropdown-email">${u.email}</div>
+        </div>
+        <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:11px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
+        <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
+        <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>
+        <div class="user-dd-item" onclick="openJourneyJoin();toggleUserDropdown()">📱 手機流程碼進入</div>
+        <div class="user-dd-sep"></div>
+        <div class="user-dd-item danger" onclick="doLogout()">👋 登出</div>
+      </div>`;
+  }
+}
+function toggleUserDropdown() {
+  const dd = document.getElementById('userDropdown');
+  if (dd) dd.classList.toggle('open');
+}
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('userMenuWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const dd = document.getElementById('userDropdown');
+    if (dd) dd.classList.remove('open');
+  }
+});
+
+function openLogin() { document.getElementById('loginOverlay').classList.add('open'); }
+function closeLogin() { document.getElementById('loginOverlay').classList.remove('open'); }
+function switchAuthTab(tab) {
+  document.getElementById('loginTab').classList.toggle('active', tab==='login');
+  document.getElementById('registerTab').classList.toggle('active', tab==='register');
+  document.getElementById('loginForm').style.display = tab==='login' ? '' : 'none';
+  document.getElementById('registerForm').style.display = tab==='register' ? '' : 'none';
+}
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const pwd = document.getElementById('loginPwd').value;
+  if (!email || !pwd) { showToast('請填寫帳號和密碼', 'orange'); return; }
+  isLoggedIn = true;
+  currentUser = {name: email.split('@')[0], email, emoji:'😊'};
+  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
+  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
+  showToast(`👋 歡迎回來，${currentUser.name}！`, 'green');
+}
+async function doRegister() {
+  const name = document.getElementById('regName').value.trim();
+  const email = document.getElementById('regEmail').value.trim();
+  const pwd = document.getElementById('regPwd').value;
+  if (!name || !email || !pwd) { showToast('請填寫所有欄位', 'orange'); return; }
+  isLoggedIn = true;
+  currentUser = {name, email, emoji:'🌟'};
+  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
+  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
+  showToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+}
+async function doSocialLogin(provider) {
+  isLoggedIn = true;
+  currentUser = {name:`${provider}用戶`, email:`${provider.toLowerCase()}@example.com`, emoji: provider==='Google'?'🌐':'📘'};
+  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
+  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
+  showToast(`✅ 已透過 ${provider} 登入`, 'green');
+}
+function doLogout() {
+  isLoggedIn = false; currentUser = null;
+  saveState();
+  showToast('已登出，跳轉回首頁…');
+  setTimeout(() => { window.location.href = 'ai-travel-planner.html'; }, 800);
+}
+
+// ══════════════════════════════════════════════════
+// EXPLORE GRID
+// ══════════════════════════════════════════════════
+function tagColorClass(tag) {
+  if (['自然','親子','海岸'].includes(tag)) return 'g';
+  if (['美食','低預算'].includes(tag)) return 'o';
+  if (['文化','深度遊'].includes(tag)) return 'b';
+  if (['都市','購物','蜜月','單人','文青'].includes(tag)) return 'p';
+  return 'gold';
+}
+function starStr(r) {
+  const f = Math.round(r);
+  return '★'.repeat(f) + '☆'.repeat(5-f);
+}
+function getFiltered() {
+  let list = [...COMMUNITY_TRIPS];
+  if (activeCat !== 'all') list = list.filter(t => t.region === activeCat);
+  if (searchQ) {
+    const q = searchQ.toLowerCase();
+    list = list.filter(t => t.title.includes(q)||t.region.includes(q)||t.tags.some(x=>x.includes(q))||t.desc.includes(q));
+  }
+  if (activeSort==='hot') list.sort((a,b)=>(b.likes+b.copies*2)-(a.likes+a.copies*2));
+  else if (activeSort==='rating') list.sort((a,b)=>b.rating-a.rating);
+  else if (activeSort==='copy') list.sort((a,b)=>b.copies-a.copies);
+  else list.sort((a,b)=>b.id.localeCompare(a.id));
+  return list;
+}
+function renderGrid() {
+  const grid = document.getElementById('tripsGrid');
+  const list = getFiltered();
+  if (!list.length) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--ink3)"><div style="font-size:40px;margin-bottom:12px">🔍</div><div>找不到符合的行程</div></div>`;
+    return;
+  }
+  grid.innerHTML = list.map(t => {
+    const liked = likedTrips.has(t.id);
+    const myRating = ratedTrips[t.id] || t.rating;
+    const isCopied = copiedTrips.includes(t.id);
+    return `<div class="trip-card">
+      <div class="trip-card-cover ${t.cc}">${t.cover}
+        <div class="tc-badge">${t.days}天 · ${t.people}</div>
+        <div class="tc-copy-badge">📋 ${t.copies+(isCopied?1:0)}</div>
+      </div>
+      <div class="trip-card-body">
+        <div class="tc-tags">
+          ${t.tags.map(tag=>`<span class="tc-tag ${tagColorClass(tag)}">${tag}</span>`).join('')}
+          ${isCopied?'<span class="tc-tag copied">✓ 已複製</span>':''}
+        </div>
+        <div class="tc-title">${t.title}</div>
+        <div class="tc-meta">
+          <span>💰 ${t.budget}</span>
+          <span style="color:var(--gold)">${starStr(myRating)}</span>
+          <span>${myRating.toFixed(1)}</span>
+          <span>❤️ ${t.likes+(liked?1:0)}</span>
+        </div>
+        <div class="tc-author-row">
+          <div class="tc-ava">${t.ava}</div>
+          <div class="tc-author">${t.author} · ${t.authorTrips} 份</div>
+          <div class="tc-actions">
+            <button class="tc-like-btn${liked?' liked':''}" onclick="toggleLike(event,'${t.id}')">${liked?'❤️':'🤍'} ${t.likes+(liked?1:0)}</button>
+            <button class="tc-preview-btn" onclick="openPreview('${t.id}')">預覽</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function filterCat(btn, cat) {
+  document.querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active'); activeCat = cat; renderGrid();
+}
+function filterCatByName(cat) {
+  activeCat = cat;
+  document.querySelectorAll('.filter-tab').forEach(t => t.classList.toggle('active', t.textContent.includes(cat)));
+  renderGrid();
+}
+function handleSearch() { searchQ = document.getElementById('searchInput').value.trim(); renderGrid(); }
+function handleSort(v) { activeSort = v; renderGrid(); }
+function searchTag(tag) { document.getElementById('searchInput').value = tag; searchQ = tag; renderGrid(); }
+
+// ══════════════════════════════════════════════════
+// LIKE
+// ══════════════════════════════════════════════════
+function toggleLike(e, id) {
+  e.stopPropagation();
+  if (!isLoggedIn) { openLogin(); return; }
+  if (likedTrips.has(id)) { likedTrips.delete(id); showToast('已取消按讚'); }
+  else { likedTrips.add(id); showToast('❤️ 已按讚！', 'green'); }
+  saveState(); renderGrid();
+  if (currentPreviewId===id) updatePmLike();
+}
+
+// ══════════════════════════════════════════════════
+// PREVIEW MODAL
+// ══════════════════════════════════════════════════
+function openPreview(id) {
+  const t = COMMUNITY_TRIPS.find(t=>t.id===id);
+  if (!t) return;
+  currentPreviewId = id;
+  const hdr = document.getElementById('pmHeader');
+  hdr.className = `pm-header ${t.cc}`;
+  document.getElementById('pmTitle').textContent = t.title;
+  document.getElementById('pmTags').innerHTML = t.tags.map(tag=>`<span class="pm-tag">${tag}</span>`).join('');
+  document.getElementById('pmStats').innerHTML = `
+    <div><div class="pmstat-val">${t.days}</div><div class="pmstat-label">天</div></div>
+    <div><div class="pmstat-val">${t.budget}</div><div class="pmstat-label">預算</div></div>
+    <div><div class="pmstat-val">${t.copies}</div><div class="pmstat-label">次複製</div></div>`;
+  document.getElementById('pmAva').textContent = t.ava;
+  document.getElementById('pmAuthor').textContent = t.author;
+  document.getElementById('pmAuthorSub').textContent = `已分享 ${t.authorTrips} 份行程`;
+  renderPmStars(ratedTrips[id]||0);
+  document.getElementById('pmBody').innerHTML = t.days_data.map(day=>`
+    <div class="pm-day">
+      <div class="pm-day-hdr">
+        <div class="pm-day-icon">${day.icon}</div>
+        <div><div class="pm-day-label">${day.label}</div><div class="pm-day-title">${day.title}</div></div>
+      </div>
+      <div class="pm-spots">
+        ${day.spots.map(s=>`
+          <div class="pm-spot">
+            <span class="pm-spot-emoji">${s.emoji}</span>
+            <span class="pm-spot-name">${s.name}</span>
+            <span class="pm-spot-time">${s.time}</span>
+            <span class="pm-spot-tag ${s.tag}">${{sight:'景點',food:'美食',walk:'步行',nature:'自然',transit:'交通'}[s.tag]||s.tag}</span>
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
+  updatePmLike(); updatePmCopy();
+  document.getElementById('previewOverlay').classList.add('open');
+}
+function closePreview() {
+  document.getElementById('previewOverlay').classList.remove('open');
+  currentPreviewId = null;
+}
+function renderPmStars(my) {
+  const row = document.getElementById('pmStars');
+  row.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,.7);margin-right:4px">${my?'你給了 '+my+'星':'為行程評分'}</span>
+    ${[1,2,3,4,5].map(i=>`
+      <button class="pm-star" onclick="rateTrip(${i})" style="color:${i<=my?'#f5c842':'rgba(255,255,255,.35)'}">★</button>`).join('')}`;
+}
+function rateTrip(stars) {
+  if (!currentPreviewId) return;
+  if (!isLoggedIn) { closePreview(); openLogin(); return; }
+  ratedTrips[currentPreviewId] = stars;
+  renderPmStars(stars); renderGrid(); saveState();
+  showToast(`⭐ 已評 ${stars} 星！`, 'green');
+}
+function updatePmLike() {
+  if (!currentPreviewId) return;
+  const t = COMMUNITY_TRIPS.find(t=>t.id===currentPreviewId);
+  const liked = likedTrips.has(currentPreviewId);
+  document.getElementById('pmLikeBtn').className = `pm-like-btn${liked?' liked':''}`;
+  document.getElementById('pmLikeIcon').textContent = liked ? '❤️' : '🤍';
+  document.getElementById('pmLikeCount').textContent = t.likes+(liked?1:0);
+}
+function togglePreviewLike() { toggleLike({stopPropagation:()=>{}}, currentPreviewId); }
+function updatePmCopy() {
+  const done = copiedTrips.includes(currentPreviewId);
+  const btn = document.getElementById('pmCopyBtn');
+  btn.textContent = done ? '✅ 已複製到我的微旅行' : '📋 複製這份行程';
+  btn.className = `pm-copy-btn${done?' done':''}`;
+}
+
+// ══════════════════════════════════════════════════
+// COPY TRIP
+// ══════════════════════════════════════════════════
+function copyTrip() {
+  if (!isLoggedIn) { closePreview(); openLogin(); return; }
+  const t = COMMUNITY_TRIPS.find(t=>t.id===currentPreviewId);
+  if (!t) return;
+  if (copiedTrips.includes(t.id)) { showToast('已經複製過了！'); return; }
+  copiedTrips.push(t.id);
+  // add to myTrips
+  myTrips.push({
+    id: 'my_'+Date.now(), title: t.title, emoji: t.cover, cc: t.cc,
+    days: t.days, region: t.region, budget: t.budget, people: t.people,
+    status: 'copied', createdAt: new Date().toLocaleDateString('zh-TW'),
+    sourceId: t.id
+  });
+  saveState(); closePreview(); updatePmCopy(); renderGrid(); renderSideMyTrips();
+  document.getElementById('csTitle').textContent = `「${t.title}」複製成功！`;
+  document.getElementById('csDesc').innerHTML = `已加入你的行程。<br>可以在「我的微旅行」中用 AI 調整，打造專屬版本。`;
+  document.getElementById('copySuccessOverlay').classList.add('open');
+}
+function closeCopySuccess() { document.getElementById('copySuccessOverlay').classList.remove('open'); }
+function goToMyTrips() { closeCopySuccess(); showMainView('mytrips'); }
+
+// ══════════════════════════════════════════════════
+// MY TRIPS VIEW
+// ══════════════════════════════════════════════════
+function renderMyTrips() {
+  const grid = document.getElementById('myTripsGrid');
+  if (!grid) return;
+  const title = document.getElementById('myPageTitle');
+  if (isLoggedIn && currentUser) title.textContent = `${currentUser.name} 的行程`;
+  else title.textContent = `我的微旅行 (本機未登入)`;
+  
+  if (!myTrips.length) {
+    grid.innerHTML = `
+      <div class="new-trip-card" onclick="openWizard()">
+        <div class="new-trip-card-icon">＋</div>
+        <div class="new-trip-card-label">建立第一趟微旅行</div>
+      </div>
+    `;
+    return;
+  }
+  const statusLabel = {planning:'規劃中',upcoming:'即將出發',copied:'已複製'};
+    const cards = myTrips.map(t => `
+    <div class="my-trip-card">
+      <div class="mt-cover ${t.cc}">${t.emoji}</div>
+      <div class="mt-body">
+        <div class="mt-status ${t.status}">${t.status==='planning'?'✏️ 規劃中':t.status==='upcoming'?'✈️ 即將出發':'📋 複製的行程'}</div>
+        <div class="mt-title">${t.title}</div>
+        <div class="mt-meta">${t.days}天 · ${t.region} · ${t.budget} · ${t.createdAt}</div>
+        <div class="mt-actions">
+          ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn primary" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
+          <button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>
+          <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
+          <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
+        </div>
+      </div>
+    </div>`).join('');
+  grid.innerHTML = cards + `
+    <div class="new-trip-card" onclick="openWizard()">
+      <div class="new-trip-card-icon">＋</div>
+      <div class="new-trip-card-label">建立微旅行</div>
+    </div>`;
+}
+function deleteMyTrip(id) {
+  myTrips = myTrips.filter(t=>t.id!==id);
+  saveState(); renderMyTrips(); renderSideMyTrips();
+  showToast('🗑 已刪除行程', 'red');
+}
+function shareTrip(id) { showToast('🔗 分享連結已複製！', 'green'); }
+
+function renderSideMyTrips() {
+  const el = document.getElementById('sideMyTrips');
+  if (!el) return;
+  if (!myTrips.length) {
+    el.innerHTML = `<div style="font-size:13px;color:var(--ink3);text-align:center;padding:10px 0">還沒有行程，點上方建立</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="my-trips-list">${myTrips.slice(0,4).map(t=>`
+    <div class="my-trip-row" onclick="showMainView('mytrips')">
+      <span class="my-trip-emoji">${t.emoji}</span>
+      <div><div class="my-trip-name">${t.title}</div><div class="my-trip-sub">${t.days}天 · ${t.region}</div></div>
+    </div>`).join('')}</div>
+    ${myTrips.length>4?`<div style="font-size:12px;color:var(--accent);text-align:center;padding:8px 0;cursor:pointer" onclick="showMainView('mytrips')">查看全部 ${myTrips.length} 個行程 →</div>`:''}`;
+}
+
+// ══════════════════════════════════════════════════
+// NEW TRIP WIZARD
+// ══════════════════════════════════════════════════
+function openWizard() {
+  wizStep = 0; wizData = { days: '1天' };
+  clearWizardPrefetchState();
+  renderWizard();
+  document.getElementById('wizardOverlay').classList.add('open');
+}
+function closeWizard() { document.getElementById('wizardOverlay').classList.remove('open'); }
+
+function renderWizard() {
+  // Steps bar with new class names
+  const steps = document.getElementById('wizSteps');
+  const stepTitles = ['基本資料', '時間與節奏', '興趣點', '旅程風格'];
+  steps.innerHTML = Array(WIZ_TOTAL).fill(0).map((_,i)=>`
+    <div class="wizard-step ${i<wizStep?'done':i===wizStep?'active':''}"><span class="step-num">${i+1}</span><span class="step-label">${stepTitles[i]}</span></div>`).join('');
+  document.getElementById('wizardBadge').textContent = `Step ${wizStep+1} / ${WIZ_TOTAL}`;
+  document.getElementById('wizBackBtn').style.visibility = wizStep===0 ? 'hidden' : '';
+  document.getElementById('wizNextBtn').textContent = wizStep===WIZ_TOTAL-1 ? '🚀 建立行程' : '下一步 →';
+
+  const body = document.getElementById('wizBody');
+  if (wizStep===0) {
+    body.innerHTML = `<h3 class="wizard-block-title">✈️ 想去哪裡探險？</h3>
+      <p class="wizard-block-help">選擇熱門景點，或自由輸入任何地點</p>
+      <div class="wizard-field">
+        <label>自由輸入</label>
+        <input type="text" id="wizDestInput" placeholder="例：台東市、三仙台、知本…" value="${wizData.destCustom||''}" oninput="onDestInput(this.value)">
+      </div>
+      <div class="wizard-field">
+        <label>熱門景點</label>
+        <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr)">
+          ${WIZ_DESTS.map(d=>`<button class="wizard-tag${wizData.dest===d.label?' active':''}" onclick="selectDest('${d.label}')" type="button" style="background:${wizData.dest===d.label?'#dff1ff':'#f7fbff'};border-color:${wizData.dest===d.label?'#7db8ee':'#d8e2ef'}">${d.emoji} ${d.label}</button>`).join('')}
+        </div>
+      </div>`;
+  } else if (wizStep===1) {
+    const days = wizData.days || '1天';
+    const stopCount = clampPreviewStopsByDuration(days);
+    const maxSlotMinutes = getMaxSlotMinutes(days, stopCount);
+    const slotOptions = getSlotMinuteOptions(maxSlotMinutes);
+    let previewSlot = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || '平衡');
+    if (previewSlot > maxSlotMinutes) previewSlot = maxSlotMinutes;
+    wizData.slotMinutes = previewSlot;
+
+    body.innerHTML = `<h3 class="wizard-block-title">📅 時間與節奏</h3>
+      <p class="wizard-block-help">微旅行的時間長度會決定推薦景點的距離和密度</p>
+      <div class="wizard-field">
+        <label>旅伴</label>
+        <select id="wizPeople" onchange="wizData.people=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-people')">
+          ${['1人','2人','3-4人','5-8人'].map(p=>`<option ${wizData.people===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div class="wizard-field">
+        <label>時間長度</label>
+        <select id="wizDays" onchange="updateWizardDays(this.value)">
+          ${['0.5小時','1小時','2小時','半天','1天','2天'].map(d=>`<option value="${d}" ${wizData.days==d?'selected':''}>${d}</option>`).join('')}
+        </select>
+      </div>
+      <div class="wizard-field">
+        <label>行程節奏</label>
+        <select id="wizPace" onchange="updateWizardPace(this.value)">
+          ${['輕快','平衡','悠閒'].map(p=>`<option ${wizData.pace===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div class="wizard-field">
+        <label>預覽時間設定</label>
+        <div class="wizard-time-grid">
+          <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
+          <select id="wizSlotMinutes" onchange="updateWizardSlotMinutes(this.value)">
+            ${slotOptions.map(min=>`<option value="${min}" ${previewSlot===min?'selected':''}>每站間隔 ${min} 分鐘</option>`).join('')}
+          </select>
+        </div>
+        <p style="margin-top:8px;font-size:12px;color:#5f6876;">本時長最大預覽間隔：${maxSlotMinutes} 分鐘。</p>
+      </div>`;
+  } else if (wizStep===2) {
+    body.innerHTML = `<h3 class="wizard-block-title">🎨 興趣點</h3>
+      <p class="wizard-block-help">選擇 2-4 項，AI 會強調這些體驗點在行程中</p>
+      <div class="wizard-choice-grid">
+        ${['美食','文化','自然','打卡','運動','放鬆'].map(item=>`
+          <label class="wizard-check-pill">
+            <input type="checkbox" value="${item}" ${wizData.interests&&wizData.interests.includes(item)?'checked':''}>
+            <span>${item}</span>
+          </label>
+        `).join('')}
+      </div>`;
+  } else if (wizStep===3) {
+    body.innerHTML = `<h3 class="wizard-block-title">🎭 選擇旅程風格</h3>
+      <p class="wizard-block-help">用角色和主題詮釋你的微旅行故事</p>
+      <div class="wizard-hint-box">範例：「冒險獵人」「療癒漫步者」「美食尋寶家」「在地故事家」</div>
+      <div class="wizard-field">
+        <label>描述你想要的旅程感受</label>
+        <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step4-theme')">${wizData.theme||''}</textarea>
+      </div>
+      <div class="wizard-chips">
+        ${['冒險獵人','療癒漫步者','美食尋寶家','在地故事家','拍照家'].map(t=>`
+          <button class="wizard-tag${wizData.theme===t?' active':''}" type="button" data-theme="${t}" onclick="selectTheme('${t}')">${t}</button>
+        `).join('')}
+      </div>`;
+  }
+  
+  // 处理第 2 步复选框的事件
+  if (wizStep === 2) {
+    setTimeout(() => {
+      const checkboxes = document.querySelectorAll('.wizard-check-pill input[type="checkbox"]');
+      checkboxes.forEach(cb => {
+        cb.addEventListener('change', () => {
+          const selected = Array.from(checkboxes).filter(c => c.checked).map(c => c.value);
+          wizData.interests = selected;
+          renderFlowPreview();
+          scheduleWizardPreviewRequest('step3-interests');
+        });
+      });
+    }, 10);
+  }
+  
+  renderFlowPreview();
+  syncWizardTimeOptionAvailability();
+}
+
+function clampPreviewStopsByDuration(days) {
+  if (days === '0.5小時') return 2;
+  if (days === '1小時') return 3;
+  if (days === '2小時') return 4;
+  if (days === '半天') return 5;
+  if (days === '2天') return 6;
+  return 5;
+}
+
+function getPreviewDurationMinutes(days) {
+  switch (days) {
+    case '0.5小時': return 30;
+    case '1小時': return 60;
+    case '2小時': return 120;
+    case '半天': return 240;
+    case '1天': return 480;
+    case '2天': return 960;
+    default: return 480;
+  }
+}
+
+function getMaxSlotMinutes(days, stopCount) {
+  const durationMinutes = getPreviewDurationMinutes(days);
+  if (stopCount <= 1) return durationMinutes;
+  return Math.max(15, Math.floor(durationMinutes / (stopCount - 1)));
+}
+
+function getSlotMinuteOptions(maxMinutes) {
+  const presets = [15, 20, 30, 45, 60];
+  return presets.filter((min) => min <= maxMinutes);
+}
+
+function doesScheduleFitDuration(days, slotMinutes) {
+  const stopCount = clampPreviewStopsByDuration(days);
+  const durationMinutes = getPreviewDurationMinutes(days);
+  const requiredMinutes = Math.max(0, stopCount - 1) * (Number(slotMinutes) || 0);
+  return requiredMinutes <= durationMinutes;
+}
+
+function getSafeSlotMinutes(days, requestedSlotMinutes) {
+  const stopCount = clampPreviewStopsByDuration(days);
+  const maxSlotMinutes = getMaxSlotMinutes(days, stopCount);
+  const availableOptions = getSlotMinuteOptions(maxSlotMinutes);
+  const requested = Number(requestedSlotMinutes) || 0;
+  if (requested && requested <= maxSlotMinutes) return requested;
+  return availableOptions[availableOptions.length - 1] || 15;
+}
+
+function updateWizardDays(value) {
+  const nextSlot = getSafeSlotMinutes(value, wizData.slotMinutes || getDefaultSlotMinutes(wizData.pace || 'balanced'));
+  if (!doesScheduleFitDuration(value, nextSlot)) return;
+  wizData.days = value;
+  wizData.slotMinutes = nextSlot;
+  scheduleWizardPreviewRequest('step2-days');
+  renderWizard();
+}
+
+function updateWizardPace(value) {
+  wizData.pace = value;
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', wizData.slotMinutes || getDefaultSlotMinutes(value));
+  scheduleWizardPreviewRequest('step2-pace');
+  renderWizard();
+}
+
+function updateWizardSlotMinutes(value) {
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', Number(value) || 0);
+  renderFlowPreview();
+  syncWizardTimeOptionAvailability();
+  scheduleWizardPreviewRequest('step2-slot');
+}
+
+function syncWizardTimeOptionAvailability() {
+  if (wizStep !== 1) return;
+  const daysSelect = document.getElementById('wizDays');
+  const slotSelect = document.getElementById('wizSlotMinutes');
+  if (!daysSelect || !slotSelect) return;
+
+  const currentDays = wizData.days || daysSelect.value || '';
+  const currentSlot = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || 'balanced');
+  Array.from(daysSelect.options).forEach((option) => {
+    const fits = doesScheduleFitDuration(option.value, currentSlot);
+    option.disabled = !fits;
+    option.hidden = !fits;
+    option.textContent = option.value;
+  });
+
+  const maxSlotMinutes = getMaxSlotMinutes(currentDays, clampPreviewStopsByDuration(currentDays));
+  Array.from(slotSelect.options).forEach((option) => {
+    const minutes = Number(option.value) || 0;
+    const fits = minutes <= maxSlotMinutes;
+    option.disabled = !fits;
+    option.hidden = !fits;
+    option.textContent = option.textContent;
+  });
+  slotSelect.value = String(wizData.slotMinutes);
+}
+
+function getDefaultSlotMinutes(pace) {
+  if (pace === '輕快') return 30;
+  if (pace === '悠閒') return 60;
+  return 45;
+}
+
+function timeStringToMinutes(value) {
+  const source = String(value || '09:00');
+  const match = source.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 9 * 60;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 9 * 60;
+  return Math.max(0, Math.min(23 * 60 + 59, hour * 60 + minute));
+}
+
+function minutesToTimeString(totalMinutes) {
+  const safe = ((Number(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const hour = Math.floor(safe / 60).toString().padStart(2, '0');
+  const minute = (safe % 60).toString().padStart(2, '0');
+  return `${hour}:${minute}`;
+}
+
+function normalizeClockInput(value, fallback = '09:00') {
+  const source = String(value || '').trim();
+  if (/^\d{1,2}:\d{2}$/.test(source)) {
+    const [hText, mText] = source.split(':');
+    const h = Number(hText);
+    const m = Number(mText);
+    if (Number.isFinite(h) && Number.isFinite(m) && h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+      return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    }
+  }
+  return fallback;
+}
+
+function buildAutoDelayedPreviewTimes(baseTimes, customTimes, minimumGapMinutes) {
+  const gap = Math.max(0, Number(minimumGapMinutes) || 0);
+  let previousMinutes = null;
+
+  return baseTimes.map((baseTime, index) => {
+    const custom = customTimes ? customTimes[String(index)] : null;
+    const normalizedTime = normalizeClockInput(custom, baseTime);
+    let currentMinutes = timeStringToMinutes(normalizedTime);
+
+    if (previousMinutes !== null && currentMinutes <= previousMinutes) {
+      currentMinutes = previousMinutes + gap;
+    }
+
+    previousMinutes = currentMinutes;
+    return minutesToTimeString(currentMinutes);
+  });
+}
+
+function updatePreviewNodeTime(index, value) {
+  const key = String(index);
+  if (!wizData.customNodeTimes || typeof wizData.customNodeTimes !== 'object') {
+    wizData.customNodeTimes = {};
+  }
+  wizData.customNodeTimes[key] = normalizeClockInput(value, '09:00');
+  renderFlowPreview();
+}
+
+function buildInterestDrivenStops(dest, interests = [], pace = '平衡') {
+  const interestStops = {
+    美食: { title: '在地美食', desc: '安排口碑店家或小吃，保留彈性用餐與休息時間。' },
+    文化: { title: '文化散策', desc: '串接歷史街區或展館，讓行程有在地故事線。' },
+    自然: { title: '自然步道', desc: '優先安排綠地與風景路段，增加慢走停留體驗。' },
+    打卡: { title: '拍照打卡', desc: '挑選視覺亮點與地標角度，保留拍照緩衝時段。' },
+    運動: { title: '動態活動', desc: '納入可活動身體的段落，節奏更有活力。' },
+    放鬆: { title: '放鬆休息', desc: '加入咖啡館或靜態停留點，降低整體移動壓力。' }
+  };
+
+  const orderedInterests = ['美食', '文化', '自然', '打卡', '運動', '放鬆'];
+  const selected = orderedInterests.filter((item) => interests.includes(item));
+  const middleStops = selected.map((item) => interestStops[item]);
+
+  if (!middleStops.length) {
+    middleStops.push(
+      { title: '主要景點', desc: '先完成目的地代表亮點，建立旅程主軸。' },
+      { title: '自由探索', desc: '依現場氣氛調整停留，保留即興彈性。' }
+    );
+  }
+
+  const paceTail = pace === '輕快'
+    ? '以較快節奏銜接下一站。'
+    : pace === '悠閒'
+      ? '留更多緩衝時間慢慢體驗。'
+      : '維持移動與停留的平衡感。';
+
+  return [
+    { title: `${dest}出發點`, desc: `從集合點出發，先確認旅伴與路線重點。` },
+    ...middleStops,
+    { title: '溫暖結尾', desc: `回到方便解散的位置，${paceTail}` }
+  ];
+}
+
+function renderFlowPreview() {
+  const dest = wizData.dest || wizData.destCustom || '台東';
+  const days = wizData.days || '1天';
+  const theme = wizData.theme || '經典旅人';
+  const pace = wizData.pace || '平衡';
+  const interests = Array.isArray(wizData.interests) ? wizData.interests : [];
+  const startTime = wizData.startTime || '09:00';
+  const slotMinutes = Number(wizData.slotMinutes) || getDefaultSlotMinutes(pace);
+  wizData.slotMinutes = slotMinutes;
+
+  document.getElementById('themeNote').textContent = `目前主題：${theme}`;
+  document.getElementById('flowTitle').textContent = `${dest}・${days}微旅行`;
+
+  const allStops = buildInterestDrivenStops(dest, interests, pace);
+  const stopCount = clampPreviewStopsByDuration(days);
+  const durationMinutes = getPreviewDurationMinutes(days);
+  const previewStops = allStops.slice(0, Math.max(2, stopCount));
+
+  const baseMinutes = timeStringToMinutes(startTime);
+  const previewStopCount = previewStops.length;
+  const maxSlotMinutes = getMaxSlotMinutes(days, previewStopCount);
+  let effectiveSlotMinutes = Math.min(slotMinutes, maxSlotMinutes);
+  wizData.slotMinutes = effectiveSlotMinutes;
+  const baseTimes = previewStops.map((_, index) => minutesToTimeString(baseMinutes + effectiveSlotMinutes * index));
+
+  if (!wizData.customNodeTimes || typeof wizData.customNodeTimes !== 'object') {
+    wizData.customNodeTimes = {};
+  }
+  const allowedKeys = new Set(previewStops.map((_, index) => String(index)));
+  Object.keys(wizData.customNodeTimes).forEach((key) => {
+    if (!allowedKeys.has(key)) {
+      delete wizData.customNodeTimes[key];
+    }
+  });
+
+  const times = buildAutoDelayedPreviewTimes(baseTimes, wizData.customNodeTimes, effectiveSlotMinutes);
+  wizData.previewTimes = times;
+
+  document.getElementById('flowNodes').innerHTML = previewStops.map((spot, i) => `
+    <div class="wizard-node">
+      <div class="wizard-node-top">
+        <h4 class="wizard-node-title">🧭 ${spot.title}</h4>
+        <input class="wizard-node-time-input" type="time" value="${times[i]}" onchange="updatePreviewNodeTime(${i}, this.value)">
+      </div>
+      <p class="wizard-node-desc">${spot.desc}</p>
+    </div>
+  `).join('');
+
+  const endTime = times.length ? times[times.length - 1] : startTime;
+  const interestSummary = interests.length ? interests.join('、') : '多元探索';
+  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（每站約 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。`;
+}
+
+function onDestInput(val) {
+  wizData.destCustom = val;
+  const match = WIZ_DESTS.find(d => d.label === val.trim());
+  wizData.dest = match ? match.label : '';
+  document.querySelectorAll('.wizard-choice-grid .wizard-tag').forEach(btn => {
+    const label = btn.textContent.trim().split(' ')[1];
+    const isActive = label === wizData.dest;
+    btn.classList.toggle('active', isActive);
+    btn.style.background = isActive ? '#dff1ff' : '#f7fbff';
+    btn.style.borderColor = isActive ? '#7db8ee' : '#d8e2ef';
+  });
+  triggerFirebaseHintPrefetch();
+  scheduleWizardPreviewRequest('step1-destination');
+  renderFlowPreview();
+}
+
+function selectDest(label) {
+  wizData.dest = (wizData.dest === label) ? '' : label;
+  wizData.destCustom = wizData.dest;
+  const inp = document.getElementById('wizDestInput');
+  if (inp) inp.value = wizData.dest;
+  triggerFirebaseHintPrefetch();
+  scheduleWizardPreviewRequest('step1-destination');
+  renderWizard();
+}
+
+function selectTheme(theme) {
+  wizData.theme = theme;
+  const input = document.getElementById('theme');
+  if (input) input.value = theme;
+  scheduleWizardPreviewRequest('step4-theme');
+  renderWizard();
+}
+
+function wizNext() {
+  if (isGeneratingTrip) { showToast('正在生成行程中，請稍候…', 'orange'); return; }
+  if (wizStep===0 && !wizData.dest && !wizData.destCustom) { showToast('請選擇或輸入目的地', 'orange'); return; }
+  if (wizStep===WIZ_TOTAL-1) { finishWizard(); return; }
+  wizStep++; renderWizard();
+}
+
+function wizPrev() { if(wizStep>0){wizStep--;renderWizard();} }
+
+function persistMicroTripInBackground(trip) {
+  if (!firebaseEnabled) return;
+  (async () => {
+    try {
+      // 標記為正在保存，UI 上會禁用編輯鈕
+      trip.__saving = true;
+      saveState(); renderSideMyTrips(); renderMyTrips();
+
+      const firebaseSaved = await saveMicroTripToFirebase(trip);
+      if (firebaseSaved) {
+        // 成功：顯示成功提示，之後才啟用編輯按鍵
+        showToast(`✅ 微旅行已保存到 Firebase: ${trip.id}`, 'green');
+        // 在 toast 顯示後延遲 2400ms（toast 的顯示時間）再啟用編輯
+        setTimeout(() => {
+          trip.__saving = false;
+          saveState(); renderSideMyTrips(); renderMyTrips();
+        }, 2400);
+      } else {
+        // 失敗：顯示失敗提示，立即啟用編輯按鍵
+        showToast('Firebase 保存失敗，已存到本地', 'orange');
+        trip.__saving = false;
+        saveState(); renderSideMyTrips(); renderMyTrips();
+      }
+
+      const poiSaved = await savePoiBusinessHoursToFirebase(trip.stops, trip.region);
+      if (!poiSaved) {
+        console.warn('Firebase POI 營業時間保存失敗');
+      }
+    } catch (error) {
+      console.warn('Firebase background save failed:', error);
+      showToast('Firebase 背景同步失敗，已存到本地', 'orange');
+      // 錯誤時也立即啟用編輯按鍵
+      trip.__saving = false;
+      saveState(); renderSideMyTrips(); renderMyTrips();
+    }
+  })();
+}
+
+async function finishWizard() {
+  if (isGeneratingTrip) return;
+  isGeneratingTrip = true;
+  
+  const dest = wizData.dest || wizData.destCustom || '台東';
+  const days = wizData.days || '1天';
+  const budgetMap = {'0.5小時':'$200','1小時':'$300','2小時':'$500','半天':'$800','1天':'$1,500','2天':'$3,000'};
+  const newTrip = {
+    id:'my_'+Date.now(), title:`${dest} ${days}微旅行`,
+    emoji: {台東:'🌊',花蓮:'🏔',台北:'🏙',日本:'⛩️',韓國:'🌸',歐洲:'🏛'}[dest]||'✈️',
+    cc: ['c0','c1','c2','c3'][Math.floor(Math.random()*4)],
+    days, region:dest, budget:wizData.budget||budgetMap[days]||'$1,500',
+    people:wizData.people||'2人', status:'planning',
+    createdAt:new Date().toLocaleDateString('zh-TW'),
+    wizardData: {
+      dest, days, people: wizData.people||'2人', pace: wizData.pace||'平衡',
+      interests: wizData.interests||[], theme: wizData.theme||'經典旅人'
+    },
+    stops: []
+  };
+  newTrip.__saving = true;
+
+  closeWizard();
+  showToast(`⏳ 正在生成你的個人化微旅行…`, 'blue');
+
+  try {
+    let initialPlan = getCachedWizardPreviewPlan();
+    if (!initialPlan) {
+      initialPlan = await requestGeminiMicroTravelPlan(wizData, {
+        mode: 'preview',
+        includeFirebase: false,
+        useStreaming: true
+      });
+    }
+
+    if (initialPlan && initialPlan.stops) {
+      newTrip.stops = await optimizeGeneratedTripStops(initialPlan.stops, wizData);
+      newTrip.aiTitle = initialPlan.title;
+      newTrip.aiReply = initialPlan.reply;
+    }
+
+    myTrips.unshift(newTrip);
+    saveState(); renderSideMyTrips(); renderMyTrips();
+    showToast(`✅ 「${newTrip.title}」已建立！背景補齊細節中...`, 'green');
+    setTimeout(() => showMainView('mytrips'), 400);
+
+    (async () => {
+      try {
+        const finalPlan = await requestGeminiMicroTravelPlan(wizData, {
+          mode: 'final',
+          includeFirebase: true,
+          useStreaming: false
+        });
+        if (finalPlan && finalPlan.stops) {
+          newTrip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wizData);
+          newTrip.aiTitle = finalPlan.title || newTrip.aiTitle;
+          newTrip.aiReply = finalPlan.reply || newTrip.aiReply;
+          saveState(); renderSideMyTrips(); renderMyTrips();
+        }
+      } catch (error) {
+        console.warn('Final prompt background enrichment failed:', error);
+      }
+
+      if (firebaseEnabled) {
+        persistMicroTripInBackground(newTrip);
+      }
+    })();
+
+  } catch (error) {
+    isGeneratingTrip = false;
+    showToast(`❌ 生成行程失敗：${error.message}`, 'red');
+    console.error('finishWizard error:', error);
+    // 仍然保存到本地
+    myTrips.unshift(newTrip);
+    saveState(); renderSideMyTrips(); renderMyTrips();
+    return;
+  }
+  isGeneratingTrip = false;
+}
+
+// ══════════════════════════════════════════════════
+// INVITE CODE
+// ══════════════════════════════════════════════════
+function normalizeInviteCode(code) {
+  return String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function openInvite() {
+  if (!isLoggedIn) { openLogin(); return; }
+  document.getElementById('inviteCodeInput').value = '';
+  document.getElementById('inviteOverlay').classList.add('open');
+}
+function closeInvite() { document.getElementById('inviteOverlay').classList.remove('open'); }
+function submitInviteCode() {
+  const code = document.getElementById('inviteCodeInput').value.trim();
+  if (!code) { showToast('請輸入邀請碼', 'orange'); return; }
+  closeInvite();
+  myTrips.unshift({
+    id: 'my_'+Date.now(), title: '高雄左營微旅行 (共編)', emoji: '🎒', cc: 'c2',
+    days: 1, region: '高雄', budget: '$500', people: '2人',
+    status: 'planning', createdAt: new Date().toLocaleDateString('zh-TW')
+  });
+  saveState(); renderSideMyTrips(); renderMyTrips();
+  showToast(`✅ 成功使用邀請碼「${code.toUpperCase()}」加入行程！`, 'green');
+  if (document.getElementById('myTripsView').style.display === 'none') showMainView('mytrips');
+}
+
+function openJourneyJoin() {
+  if (!isLoggedIn) { openLogin(); return; }
+  const input = document.getElementById('journeyCodeInput');
+  if (input) input.value = currentInviteCode;
+  const title = document.getElementById('journeyPreviewTitle');
+  const meta = document.getElementById('journeyPreviewMeta');
+  if (title) title.textContent = currentTripTitle;
+  if (meta) meta.textContent = `${currentTripWindow.start} - ${currentTripWindow.end} · 邀請碼 ${currentInviteCode}`;
+  document.getElementById('journeyOverlay').classList.add('open');
+}
+
+function closeJourneyJoin() { document.getElementById('journeyOverlay').classList.remove('open'); }
+
+function submitJourneyCode() {
+  const input = document.getElementById('journeyCodeInput');
+  const code = input ? input.value.trim() : '';
+  const normalizedCode = normalizeInviteCode(code);
+  const validInviteCode = normalizeInviteCode(currentInviteCode);
+  const validItineraryCode = normalizeInviteCode(currentItineraryId);
+
+  if (!normalizedCode) { showToast('請輸入流程碼', 'orange'); return; }
+  if (normalizedCode !== validInviteCode && normalizedCode !== validItineraryCode) {
+    showToast('流程碼不正確', 'orange');
+    return;
+  }
+
+  closeJourneyJoin();
+  pendingJourneyEntry = {
+    inviteCode: currentInviteCode,
+    itineraryId: currentItineraryId,
+    normalizedCode
+  };
+  openJourneyItineraryPreview();
+  showToast(`✅ 已確認流程碼「${normalizedCode}」`, 'green');
+}
+
+function openJourneyItineraryPreview() {
+  document.getElementById('journeyItineraryTitle').textContent = currentTripTitle;
+  document.getElementById('journeyItinerarySub').textContent = '先快速確認集合資訊與沿途節奏，沒問題後就能直接開始這趟旅程。';
+  document.getElementById('journeyItineraryTime').textContent = `${currentTripWindow.start} - ${currentTripWindow.end}`;
+  document.getElementById('journeyItineraryMeeting').textContent = currentJourneyMeetingPoint;
+  document.getElementById('journeyItineraryCode').textContent = currentInviteCode;
+  document.getElementById('journeyItineraryStops').innerHTML = currentJourneyPreviewStops.map(stop => `
+    <div class="journey-stop">
+      <div class="journey-stop-time">${stop.time}</div>
+      <div class="journey-stop-card">
+        <div class="journey-stop-title">${stop.title}</div>
+        <div class="journey-stop-desc">${stop.desc}</div>
+        <div class="journey-stop-tags">
+          ${stop.tags.map(tag => `<span class="journey-stop-tag">${tag}</span>`).join('')}
+        </div>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('journeyItineraryOverlay').classList.add('open');
+}
+
+function closeJourneyItineraryPreview() {
+  document.getElementById('journeyItineraryOverlay').classList.remove('open');
+}
+
+function confirmJourneyEntry() {
+  const existingTrip = myTrips.find(t =>
+    t.source === 'mobile-journey-code' &&
+    t.itineraryId === currentItineraryId &&
+    t.inviteCode === currentInviteCode
+  );
+
+  if (!existingTrip) {
+    myTrips.unshift({
+      id: 'my_'+Date.now(), title: `${currentTripTitle} (手機進入)`, emoji: '📱', cc: 'c2',
+      days: 1, region: '高雄', budget: '$500', people: '2人',
+      status: 'upcoming', createdAt: new Date().toLocaleDateString('zh-TW'),
+      inviteCode: currentInviteCode, itineraryId: currentItineraryId, source: 'mobile-journey-code'
+    });
+    saveState(); renderSideMyTrips(); renderMyTrips();
+  }
+
+  closeJourneyItineraryPreview();
+  pendingJourneyEntry = null;
+  showToast('已進入旅遊，並打開行程預覽。', 'green');
+  showMainView('mytrips');
+}
+
+// ══════════════════════════════════════════════════
+// UTILS
+// ══════════════════════════════════════════════════
+let toastTimer;
+function showToast(msg, type='') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = `toast${type?' '+type:''} show`;
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove('show'), 2400);
+}
+</script>
+</body>
+</html>
