@@ -36,18 +36,11 @@ if (GOOGLE_KEY) {
   const keySource = process.env.GOOGLE_MAPS_API_KEY ? 'env GOOGLE_MAPS_API_KEY' : 'weather.env.js GOOGLE_MAPS_API_KEY';
   console.log(`Google Maps key loaded from: ${keySource} (${GOOGLE_KEY.slice(0, 8)}...)`);
 } else {
-  console.warn('GOOGLE_MAPS_API_KEY 未設定，Google Places 廁所搜尋將略過（OSM 仍可用）');
+  console.warn('GOOGLE_MAPS_API_KEY 未設定，廁所搜尋將略過。');
 }
 const OPENDATA_URL = process.env.OPENDATA_SOURCE_URL || 'https://media.taiwan.net.tw/XMLReleaseALL_public/scenic_spot_C_f.json';
 const CRAWL_REGION = argv.region || argv.city || process.env.CRAWL_REGION || process.env.CRAWL_CITY || '\u53f0\u6771\u7e23';
 const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
-const OVERPASS_MIRRORS = (process.env.OVERPASS_API_URL
-  ? [process.env.OVERPASS_API_URL]
-  : [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
-    ]);
 const REGION_ALIASES = {
   '\u53f0\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
   '\u81fa\u6771': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
@@ -103,35 +96,6 @@ function measureDistanceMeters(origin, target) {
   const a = Math.sin(dLat / 2) ** 2
     + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-async function fetchNearbyToiletsOSM(lat, lng) {
-  const query = `[out:json][timeout:10];node["amenity"="toilets"](around:${MAX_NEARBY_TOILET_DISTANCE_METERS},${lat},${lng});out;`;
-  for (const mirror of OVERPASS_MIRRORS) {
-    try {
-      await new Promise((r) => setTimeout(r, 1000));
-      const r = await axios.get(`${mirror}?data=${encodeURIComponent(query)}`, {
-        timeout: 12000
-      });
-      const elements = Array.isArray(r.data && r.data.elements) ? r.data.elements : [];
-      const results = elements
-        .filter(el => el.lat && el.lon)
-        .map(el => ({
-          name: (el.tags && (el.tags['name:zh'] || el.tags.name)) || '公廁',
-          lat: el.lat,
-          lng: el.lon,
-          address: (el.tags && el.tags['addr:full']) || '',
-          source: 'osm',
-          confidence: 'verified'
-        }))
-        .slice(0, 3);
-      if (results.length) console.log(`OSM found ${results.length} toilets near (${lat},${lng}) via ${mirror}`);
-      return results;
-    } catch (e) {
-      console.warn(`OSM mirror ${mirror} failed:`, e.message);
-    }
-  }
-  return [];
 }
 
 async function fetchNearbyToiletsGoogle(lat, lng) {
@@ -192,16 +156,8 @@ async function fetchNearbyToiletsGoogle(lat, lng) {
 }
 
 async function fetchNearbyToilets(lat, lng) {
-  if (!lat || !lng) return [];
-  // OSM 優先（免費、無需 key、台灣公廁覆蓋完整）
-  const osmResults = await fetchNearbyToiletsOSM(lat, lng);
-  if (osmResults.length >= 1) return osmResults.slice(0, 3);
-  // OSM 找不到才用 Google Maps
-  if (GOOGLE_KEY) {
-    await new Promise((r) => setTimeout(r, 250));
-    return fetchNearbyToiletsGoogle(lat, lng);
-  }
-  return [];
+  if (!lat || !lng || !GOOGLE_KEY) return [];
+  return fetchNearbyToiletsGoogle(lat, lng);
 }
 
 function normalizeText(value) {
