@@ -3009,11 +3009,17 @@ body.prototype-mode .prototype-id-chip {
   let importedTravelResult = null;
   let importedTravelPinId = null;
   let importedTravelDraft = '';
+  let posterCharacterDraft = '';
+  let posterGeneratedImageBase64 = null;
+  let posterImageGenerating = false;
   let importedTravelPinSerial = 0;
   let replanStopSerial = 0;
   const GEMINI_MODEL = 'gemini-2.5-flash';
   const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
   const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
+  const VERTEX_API_BASE = 'https://us-central1-aiplatform.googleapis.com/v1';
+  const VERTEX_LOCAL_KEY = 'TRAVEL_VERTEX_API_KEY';
+  const VERTEX_LOCAL_PROJECT = 'TRAVEL_VERTEX_PROJECT_ID';
   const ACTIVE_TRIP_LOCAL_KEY = 'wai_active_trip_id';
   const aiConversationHistory = [];
   let isAiResponding = false;
@@ -4267,36 +4273,6 @@ body.prototype-mode .prototype-id-chip {
       }
     } catch(e) { console.error('Init error:', e); }
 
-    // 添加測試數據如果沒有行程
-    if (!replanStops || replanStops.length === 0) {
-      replanStops = [
-        {
-          id: 'test-stop-1',
-          name: '小野柳',
-          lat: 25.2065,
-          lng: 121.525,
-          mapPinId: 'pin-test-stop-1',
-          nearbyToiletLocations: [
-            { name: '小野柳廁所1', lat: 25.2062, lng: 121.5248 },
-            { name: '小野柳廁所2', lat: 25.2068, lng: 121.5252 }
-          ]
-        },
-        {
-          id: 'test-stop-2',
-          name: '咖啡廳',
-          lat: 25.2065,
-          lng: 121.525,
-          mapPinId: 'pin-test-stop-2',
-          nearbyToiletLocations: [
-            { name: '咖啡廳廁所', lat: 25.2060, lng: 121.5245 }
-          ]
-        }
-      ];
-      pinData['pin-test-stop-1'] = { lat: 25.2065, lng: 121.525, title: '小野柳' };
-      pinData['pin-test-stop-2'] = { lat: 25.2065, lng: 121.525, title: '咖啡廳' };
-      currentTripTitle = '測試行程';
-      renderItineraryDisplay();
-    }
   }
 
   const quickAddPool = [
@@ -4611,6 +4587,96 @@ body.prototype-mode .prototype-id-chip {
     `;
   }
 
+  function buildImagePrompt(character) {
+    const schedule = buildReplanSchedule();
+    const title = currentTripTitle || '我的旅遊行程';
+    const dateRange = (currentTripWindow.start && currentTripWindow.end)
+      ? `（行程時間：${currentTripWindow.start} ～ ${currentTripWindow.end}）` : '';
+    const stopList = schedule.length
+      ? schedule.map(s => `${s.emoji || ''}${s.name}`).join('、')
+      : '（尚未建立行程）';
+
+    const lines = [
+      `請幫我繪製一張「${title}」旅遊地圖插畫。${dateRange}`,
+      '',
+      `主角是「${character}」，以可愛卡通造型出現在旅途中，扮演嚮導或旅伴角色。`,
+      '',
+      '行程如下：',
+      stopList,
+      '',
+      '請根據我的行程規劃，加入適當的細節插圖。',
+      '根據行程依序畫成一張日式雜誌插畫的旅遊行程圖，我提到的地點、環境、景觀、食物、餐廳，都要在圖中提到，且儘可能的擬真。插圖的比例為 16:9。',
+      '整體要給人可愛、清新的氛圍，字體清晰容易閱讀、並確保內容都是「繁體中文」無錯字。'
+    ];
+    return lines.join('\n');
+  }
+
+  async function generateItineraryImage() {
+    const input = document.getElementById('posterCharacterInput');
+    const character = (input ? input.value : posterCharacterDraft).trim();
+    if (!character) {
+      window.alert('請先輸入卡通人物名稱。');
+      return;
+    }
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      window.alert('找不到 Gemini API 金鑰，請先在設定中輸入。');
+      return;
+    }
+    posterCharacterDraft = character;
+    posterImageGenerating = true;
+    posterGeneratedImageBase64 = null;
+    renderTravelTools();
+
+    const prompt = buildImagePrompt(character);
+    console.log('[行程圖 Prompt]', prompt);
+    const imageModel = 'gemini-3.1-flash-image-preview';
+    const vertex = getVertexConfig();
+    try {
+      const endpoint = vertex.ready
+        ? `https://aiplatform.googleapis.com/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
+        : `${GEMINI_API_BASE}/${imageModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseModalities: ["IMAGE"],
+            imageConfig: { aspectRatio: '16:9' }
+          }
+        })
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error?.message || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const part = data.candidates?.[0]?.content?.parts?.[0];
+      if (!part?.inlineData?.data) { throw new Error('未收到圖片資料。回應：' + JSON.stringify(data).slice(0, 200)); }
+      posterGeneratedImageBase64 = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+    } catch (e) {
+      window.alert(`圖片生成失敗：${e.message}`);
+    } finally {
+      posterImageGenerating = false;
+      renderTravelTools();
+      setTimeout(() => {
+        const el = document.getElementById('posterGeneratedImg');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 80);
+    }
+  }
+
+  function downloadGeneratedImage() {
+    if (!posterGeneratedImageBase64) return;
+    const anchor = document.createElement('a');
+    anchor.href = posterGeneratedImageBase64;
+    anchor.download = `${currentInviteCode || 'travel'}-poster.png`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
   function openTravelTools(tab = 'import') {
     activeTravelToolTab = tab;
     const overlay = document.getElementById('travelToolsOverlay');
@@ -4688,29 +4754,30 @@ body.prototype-mode .prototype-id-chip {
     }
 
     if (activeTravelToolTab === 'export') {
-      const posterSvg = buildItineraryPosterSvg();
-      const posterDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(posterSvg)}`;
       bodyEl.innerHTML = `
-        <div class="travel-panel">
-          <div class="travel-panel-title">行程圖預覽</div>
-          <div class="travel-panel-subtitle">下載 SVG 後可直接轉成圖片、丟群組或貼到邀請卡。邀請碼會一起顯示在圖面上。</div>
-          <img class="travel-export-preview" src="${posterDataUrl}" alt="行程圖預覽">
-          <div class="travel-code-row">
-            <div>
-              <div class="travel-kv-label">旅程邀請碼</div>
-              <div class="travel-code-chip">${escapeHtml(currentInviteCode || '尚未建立')}</div>
-            </div>
-            <button class="travel-btn secondary" onclick="copyJourneyCode()">複製邀請碼</button>
-          </div>
-          <div class="travel-action-row">
-            <button class="travel-btn primary" onclick="downloadItineraryImage()">下載行程圖</button>
-            <button class="travel-btn secondary" onclick="shareViaLine()">LINE 分享</button>
-          </div>
-        </div>
         <div class="travel-panel soft">
           <div class="travel-panel-title">行程摘要</div>
           <div class="travel-panel-subtitle">${escapeHtml(getTripScheduleSummary())}</div>
-          <div class="travel-hint">桌面版適合先下載 SVG，再用設計工具轉成 PNG；手機端則可直接透過分享面板發送。</div>
+        </div>
+        <div class="travel-panel">
+          <div class="travel-panel-title">AI 旅遊插圖</div>
+          <div class="travel-panel-subtitle">輸入喜歡的卡通人物，AI 將根據你的行程直接生成日式插畫風格旅遊圖。</div>
+          <input class="travel-input" id="posterCharacterInput"
+                 placeholder="例如：哆啦A夢、皮卡丘、小熊維尼…"
+                 value="${escapeHtml(posterCharacterDraft)}"
+                 ${posterImageGenerating ? 'disabled' : ''}>
+          <div class="travel-action-row">
+            <button class="travel-btn primary" onclick="generateItineraryImage()" ${posterImageGenerating ? 'disabled' : ''}>
+              ${posterImageGenerating ? '生成中…' : '生成插圖'}
+            </button>
+          </div>
+          ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">✨ AI 正在繪製插圖，請稍候（約 10–30 秒）…</div>` : ''}
+          ${posterGeneratedImageBase64 ? `
+            <img id="posterGeneratedImg" src="${posterGeneratedImageBase64}" alt="AI 生成旅遊插圖" style="width:100%;border-radius:16px;border:1px solid var(--border);display:block;">
+            <div class="travel-action-row">
+              <button class="travel-btn secondary" onclick="downloadGeneratedImage()">下載插圖</button>
+            </div>
+          ` : ''}
         </div>
       `;
       return;
@@ -6093,6 +6160,13 @@ body.prototype-mode .prototype-id-chip {
     window.localStorage.setItem(GEMINI_LOCAL_KEY, next);
   }
 
+  function getVertexConfig() {
+    const cfg = window.TRAVEL_APP_CONFIG || {};
+    const apiKey = (cfg.VERTEX_API_KEY || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_KEY) || '').trim();
+    const projectId = (cfg.VERTEX_PROJECT_ID || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_PROJECT) || '').trim();
+    return { apiKey, projectId, ready: !!(apiKey && projectId) };
+  }
+
   function initFirebaseIfConfigured() {
     const config = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.FIREBASE_CONFIG;
     if (!window.firebase || !config) return false;
@@ -6648,9 +6722,14 @@ body.prototype-mode .prototype-id-chip {
   }
 
   async function requestGeminiTravelPlan(userMessage) {
-    const apiKey = ensureGeminiApiKey();
-    if (!apiKey) {
-      throw new Error('尚未設定 Gemini API Key。');
+    const vertex = getVertexConfig();
+    let endpoint;
+    if (vertex.ready) {
+      endpoint = `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
+    } else {
+      const apiKey = ensureGeminiApiKey();
+      if (!apiKey) throw new Error('尚未設定 API Key。');
+      endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
     }
 
     const contextBlock = [
@@ -6659,8 +6738,6 @@ body.prototype-mode .prototype-id-chip {
       '目前行程：',
       getReplanSummaryText()
     ].join('\n');
-
-    const endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const payload = {
       contents: [
         {
