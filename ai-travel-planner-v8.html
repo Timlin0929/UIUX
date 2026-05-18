@@ -3027,6 +3027,7 @@ body.prototype-mode .prototype-id-chip {
   const placeSearchCache = new Map();
   const replanStartMinutes = 14 * 60;
   let replanStops = [];
+  let persistTripDebounceTimer = null;
   const TRANSIT_MODE_OPTIONS = [
     { value: 'scooter', label: '機車', icon: '🛵' },
     { value: 'car', label: '汽車', icon: '🚗' },
@@ -5457,6 +5458,53 @@ body.prototype-mode .prototype-id-chip {
     }
   }
 
+  async function persistCurrentTripStops() {
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+
+    const stopsSnapshot = replanStops.map((stop) => ({
+      name: stop.name,
+      emoji: stop.emoji || '📍',
+      stayMin: stop.stayMin,
+      transitMin: stop.transitMin,
+      transitMode: stop.transitMode,
+      lat: stop.lat,
+      lng: stop.lng,
+      scenicCoordinates: stop.scenicCoordinates || null,
+      _lockedCoordinates: stop._lockedCoordinates || null,
+      nearbyToiletLocations: stop.nearbyToiletLocations || [],
+      mapPinId: stop.mapPinId || null,
+      manualStartMin: stop.manualStartMin ?? null,
+      manualEndMin: stop.manualEndMin ?? null
+    }));
+
+    try {
+      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const tripIndex = myTrips.findIndex((t) => t.id === currentItineraryId);
+      if (tripIndex >= 0) {
+        myTrips[tripIndex] = { ...myTrips[tripIndex], stops: stopsSnapshot };
+        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+      }
+    } catch (e) {
+      console.warn('Failed to persist trip stops to localStorage:', e);
+    }
+
+    if (firebaseEnabled && firebaseDb) {
+      try {
+        await firebaseDb.collection('micro_trips').doc(currentItineraryId).update({
+          stops: stopsSnapshot,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (e) {
+        console.warn('Failed to persist trip stops to Firebase:', e);
+      }
+    }
+  }
+
+  function schedulePersistTrip() {
+    clearTimeout(persistTripDebounceTimer);
+    persistTripDebounceTimer = setTimeout(() => persistCurrentTripStops(), 1500);
+  }
+
   function setSegmentTransitMode(stopId, modeValue) {
     const stopIndex = replanStops.findIndex((item) => item.id === stopId);
     if (stopIndex === -1) return;
@@ -5473,6 +5521,7 @@ body.prototype-mode .prototype-id-chip {
     renderItineraryDisplay();
     if (isReplanning) renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function renderReplanBoard() {
@@ -7569,6 +7618,13 @@ body.prototype-mode .prototype-id-chip {
     return null;
   }
 
+  const TRANSIT_HUB_KEYWORDS = ['火車站', '高鐵站', '捷運站', '機場', '轉運站', '航廈', '客運站', '港口', '碼頭', '車站', 'station', 'airport', 'terminal'];
+  function isTransitHubStop(name) {
+    if (!name) return false;
+    const text = String(name).toLowerCase();
+    return TRANSIT_HUB_KEYWORDS.some((k) => text.includes(k.toLowerCase()));
+  }
+
   function getToiletDistanceFromStop(stop, toilet) {
     const stopCoordinates = getStopCoordinateForToiletSearch(stop);
     const toiletCoordinates = normalizeToiletCoordinate(toilet);
@@ -7807,7 +7863,9 @@ body.prototype-mode .prototype-id-chip {
     replanStops.forEach((stop) => {
       const el = document.getElementById(`toilet-section-${stop.mapPinId}`);
       if (!el) return;
-      if (Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0) {
+      if (isTransitHubStop(stop.name)) {
+        el.innerHTML = `<span style="font-size:12px;color:var(--ink3);">🚻 站內設有廁所</span>`;
+      } else if (Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0) {
         el.innerHTML = `<span class="nearby-toilets-label">附近廁所</span><div class="nearby-toilets-list">${stop.nearbyToiletLocations.slice(0, 3).map(t => `<span class="toilet-item">🚻 ${t.name || t}</span>`).join('')}</div>`;
       } else {
         el.innerHTML = `<span style="font-size:12px;color:var(--ink3);">🚻 附近廁所資料不足，建議出發前自行確認</span>`;
@@ -8409,6 +8467,7 @@ body.prototype-mode .prototype-id-chip {
 
               if (typeof origin.stopIndex === 'number' && replanStops[origin.stopIndex]) {
                 replanStops[origin.stopIndex].transitMin = legEstimate.durationMinutes;
+                schedulePersistTrip();
               }
             }
 

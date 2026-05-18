@@ -2394,7 +2394,8 @@ function injectEndpointStops(stops, wizardData = {}) {
       result.unshift({
         order: 0, type: 'start', emoji: '🚩', name: startLoc,
         time: normalizeClockInput(wizardData.startTime, '09:00'),
-        desc: '旅程起始點，從這裡出發。', duration: 0
+        desc: '旅程起始點，從這裡出發。', duration: 0,
+        ...(wizardData.startCoords ? { lat: wizardData.startCoords.lat, lng: wizardData.startCoords.lng } : {})
       });
     }
   }
@@ -2407,7 +2408,8 @@ function injectEndpointStops(stops, wizardData = {}) {
       result.push({
         order: result.length + 1, type: 'end', emoji: '🏁', name: endLoc,
         time: last ? last.time : normalizeClockInput(wizardData.startTime, '09:00'),
-        desc: '旅程結束點，回到這裡。', duration: 0
+        desc: '旅程結束點，回到這裡。', duration: 0,
+        ...(wizardData.endCoords ? { lat: wizardData.endCoords.lat, lng: wizardData.endCoords.lng } : {})
       });
     }
   }
@@ -2465,10 +2467,24 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops);
   const defaultHub = getDefaultTransitHub(destination);
+  const startLoc = (wizardData.startLocation || '').trim() || defaultHub;
+  const endLoc = (wizardData.endLocation || '').trim() || defaultHub;
+
+  // Geocode start/end locations so assignTransportModes can compute real distances
+  const [startCoords, endCoords] = await Promise.all([
+    fetchCoordinateFromGooglePlaces(startLoc, destination).catch(() => null),
+    startLoc === endLoc
+      ? Promise.resolve(null)
+      : fetchCoordinateFromGooglePlaces(endLoc, destination).catch(() => null),
+  ]);
+  const resolvedEndCoords = startLoc === endLoc ? startCoords : endCoords;
+
   const enrichedWizardData = {
     ...wizardData,
-    startLocation: (wizardData.startLocation || '').trim() || defaultHub,
-    endLocation: (wizardData.endLocation || '').trim() || defaultHub,
+    startLocation: startLoc,
+    endLocation: endLoc,
+    startCoords: startCoords || null,
+    endCoords: resolvedEndCoords || null,
   };
   const withEndpoints = injectEndpointStops(withTransport, enrichedWizardData);
   return assignTransportModes(withEndpoints);
