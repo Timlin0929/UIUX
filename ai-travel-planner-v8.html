@@ -4145,7 +4145,8 @@ body.prototype-mode .prototype-id-chip {
                   return {
                     id: `stop-${Date.now()}-${idx}`,
                     emoji: s.emoji || '📍', name: s.name || '景點',
-                    stayMin: s.duration || s.stayMin || 20,
+                    type: s.type || null,
+                    stayMin: (s.type === 'start' || s.type === 'end') ? 0 : (s.duration || s.stayMin || 20),
                     transitMin: normalizeTransitMinutesValue(s.transitMin),
                     transitMode: normalizeTransitMode(s.transitMode),
                     mapPinId: assignedPinId,
@@ -4191,7 +4192,8 @@ body.prototype-mode .prototype-id-chip {
                 id: `stop-${Date.now()}-${idx}`,
                 emoji: s.emoji || scenicRecord?.emoji || '📍',
                 name: s.name || scenicRecord?.name || s.desc || '景點',
-                stayMin: s.duration || s.stayMin || 30,
+                type: s.type || null,
+                stayMin: (s.type === 'start' || s.type === 'end') ? 0 : (s.duration || s.stayMin || 30),
                 transitMin: persistedTransitMin,
                 transitMode: normalizedTransitMode,
                 mapPinId: assignedPinId,
@@ -5743,6 +5745,8 @@ body.prototype-mode .prototype-id-chip {
       const nodeDotStyle = isLast ? 'background: var(--accent2); box-shadow: 0 0 0 4px var(--accent2-light);' : '';
       const spotCardStyle = isLast ? 'border-color: var(--accent2);' : '';
       const tagStyle = tag.style ? `style="${tag.style}"` : '';
+      const isEndpointStop = stop.type === 'start' || stop.type === 'end';
+      const endpointLabel = stop.type === 'start' ? '🚩 起點' : stop.type === 'end' ? '🏁 終點' : '';
 
       html += `
         <div id="itinerary-stop-${stop.id}" class="timeline-item" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
@@ -5753,7 +5757,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
-                <div class="spot-tags">${stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
                 </div>
