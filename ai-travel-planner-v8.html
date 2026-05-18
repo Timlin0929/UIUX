@@ -4408,11 +4408,10 @@ body.prototype-mode .prototype-id-chip {
     return norm === harborNorm || norm.includes(harborNorm) || harborNorm.includes(norm);
   }
 
-  // 將行程中（非末站）的本島港口站點替換為正確的離島港口名稱與座標
+  // 將行程中所有本島港口站點替換為正確的離島港口名稱與座標
   function normalizeIslandHarborStops(stops, config) {
-    return stops.map((stop, idx) => {
-      const isLast = idx === stops.length - 1;
-      if (!isLast && isMainlandHarborStop(stop.name, config)) {
+    return stops.map((stop) => {
+      if (isMainlandHarborStop(stop.name, config)) {
         const harbor = config.islandHarbor;
         return Object.assign({}, stop, {
           name: harbor.name,
