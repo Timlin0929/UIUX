@@ -8158,6 +8158,25 @@ body.prototype-mode .prototype-id-chip {
 
     window.setTimeout(() => {
       if (animationToken !== routeViewportAnimationToken) return;
+
+      if (Number.isFinite(maxZoom)) {
+        // Check if fitBounds would zoom beyond maxZoom (happens when two stops are close together).
+        // If so, skip fitBounds entirely to avoid the zoom-in-then-zoom-out double animation.
+        const ne = bounds.getNorthEast();
+        const sw = bounds.getSouthWest();
+        const latSpan = Math.max(Math.abs(ne.lat() - sw.lat()), 1e-7);
+        const lngSpan = Math.max(Math.abs(ne.lng() - sw.lng()), 1e-7);
+        const mapDiv = map.getDiv ? map.getDiv() : null;
+        const mapH = (mapDiv && mapDiv.offsetHeight) || 400;
+        const mapW = (mapDiv && mapDiv.offsetWidth) || 300;
+        const pxPerDeg = (256 * Math.pow(2, maxZoom)) / 360;
+        const wouldExceedMaxZoom = latSpan < mapH / pxPerDeg || lngSpan < mapW / pxPerDeg;
+        if (wouldExceedMaxZoom) {
+          map.setZoom(maxZoom);
+          return;
+        }
+      }
+
       map.fitBounds(bounds);
 
       if (Number.isFinite(maxZoom)) {
