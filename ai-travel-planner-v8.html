@@ -3313,14 +3313,15 @@ body.prototype-mode .prototype-id-chip {
     if (regionTrimmed && cleanName.endsWith(regionTrimmed) && cleanName.length > regionTrimmed.length) {
       cleanName = cleanName.slice(0, -regionTrimmed.length).trim();
     }
+    const existingCached = scenicPointCache.get(key);
     const record = {
       id: key,
       name: cleanName,
       region: region || '',
       tripTitle: title || '',
       emoji: stop?.emoji || '📍',
-      desc: stop?.desc || '',
-      notice: stop?.notice || '',
+      desc: hasMeaningfulSpotDescription(stop?.desc) ? stop.desc : (existingCached?.desc || ''),
+      notice: stop?.notice || existingCached?.notice || '',
       scenicCoordinates: { lat: coordinates.lat, lng: coordinates.lng },
       updatedAt: firebase && firebase.firestore ? firebase.firestore.FieldValue.serverTimestamp() : Date.now()
     };
@@ -3369,6 +3370,9 @@ body.prototype-mode .prototype-id-chip {
     const exactPosition = getExactCoordinateFromStop(stop);
     const name = String(stop?.name || '').trim();
     if (exactPosition && name) {
+      if (!scenicPointCache.has(buildScenicPointKey(name, region))) {
+        await fetchScenicPointRecord(name, region);
+      }
       return upsertScenicPointRecord(stop, exactPosition, region, title);
     }
 
@@ -5287,6 +5291,10 @@ body.prototype-mode .prototype-id-chip {
       schedule.length ? minutesToClock(schedule[0].start) : '',
       schedule.length ? minutesToClock(schedule[schedule.length - 1].end) : ''
     );
+    if (schedule.length) {
+      const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
+      if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(schedule[0].start)} – ${minutesToClock(schedule[schedule.length - 1].end)}`;
+    }
 
     if (!schedule.length) {
       listEl.innerHTML = `
@@ -5451,7 +5459,10 @@ body.prototype-mode .prototype-id-chip {
     const durationMin = endTime - startTime;
     const durationHours = Math.floor(durationMin / 60);
     const durationMins = durationMin % 60;
-    
+    updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime));
+    const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
+    if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
+
     // 生成标签映射
     const tagMap = {
       'luggage': { text: '起點', style: '' },
@@ -5471,7 +5482,7 @@ body.prototype-mode .prototype-id-chip {
           <button class="voice-btn stop" onclick="stopVoiceGuide()">停止</button>
         </div>
       </div>
-      <div style="font-size: 18px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏳</span> 距離上車還有充裕的 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}</div>
+      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}</div>
       <div class="stay-suggestion-note">可直接調整每個景點的建議停留時間，系統會即時重新計算後續行程。</div>
     `;
 
@@ -5542,6 +5553,17 @@ body.prototype-mode .prototype-id-chip {
         </div>`;
       }
     });
+
+    const endTimeStr = minutesToClock(schedule[schedule.length - 1].end);
+    html += `
+      <div class="timeline-item" style="pointer-events:none;">
+        <div class="time-box"><div class="time-val" style="color:var(--ink2);">${endTimeStr}</div></div>
+        <div class="node"><div class="node-dot" style="background:var(--ink3);box-shadow:none;width:8px;height:8px;"></div></div>
+        <div class="content-box" style="padding-bottom:0;">
+          <div style="font-size:13px;color:var(--ink2);padding:6px 0;">行程結束</div>
+        </div>
+      </div>
+    `;
 
     plannedBlock.innerHTML = html;
     
