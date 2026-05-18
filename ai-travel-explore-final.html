@@ -1120,17 +1120,90 @@ function initFirebaseIfConfigured() {
   }
 }
 
+function parseDurationFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const durations = [];
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*[個个]?小時/g)) {
+    const h = parseFloat(m[1]);
+    if (h >= 0.25 && h <= 8) durations.push(Math.round(h * 60));
+  }
+  for (const m of text.matchAll(/(\d+)\s*分[鐘钟]?/g)) {
+    const min = parseInt(m[1]);
+    if (min >= 10 && min <= 480) durations.push(min);
+  }
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)\b/gi)) {
+    const h = parseFloat(m[1]);
+    if (h >= 0.25 && h <= 8) durations.push(Math.round(h * 60));
+  }
+  for (const m of text.matchAll(/(\d+)\s*min(?:utes?)?\b/gi)) {
+    const min = parseInt(m[1]);
+    if (min >= 10 && min <= 480) durations.push(min);
+  }
+  if (!durations.length) return null;
+  durations.sort((a, b) => a - b);
+  return durations[Math.floor(durations.length / 2)];
+}
+
+async function fetchPlaceReviewsText(name, destination, apiKey) {
+  if (!apiKey || !name) return '';
+  try {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.reviews,places.editorialSummary'
+      },
+      body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 })
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    const place = data.places && data.places[0];
+    if (!place) return '';
+    const texts = [];
+    if (place.editorialSummary?.text) texts.push(place.editorialSummary.text);
+    if (Array.isArray(place.reviews)) {
+      place.reviews.forEach(r => {
+        if (r.text?.text) texts.push(r.text.text);
+        if (r.originalText?.text && r.originalText.text !== r.text?.text) texts.push(r.originalText.text);
+      });
+    }
+    return texts.join('\n');
+  } catch (e) {
+    return '';
+  }
+}
+
 async function buildFirebasePoiHintBlock(wizardData) {
   if (!firebaseEnabled || !firebaseDb) return '';
   const destination = (wizardData.dest || wizardData.destCustom || '').trim();
   if (!destination) return '';
+  const apiKey = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.GOOGLE_MAPS_API_KEY;
   try {
     const snapshot = await firebaseDb.collection('poi_cache').where('destination', '==', destination).limit(20).get();
     if (snapshot.empty) return '';
 
-    const poiLines = [];
-    snapshot.forEach(doc => {
-      const poi = doc.data();
+    const enrichedPois = await Promise.all(snapshot.docs.map(async (doc) => {
+      const poi = { ...doc.data() };
+      const hasDuration = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0;
+      if (!hasDuration) {
+        const descDuration = parseDurationFromText(poi.desc || poi.description || '');
+        if (descDuration) {
+          poi.duration = descDuration;
+          doc.ref.update({ duration: descDuration }).catch(() => {});
+        } else {
+          const reviewText = await fetchPlaceReviewsText(poi.name, destination, apiKey);
+          const reviewDuration = parseDurationFromText(reviewText);
+          if (reviewDuration) {
+            poi.duration = reviewDuration;
+            doc.ref.update({ duration: reviewDuration }).catch(() => {});
+          }
+        }
+      }
+      return poi;
+    }));
+
+    const poiLines = enrichedPois.map(poi => {
       const poiLat = Number(poi.lat);
       const poiLng = Number(poi.lng);
       const coordinateHint = Number.isFinite(poiLat) && Number.isFinite(poiLng)
@@ -1157,7 +1230,7 @@ async function buildFirebasePoiHintBlock(wizardData) {
       const toiletHint = toiletLines.length
         ? `附近廁所候選（僅沿用距離景點 500 公尺內且名稱相符者）：\n${toiletLines.join('\n')}`
         : '附近廁所候選：無可信快取';
-      poiLines.push(`景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n${toiletHint}\n`);
+      return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n${toiletHint}\n`;
     });
 
     return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
