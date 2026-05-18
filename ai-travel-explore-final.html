@@ -1279,8 +1279,9 @@ function getDurationStopRange(days) {
   if (days === '1小時')  return { min: 2, max: 3 };
   if (days === '2小時')  return { min: 3, max: 4 };
   if (days === '半天')   return { min: 4, max: 6 };
-  if (days === '2天')    return { min: 8, max: 12 };
-  return { min: 5, max: 8 }; // 1天 default
+  if (days === '1天')   return { min: 8, max: 12 };
+  if (days === '2天')   return { min: 12, max: 18 };
+  return { min: 8, max: 12 }; // fallback
 }
 
 function calcTripEndTime(startTime, days) {
@@ -1310,7 +1311,7 @@ function getPromptRuleLines(wizardData, mode) {
 
   if (detailed) {
     const { min, max } = getDurationStopRange(days);
-    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點，並確保行程從 ${startTime} 開始、安排至接近 ${endTime} 結束，充分利用整段時間`);
+    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、必須安排至 ${endTime} 左右結束，最後一站的 time 必須接近 ${endTime}；嚴禁提前於 ${endTime} 一小時前結束行程，若景點不足請加入餐廳、咖啡廳、市場、公園等補充體驗`);
     lines.push('6. 每站包含時間、景點名稱、景點 WGS84 精確座標、推薦理由、營業時間、附近廁所位置（1-3個，必須距離該景點 500 公尺以內）');
     lines.push('7. 廁所座標必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代');
     lines.push('8. 廁所輸出格式：{name:"正式名稱", lat:數字, lng:數字, address:"地址或位置描述", source:"資料來源", confidence:"high|medium"}；若無法確認精確座標，請保留 name/address 並省略 lat/lng');

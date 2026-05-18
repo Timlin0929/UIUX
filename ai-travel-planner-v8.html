@@ -4239,7 +4239,13 @@ body.prototype-mode .prototype-id-chip {
               });
             }
 
-            const durationSum = replanStops.reduce((sum, s) => sum + s.stayMin + s.transitMin, 0);
+            const durationSum = replanStops.reduce((sum, s, idx) => {
+              const stay = s.stayMin || 0;
+              const transit = idx < replanStops.length - 1
+                ? (Number.isFinite(s.transitMin) ? s.transitMin : 15)
+                : 0;
+              return sum + stay + transit;
+            }, 0);
             const resolvedStartTime = (trip.wizardData && trip.wizardData.startTime)
               || (replanStops[0] && replanStops[0].time)
               || '09:00';
