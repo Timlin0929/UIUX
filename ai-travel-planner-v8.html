@@ -7160,8 +7160,11 @@ body.prototype-mode .prototype-id-chip {
   let routeRenderToken = 0;
   let mapRebuildToken = 0;
   let routeViewportAnimationToken = 0;
+  let routeMidLabels = [];
 
   const mapPinLocations = {};
+
+  const ROUTE_MODE_COLORS = { car: '#1D4ED8', scooter: '#EA580C', walk: '#16A34A', public: '#7C3AED' };
 
   function createEmojiPinIcon(emoji) {
     const svg = `
@@ -7182,6 +7185,48 @@ body.prototype-mode .prototype-id-chip {
       url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
       scaledSize: new google.maps.Size(56, 72),
       anchor: new google.maps.Point(28, 68)
+    };
+  }
+
+  function createEmojiPinIconNumbered(emoji, number) {
+    const label = String(number);
+    const fontSize = label.length > 1 ? 9 : 11;
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="64" height="72" viewBox="0 0 64 72">
+        <defs>
+          <filter id="sh2" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000000" flood-opacity="0.18"/>
+          </filter>
+        </defs>
+        <g filter="url(#sh2)">
+          <path d="M28 68C28 68 8 46.8 8 28C8 17.2 16.9 8 28 8C39.1 8 48 17.2 48 28C48 46.8 28 68 28 68Z" fill="#2e7d6d"/>
+          <circle cx="28" cy="28" r="15" fill="#ffffff"/>
+          <text x="28" y="33" text-anchor="middle" font-size="18">${emoji}</text>
+        </g>
+        <circle cx="50" cy="13" r="10" fill="#1a56db" stroke="#ffffff" stroke-width="2"/>
+        <text x="50" y="17" text-anchor="middle" font-size="${fontSize}" font-weight="800" fill="#ffffff" font-family="system-ui,sans-serif">${label}</text>
+      </svg>`;
+    return {
+      url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+      scaledSize: new google.maps.Size(64, 72),
+      anchor: new google.maps.Point(28, 68)
+    };
+  }
+
+  function createRouteMidLabelIcon(modeIcon, destName, color) {
+    const truncated = (destName || '').length > 7 ? destName.substring(0, 7) + '…' : (destName || '目的地');
+    const charCount = [...truncated].length;
+    const textW = charCount * 13 + 36;
+    const totalW = textW + 4;
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="26" viewBox="0 0 ${totalW} 26">
+        <rect x="0" y="0" rx="13" ry="13" width="${totalW}" height="26" fill="${color}" opacity="0.93"/>
+        <text x="${totalW / 2}" y="17" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff" font-family="system-ui,sans-serif">${modeIcon}→${truncated}</text>
+      </svg>`;
+    return {
+      url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+      scaledSize: new google.maps.Size(totalW, 26),
+      anchor: new google.maps.Point(totalW / 2, 13)
     };
   }
 
@@ -7698,15 +7743,23 @@ body.prototype-mode .prototype-id-chip {
     if (!map || !window.google || !google.maps) return;
     clearRenderedMapMarkers();
 
+    const stopOrderByPin = {};
+    replanStops.forEach((stop, index) => {
+      if (stop.mapPinId) stopOrderByPin[stop.mapPinId] = index + 1;
+    });
+
     for (const id in mapPinLocations) {
       const loc = mapPinLocations[id];
       if (!loc || !Number.isFinite(Number(loc.lat)) || !Number.isFinite(Number(loc.lng))) continue;
       const position = safeLatLng(loc);
+      const stopNumber = stopOrderByPin[id];
       const marker = new google.maps.Marker({
         position,
         map: map,
         title: loc.title,
-        icon: createEmojiPinIcon(loc.title.split(' ')[0])
+        icon: stopNumber !== undefined
+          ? createEmojiPinIconNumbered(loc.title.split(' ')[0], stopNumber)
+          : createEmojiPinIcon(loc.title.split(' ')[0])
       });
       rememberMarkerBasePosition(marker, position);
 
@@ -8006,6 +8059,8 @@ body.prototype-mode .prototype-id-chip {
       routeStageCache = [];
       directionsRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
       directionsRenderers = [];
+      routeMidLabels.forEach((m) => { if (m) m.setMap(null); });
+      routeMidLabels = [];
       activeRouteStage = null;
       clearToiletMarkers();
       currentRouteBounds = null;
@@ -8038,6 +8093,8 @@ body.prototype-mode .prototype-id-chip {
 
     directionsRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
     directionsRenderers = [];
+    routeMidLabels.forEach((m) => { if (m) m.setMap(null); });
+    routeMidLabels = [];
     activeRouteStage = null;
     clearToiletMarkers();
 
@@ -8069,8 +8126,7 @@ body.prototype-mode .prototype-id-chip {
             if (renderToken !== routeRenderToken) return;
 
             const leg = response.routes[0].legs[0];
-            const segColors = ['#FF2D95', '#FF8C00', '#00C3FF', '#8A2BE2'];
-            const segColor = segColors[i % segColors.length];
+            const segColor = ROUTE_MODE_COLORS[stageMode] || '#EA580C';
             const renderer = new google.maps.DirectionsRenderer({
               map: map,
               suppressMarkers: true,
@@ -8080,17 +8136,17 @@ body.prototype-mode .prototype-id-chip {
                 strokeOpacity: 0.95,
                 geodesic: true,
                 zIndex: 1000,
-                // 在路線上繪製重複箭頭圖示：先繪製白色外框，再繪製較小的彩色箭頭
                 icons: [
                   {
                     icon: {
                       path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-                      scale: 7,
+                      scale: 8,
                       strokeColor: '#ffffff',
                       fillColor: '#ffffff',
-                      fillOpacity: 0.98
+                      fillOpacity: 1
                     },
-                    offset: '50%'
+                    offset: '15%',
+                    repeat: '80px'
                   },
                   {
                     icon: {
@@ -8100,14 +8156,29 @@ body.prototype-mode .prototype-id-chip {
                       fillColor: segColor,
                       fillOpacity: 1
                     },
-                    offset: '50%',
-                    repeat: '120px'
+                    offset: '15%',
+                    repeat: '80px'
                   }
                 ]
               }
             });
             renderer.setDirections(response);
             directionsRenderers[i] = renderer;
+
+            // 在路線中間加入方向標籤，讓使用者清楚知道往哪個景點移動
+            const overviewPath = response.routes[0].overview_path;
+            if (overviewPath && overviewPath.length > 0) {
+              const midPoint = overviewPath[Math.floor(overviewPath.length / 2)];
+              const destLabel = destination.name || destination.title || '';
+              const midMarker = new google.maps.Marker({
+                position: midPoint,
+                map: map,
+                icon: createRouteMidLabelIcon(stageMeta.icon, destLabel, segColor),
+                zIndex: 900,
+                clickable: false
+              });
+              routeMidLabels[i] = midMarker;
+            }
 
             const fallbackTransitMin = schedule[origin.stopIndex] ? schedule[origin.stopIndex].transit : 0;
             const legEstimate = getGoogleLegEstimate(leg, fallbackTransitMin);
