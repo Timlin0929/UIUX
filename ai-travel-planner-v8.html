@@ -4240,9 +4240,12 @@ body.prototype-mode .prototype-id-chip {
             }
 
             const durationSum = replanStops.reduce((sum, s) => sum + s.stayMin + s.transitMin, 0);
-            const startH = 10, startM = 0;
-            currentTripWindow.start = '10:00';
-            const endMTotal = startH * 60 + startM + durationSum;
+            const resolvedStartTime = (trip.wizardData && trip.wizardData.startTime)
+              || (replanStops[0] && replanStops[0].time)
+              || '09:00';
+            currentTripWindow.start = resolvedStartTime;
+            const startTotalMin = clockToMinutes(resolvedStartTime) || (9 * 60);
+            const endMTotal = startTotalMin + durationSum;
             currentTripWindow.end = `${Math.floor(endMTotal / 60).toString().padStart(2, '0')}:${(endMTotal % 60).toString().padStart(2, '0')}`;
             
             if (heroTags.length >= 1) {
