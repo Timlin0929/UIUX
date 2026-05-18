@@ -3033,6 +3033,30 @@ body.prototype-mode .prototype-id-chip {
     { value: 'walk', label: '走路', icon: '🚶' },
     { value: 'public', label: '大眾交通', icon: '🚌' }
   ];
+
+  // 離島交通設定：各離島的島內港口、本島港口與別名
+  const ISLAND_FERRY_CONFIG = {
+    '綠島': {
+      islandHarbor: { name: '南寮漁港', emoji: '⚓', lat: 22.6696, lng: 121.4888 },
+      mainlandHarbor: { name: '富岡漁港', emoji: '⚓', lat: 22.7489, lng: 121.1551, region: '台東' },
+      mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港', '台東富岡漁港']
+    },
+    '蘭嶼': {
+      islandHarbor: { name: '開元漁港', emoji: '⚓', lat: 22.0444, lng: 121.5581 },
+      mainlandHarbor: { name: '富岡漁港', emoji: '⚓', lat: 22.7489, lng: 121.1551, region: '台東' },
+      mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港']
+    },
+    '小琉球': {
+      islandHarbor: { name: '白沙港', emoji: '⚓', lat: 22.3435, lng: 120.3722 },
+      mainlandHarbor: { name: '東港漁港', emoji: '⚓', lat: 22.4577, lng: 120.4512, region: '屏東' },
+      mainlandHarborAlias: ['東港漁港', '東港', '大鵬灣港']
+    },
+    '澎湖': {
+      islandHarbor: { name: '馬公港', emoji: '⚓', lat: 23.5636, lng: 119.5693 },
+      mainlandHarbor: { name: '布袋港', emoji: '⚓', lat: 23.3815, lng: 120.1616, region: '嘉義' },
+      mainlandHarborAlias: ['布袋港', '嘉義布袋', '布袋漁港']
+    }
+  };
   const REGION_MAP_PRESETS = [
     {
       keywords: ['台東', 'taitung'],
@@ -3840,6 +3864,12 @@ body.prototype-mode .prototype-id-chip {
   }
 
   async function resolveStopCoordinatesAsync(stop, index, region, title = '') {
+    // 若座標被鎖定（如離島返程本島港口），直接回傳，不觸發 Firebase 或地理編碼
+    if (stop._lockedCoordinates) {
+      const locked = readCoordinateObject(stop._lockedCoordinates);
+      if (locked) return locked;
+    }
+
     const scenicRecord = await resolveScenicPointRecord(stop, region, title);
     if (scenicRecord && scenicRecord.scenicCoordinates) {
       return scenicRecord.scenicCoordinates;
@@ -3960,6 +3990,25 @@ body.prototype-mode .prototype-id-chip {
       const stop = replanStops[idx];
       const pinId = stop.mapPinId || `auto-pin-${idx + 1}`;
       stop.mapPinId = pinId;
+
+      // 鎖定座標的站點（如離島返程港口）直接使用指定座標，不查 Firebase 或地理編碼
+      if (stop._lockedCoordinates) {
+        const lockedPos = readCoordinateObject(stop._lockedCoordinates);
+        if (lockedPos) {
+          const safePos = safeLatLng(lockedPos);
+          stop.scenicCoordinates = lockedPos;
+          nextLocations[pinId] = {
+            lat: safePos.lat,
+            lng: safePos.lng,
+            title: `${stop.emoji || '📍'} ${stop.name || '景點'}`
+          };
+          if (typeof pinData !== 'undefined') {
+            pinData[pinId] = Object.assign({}, pinData[pinId] || {}, { lat: safePos.lat, lng: safePos.lng });
+          }
+          continue;
+        }
+      }
+
       const scenicRecord = await resolveScenicPointRecord(stop, currentTripRegion, currentTripTitle);
       const resolvedPosition = await resolveStopCoordinatesAsync(stop, idx, currentTripRegion, currentTripTitle);
       if (rebuildToken !== mapRebuildToken) return false;
@@ -4072,8 +4121,39 @@ body.prototype-mode .prototype-id-chip {
                delete mapPinLocations[key];
             }
 
-            replanStops = await Promise.all(trip.stops.map(async (s, idx) => {
+            const dedupedStops = deduplicateAdjacentTripStops(trip.stops);
+            const islandConfig = getIslandFerryConfig(trip.region);
+            const normalizedStops = islandConfig ? normalizeIslandHarborStops(dedupedStops, islandConfig) : dedupedStops;
+            replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
+
+              // 座標鎖定的站點（如離島港口）：直接使用指定座標，跳過 Firebase 查詢
+              if (s._lockedCoordinates) {
+                const lockedPos = readCoordinateObject(s._lockedCoordinates);
+                if (lockedPos) {
+                  const safePos = safeLatLng(lockedPos);
+                  mapPinLocations[assignedPinId] = { lat: safePos.lat, lng: safePos.lng,
+                    title: `${s.emoji || '📍'} ${s.name || '景點'}` };
+                  if (typeof pinData !== 'undefined') {
+                    pinData[assignedPinId] = {
+                      ...buildSpotPinPayload({ emoji: s.emoji || '📍', name: s.name || '景點',
+                        desc: s.desc || '', notice: s.notice || '', region: trip.region || '', title: currentTripTitle }),
+                      lat: safePos.lat, lng: safePos.lng
+                    };
+                  }
+                  return {
+                    id: `stop-${Date.now()}-${idx}`,
+                    emoji: s.emoji || '📍', name: s.name || '景點',
+                    stayMin: s.duration || s.stayMin || 20,
+                    transitMin: normalizeTransitMinutesValue(s.transitMin),
+                    transitMode: normalizeTransitMode(s.transitMode),
+                    mapPinId: assignedPinId,
+                    scenicCoordinates: lockedPos, _lockedCoordinates: lockedPos,
+                    lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: []
+                  };
+                }
+              }
+
               const scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
               const resolvedPosition = scenicRecord?.scenicCoordinates || await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
               const normalizedTransitMode = normalizeTransitMode(s.transitMode);
@@ -4121,6 +4201,41 @@ body.prototype-mode .prototype-id-chip {
               };
             }));
             
+            // 離島行程：若最後一站不是島上港口，自動加入返回出發港口的站點
+            if (islandConfig && !isIslandHarborStop(replanStops[replanStops.length - 1]?.name, islandConfig)) {
+              const returnHarbor = islandConfig.islandHarbor;
+              const returnPinId = `ai-pin-return-${Date.now()}`;
+              const returnPos = { lat: returnHarbor.lat, lng: returnHarbor.lng };
+              mapPinLocations[returnPinId] = {
+                lat: returnPos.lat,
+                lng: returnPos.lng,
+                title: `${returnHarbor.emoji} ${returnHarbor.name}`
+              };
+              if (typeof pinData !== 'undefined') {
+                pinData[returnPinId] = {
+                  title: `${returnHarbor.emoji} ${returnHarbor.name}`,
+                  desc: `結束遊覽，返回出發港口 ${returnHarbor.name}，等候交通船離島。`,
+                  notice: '請提前確認船班時刻與訂票，船班可能因天候取消，建議預留彈性。',
+                  lat: returnPos.lat,
+                  lng: returnPos.lng
+                };
+              }
+              replanStops.push({
+                id: `stop-return-${Date.now()}`,
+                emoji: returnHarbor.emoji,
+                name: returnHarbor.name,
+                stayMin: 20,
+                transitMin: null,
+                transitMode: 'public',
+                mapPinId: returnPinId,
+                scenicCoordinates: returnPos,
+                _lockedCoordinates: returnPos,
+                lat: returnPos.lat,
+                lng: returnPos.lng,
+                nearbyToiletLocations: []
+              });
+            }
+
             const durationSum = replanStops.reduce((sum, s) => sum + s.stayMin + s.transitMin, 0);
             const startH = 10, startM = 0;
             currentTripWindow.start = '10:00';
@@ -4224,6 +4339,91 @@ body.prototype-mode .prototype-id-chip {
       const stopKeywords = extractStopKeywords(stop.name);
       return candidateKeywords.some((keyword) => stopKeywords.includes(keyword));
     }) || null;
+  }
+
+  function approxDistanceMeters(lat1, lng1, lat2, lng2) {
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function shouldMergeAdjacentStops(a, b) {
+    const aN = normalizeText(a.name || '');
+    const bN = normalizeText(b.name || '');
+    // 若較短的名稱（≥3字）是另一個名稱的子字串，視為同地點
+    const shorter = aN.length <= bN.length ? aN : bN;
+    if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
+    // 若座標幾乎重疊（< 30 公尺），也視為同地點
+    const coordA = readCoordinateObject(a['景點座標'] || a.scenicCoordinates || a.coordinates);
+    const coordB = readCoordinateObject(b['景點座標'] || b.scenicCoordinates || b.coordinates);
+    if (coordA && coordB && approxDistanceMeters(coordA.lat, coordA.lng, coordB.lat, coordB.lng) < 30) return true;
+    return false;
+  }
+
+  function deduplicateAdjacentTripStops(stops) {
+    if (!Array.isArray(stops) || stops.length < 2) return stops;
+    const result = [];
+    let i = 0;
+    while (i < stops.length) {
+      const curr = stops[i];
+      const next = i + 1 < stops.length ? stops[i + 1] : null;
+      if (next && shouldMergeAdjacentStops(curr, next)) {
+        const currDur = curr.duration || curr.stayMin || 30;
+        const nextDur = next.duration || next.stayMin || 30;
+        // 保留較具描述性（較長）的名稱，合併停留時間
+        const useCurr = (curr.name || '').length >= (next.name || '').length;
+        result.push(Object.assign({}, curr, {
+          name: useCurr ? curr.name : next.name,
+          emoji: curr.emoji || next.emoji,
+          stayMin: currDur + nextDur,
+          duration: currDur + nextDur
+        }));
+        i += 2;
+      } else {
+        result.push(curr);
+        i++;
+      }
+    }
+    return result;
+  }
+
+  function getIslandFerryConfig(region) {
+    return ISLAND_FERRY_CONFIG[String(region || '').trim()] || null;
+  }
+
+  function isMainlandHarborStop(stopName, config) {
+    if (!stopName || !config) return false;
+    const norm = normalizeText(stopName);
+    return config.mainlandHarborAlias.some((alias) => {
+      const aliasNorm = normalizeText(alias);
+      return norm === aliasNorm || norm.includes(aliasNorm) || aliasNorm.includes(norm);
+    });
+  }
+
+  function isIslandHarborStop(stopName, config) {
+    if (!stopName || !config) return false;
+    const norm = normalizeText(stopName);
+    const harborNorm = normalizeText(config.islandHarbor.name);
+    return norm === harborNorm || norm.includes(harborNorm) || harborNorm.includes(norm);
+  }
+
+  // 將行程中（非末站）的本島港口站點替換為正確的離島港口名稱與座標
+  function normalizeIslandHarborStops(stops, config) {
+    return stops.map((stop, idx) => {
+      const isLast = idx === stops.length - 1;
+      if (!isLast && isMainlandHarborStop(stop.name, config)) {
+        const harbor = config.islandHarbor;
+        return Object.assign({}, stop, {
+          name: harbor.name,
+          emoji: harbor.emoji || stop.emoji,
+          scenicCoordinates: { lat: harbor.lat, lng: harbor.lng },
+          '景點座標': { lat: harbor.lat, lng: harbor.lng },
+          _lockedCoordinates: { lat: harbor.lat, lng: harbor.lng }
+        });
+      }
+      return stop;
+    });
   }
 
   function getTripScheduleSummary() {
@@ -5506,13 +5706,9 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
                 <div class="spot-tags">${stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
-                ${Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0 ? `
-                <div class="nearby-toilets-row">
-                  <span class="nearby-toilets-label">附近廁所</span>
-                  <div class="nearby-toilets-list">
-                    ${stop.nearbyToiletLocations.slice(0, 3).map(toilet => `<span class="toilet-item">🚻 ${toilet.name || toilet}</span>`).join('')}
-                  </div>
-                </div>` : ''}
+                <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
+                  <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
+                </div>
               </div>
             </div>
           </div>
@@ -7598,6 +7794,18 @@ body.prototype-mode .prototype-id-chip {
       .slice(0, 3);
   }
 
+  function updateToiletSectionsInDOM() {
+    replanStops.forEach((stop) => {
+      const el = document.getElementById(`toilet-section-${stop.mapPinId}`);
+      if (!el) return;
+      if (Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0) {
+        el.innerHTML = `<span class="nearby-toilets-label">附近廁所</span><div class="nearby-toilets-list">${stop.nearbyToiletLocations.slice(0, 3).map(t => `<span class="toilet-item">🚻 ${t.name || t}</span>`).join('')}</div>`;
+      } else {
+        el.innerHTML = `<span style="font-size:12px;color:var(--ink3);">🚻 附近廁所資料不足，建議出發前自行確認</span>`;
+      }
+    });
+  }
+
   function getAllToiletsFromStops() {
     return replanStops
       .map((stop, stopIndex) => ({ stop, stopIndex }))
@@ -7662,6 +7870,7 @@ body.prototype-mode .prototype-id-chip {
     }
 
     layoutMapMarkers();
+    updateToiletSectionsInDOM();
   }
 
   async function renderToiletMarkersForActiveRouteStage() {
@@ -7737,6 +7946,7 @@ body.prototype-mode .prototype-id-chip {
     }
 
     layoutMapMarkers();
+    updateToiletSectionsInDOM();
   }
 
   function renderMapMarkersFromCurrentLocations() {
