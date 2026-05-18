@@ -1244,7 +1244,7 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('9. 廁所名稱與座標必須互相對應；若 Firebase 候選、data.gov.tw 公廁資料、Google Maps/Places 名稱或地址互相矛盾，優先使用可定位到實際廁所設施且距離景點最近的資料，無法確認則不要輸出座標');
     lines.push('10. 景點須考慮營業時間，且使用正式可定位名稱');
     lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
-    lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點類型合理設定：觀景台/步道 30-60、海灘/公園 45-90、美食/咖啡廳 30-60、博物館/文化館 60-120、市場/夜市 45-90、廟宇/歷史景點 30-60；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
+    lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
     lines.push('13. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
     if (isLongTrip(days)) {
       lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
@@ -1283,7 +1283,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
     ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
-    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration(必填·正整數·分鐘，例觀景/步道填60、美食/咖啡廳填45、博物館/文化館填90、海灘/公園填60),businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
     ? `\n\n${firebaseHint}`

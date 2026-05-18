@@ -5466,6 +5466,7 @@ body.prototype-mode .prototype-id-chip {
     const stopsSnapshot = replanStops.map((stop) => ({
       name: stop.name,
       emoji: stop.emoji || '📍',
+      type: stop.type || null,
       stayMin: stop.stayMin,
       transitMin: stop.transitMin,
       transitMode: stop.transitMode,
