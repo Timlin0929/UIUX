@@ -7615,6 +7615,14 @@ body.prototype-mode .prototype-id-chip {
     return minLength > 0 && sharedRun / minLength >= 0.45 ? 45 : 0;
   }
 
+  const ACCOMMODATION_EXCLUSION_KEYWORDS = ['旅館', '民宿', '飯店', '旅宿', '旅店', '汽車旅館', '客棧', '青年旅', 'hotel', 'motel', 'inn', 'hostel'];
+
+  function isAccommodationPlace(name) {
+    if (!name) return false;
+    const text = String(name).toLowerCase();
+    return ACCOMMODATION_EXCLUSION_KEYWORDS.some((k) => text.includes(k.toLowerCase()));
+  }
+
   function chooseBestToiletPlaceResult(results, stop, query) {
     const stopCoordinates = getStopCoordinateForToiletSearch(stop);
     if (!stopCoordinates || !Array.isArray(results)) return null;
@@ -7633,6 +7641,7 @@ body.prototype-mode .prototype-id-chip {
         return { place, coordinates, distance, score, nameScore, toiletNameScore };
       })
       .filter(Boolean)
+      .filter((candidate) => !isAccommodationPlace(candidate.place.name))
       .filter((candidate) => candidate.nameScore >= 45 || candidate.toiletNameScore > 0)
       .sort((a, b) => b.score - a.score || a.distance - b.distance);
 
@@ -7790,6 +7799,7 @@ body.prototype-mode .prototype-id-chip {
         };
       })
       .filter(Boolean)
+      .filter((item) => !isAccommodationPlace(item.name))
       .slice(0, 3);
   }
 

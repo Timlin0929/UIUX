@@ -2356,13 +2356,19 @@ function applyTripPlanningRules(stops, wizardData = {}) {
 
 function assignTransportModes(stops) {
   const VALID_MODES = ['walk', 'scooter', 'car', 'public'];
+  const existingModes = stops
+    .map((s) => String(s.transitMode || s.transportMode || '').trim().toLowerCase())
+    .filter((m) => VALID_MODES.includes(m));
+  const modeCounts = existingModes.reduce((acc, m) => { acc[m] = (acc[m] || 0) + 1; return acc; }, {});
+  const dominantMode = Object.entries(modeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'car';
+
   return stops.map((stop, index) => {
     if (index >= stops.length - 1) return stop;
     const existing = String(stop.transitMode || stop.transportMode || '').trim().toLowerCase();
     if (VALID_MODES.includes(existing)) return stop;
     const fromCoord = getStopCoordinate(stop);
     const toCoord = getStopCoordinate(stops[index + 1]);
-    if (!fromCoord || !toCoord) return { ...stop, transitMode: 'car' };
+    if (!fromCoord || !toCoord) return { ...stop, transitMode: dominantMode };
     const dist = getDistanceMeters(fromCoord, toCoord);
     const transitMode = dist <= 800 ? 'walk' : dist <= 3000 ? 'scooter' : 'car';
     return { ...stop, transitMode };
@@ -2464,7 +2470,8 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}) {
     startLocation: (wizardData.startLocation || '').trim() || defaultHub,
     endLocation: (wizardData.endLocation || '').trim() || defaultHub,
   };
-  return injectEndpointStops(withTransport, enrichedWizardData);
+  const withEndpoints = injectEndpointStops(withTransport, enrichedWizardData);
+  return assignTransportModes(withEndpoints);
 }
 
 async function saveMicroTripToFirebase(trip) {
