@@ -3073,6 +3073,7 @@ body.prototype-mode .prototype-id-chip {
   let posterImageGenerating = false;
   let posterImageUploadUrl = null;
   let posterImageUploading = false;
+  let posterImageUploadPromise = null;
   let importedTravelPinSerial = 0;
   let replanStopSerial = 0;
   const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -4749,6 +4750,7 @@ body.prototype-mode .prototype-id-chip {
     posterImageGenerating = true;
     posterGeneratedImageBase64 = null;
     posterImageUploadUrl = null;
+    posterImageUploadPromise = null;
     renderTravelTools();
 
     const prompt = buildImagePrompt(character);
@@ -4778,6 +4780,9 @@ body.prototype-mode .prototype-id-chip {
       const part = data.candidates?.[0]?.content?.parts?.[0];
       if (!part?.inlineData?.data) { throw new Error('未收到圖片資料。回應：' + JSON.stringify(data).slice(0, 200)); }
       posterGeneratedImageBase64 = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+      if (firebaseStorage) {
+        posterImageUploadPromise = uploadPosterToStorage();
+      }
     } catch (e) {
       window.alert(`圖片生成失敗：${e.message}`);
     } finally {
@@ -4882,21 +4887,8 @@ body.prototype-mode .prototype-id-chip {
     window.alert('行程文字已複製！請在 Facebook 新貼文中貼上，並手動上傳圖片。');
   }
 
-  async function copyImageUrl() {
-    if (!posterGeneratedImageBase64) {
-      window.alert('請先生成插圖再複製連結。');
-      return;
-    }
-    // 已有快取 URL 直接複製
-    if (posterImageUploadUrl) {
-      await navigator.clipboard.writeText(posterImageUploadUrl).catch(() => {});
-      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。');
-      return;
-    }
-    if (!firebaseStorage) {
-      window.alert('Firebase Storage 尚未初始化，請確認 Firebase 專案已啟用 Storage。');
-      return;
-    }
+  async function uploadPosterToStorage() {
+    if (!posterGeneratedImageBase64 || !firebaseStorage || posterImageUploadUrl) return;
     posterImageUploading = true;
     renderTravelTools();
     try {
@@ -4906,16 +4898,35 @@ body.prototype-mode .prototype-id-chip {
       const path = `posters/${code}-${Date.now()}.png`;
       const ref  = firebaseStorage.ref(path);
       const snapshot = await ref.put(blob, { contentType: 'image/png' });
-      const url = await snapshot.ref.getDownloadURL();
-      posterImageUploadUrl = url;
-      await navigator.clipboard.writeText(url).catch(() => {});
-      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。');
+      posterImageUploadUrl = await snapshot.ref.getDownloadURL();
     } catch (e) {
-      console.warn('上傳失敗：', e);
-      window.alert(`上傳失敗：${e.message}\n請確認 Firebase Storage 已啟用，並設定允許寫入的存取規則。`);
+      console.warn('背景上傳圖片失敗：', e);
     } finally {
       posterImageUploading = false;
       renderTravelTools();
+    }
+  }
+
+  async function copyImageUrl() {
+    if (!posterGeneratedImageBase64) {
+      window.alert('請先生成插圖再複製連結。'); return;
+    }
+    if (posterImageUploadUrl) {
+      await navigator.clipboard.writeText(posterImageUploadUrl).catch(() => {});
+      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。'); return;
+    }
+    if (!firebaseStorage) {
+      window.alert('Firebase Storage 尚未初始化，請確認 Firebase 專案已啟用 Storage。'); return;
+    }
+    if (!posterImageUploadPromise) {
+      posterImageUploadPromise = uploadPosterToStorage();
+    }
+    await posterImageUploadPromise;
+    if (posterImageUploadUrl) {
+      await navigator.clipboard.writeText(posterImageUploadUrl).catch(() => {});
+      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。');
+    } else {
+      window.alert('上傳失敗，請稍後再試。');
     }
   }
 
