@@ -2638,7 +2638,7 @@ body.prototype-mode .prototype-id-chip {
           <div class="hero-tag">📍 等待匯入目的地</div>
         </div>
         <div class="hero-actions" id="itineraryHeroActions">
-          <button class="replan-btn secondary" id="replanStartBtn" onclick="enterReplanMode()">重新規劃</button>
+          <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
           <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
           <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           <button class="replan-btn primary" id="replanApplyBtn" onclick="applyReplan()" style="display:none;">套用新規劃</button>
@@ -3097,6 +3097,7 @@ body.prototype-mode .prototype-id-chip {
   const replanStartMinutes = 14 * 60;
   let replanStops = [];
   let persistTripDebounceTimer = null;
+  let persistTripMaxWaitTimer = null;
   const TRANSIT_MODE_OPTIONS = [
     { value: 'scooter', label: '機車', icon: '🛵' },
     { value: 'car', label: '汽車', icon: '🚗' },
@@ -4280,13 +4281,18 @@ body.prototype-mode .prototype-id-chip {
                     transitMode: normalizeTransitMode(s.transitMode),
                     mapPinId: assignedPinId,
                     scenicCoordinates: lockedPos, _lockedCoordinates: lockedPos,
+                    placeId: s.placeId || null,
+                    businessHours: s.businessHours || null,
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: []
                   };
                 }
               }
 
               const scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
-              const resolvedPosition = scenicRecord?.scenicCoordinates || await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
+              const cachedCoords = scenicRecord?.scenicCoordinates;
+              const resolvedPosition = (cachedCoords && !isCoordinatesOutsideRegion(cachedCoords, trip.region, s.name))
+                ? cachedCoords
+                : await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
               const normalizedTransitMode = normalizeTransitMode(s.transitMode);
               const persistedTransitMin = normalizeTransitMinutesValue(s.transitMin);
 
@@ -4327,6 +4333,8 @@ body.prototype-mode .prototype-id-chip {
                 transitMode: normalizedTransitMode,
                 mapPinId: assignedPinId,
                 scenicCoordinates: resolvedPosition,
+                placeId: s.placeId || scenicRecord?.placeId || null,
+                businessHours: s.businessHours || scenicRecord?.businessHours || null,
                 lat: _pos.lat,
                 lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || []
@@ -4392,6 +4400,9 @@ body.prototype-mode .prototype-id-chip {
           if (map) {
             await syncMapToCurrentTrip();
           }
+
+          // 載入 + enrichment 完畢，回寫補上的 placeId / businessHours / scenicCoordinates
+          schedulePersistTrip();
         }
       }
     } catch(e) { console.error('Init error:', e); }
@@ -5427,6 +5438,7 @@ body.prototype-mode .prototype-id-chip {
     const [moved] = replanStops.splice(sourceIndex, 1);
     replanStops.splice(targetIndex, 0, moved);
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function createStopFromTemplate(template) {
@@ -5509,6 +5521,7 @@ body.prototype-mode .prototype-id-chip {
     activeStopMenuId = newStop.id;
     renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
     return newStop;
   }
 
@@ -5521,6 +5534,7 @@ body.prototype-mode .prototype-id-chip {
     activeStopMenuId = newStop.id;
     renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function modifyStopById(stopId) {
@@ -5708,6 +5722,7 @@ body.prototype-mode .prototype-id-chip {
     closeModifyWindow();
     renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function removeStopById(stopId) {
@@ -5726,6 +5741,7 @@ body.prototype-mode .prototype-id-chip {
     }
     renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function toggleStopQuickActions(stopId) {
@@ -5817,7 +5833,9 @@ body.prototype-mode .prototype-id-chip {
       nearbyToiletLocations: stop.nearbyToiletLocations || [],
       mapPinId: stop.mapPinId || null,
       manualStartMin: stop.manualStartMin ?? null,
-      manualEndMin: stop.manualEndMin ?? null
+      manualEndMin: stop.manualEndMin ?? null,
+      placeId: stop.placeId || null,
+      businessHours: stop.businessHours || null
     }));
 
     try {
@@ -5845,7 +5863,20 @@ body.prototype-mode .prototype-id-chip {
 
   function schedulePersistTrip() {
     clearTimeout(persistTripDebounceTimer);
-    persistTripDebounceTimer = setTimeout(() => persistCurrentTripStops(), 1500);
+    persistTripDebounceTimer = setTimeout(() => {
+      persistTripDebounceTimer = null;
+      clearTimeout(persistTripMaxWaitTimer);
+      persistTripMaxWaitTimer = null;
+      persistCurrentTripStops();
+    }, 1500);
+    if (!persistTripMaxWaitTimer) {
+      persistTripMaxWaitTimer = setTimeout(() => {
+        clearTimeout(persistTripDebounceTimer);
+        persistTripDebounceTimer = null;
+        persistTripMaxWaitTimer = null;
+        persistCurrentTripStops();
+      }, 5000);
+    }
   }
 
   function setSegmentTransitMode(stopId, modeValue) {
@@ -6029,6 +6060,7 @@ body.prototype-mode .prototype-id-chip {
     renderItineraryDisplay();
     if (isReplanning) renderReplanBoard();
     refreshRouteDirections();
+    schedulePersistTrip();
   }
 
   function enterReplanMode() {
@@ -7001,6 +7033,125 @@ body.prototype-mode .prototype-id-chip {
       } catch (e2) {
         return null;
       }
+    }
+  }
+
+  // ── AI 重新規劃 ──────────────────────────────────────────────
+
+  function calcReplanEndTime(startTime, days) {
+    const durationMap = { '0.5小時': 30, '1小時': 60, '2小時': 120, '半天': 240, '1天': 480, '2天': 960 };
+    const duration = durationMap[days] || 480;
+    const parts = String(startTime || '09:00').split(':').map(Number);
+    const total = (parts[0] * 60 + (parts[1] || 0)) + duration;
+    return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  }
+
+  function buildAiReplanPrompt(wizardData) {
+    const dest = wizardData.dest || wizardData.destCustom || currentTripRegion || '台東';
+    const days = wizardData.days || '1天';
+    const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
+    const endTime = calcReplanEndTime(startTime, days);
+    const people = wizardData.people || '2人';
+    const pace = wizardData.pace || '平衡';
+    const interests = (wizardData.interests || []).join('、') || '多元體驗';
+    const theme = wizardData.theme || '經典旅人';
+    const startLoc = (wizardData.startLocation || '').trim();
+    const endLoc = (wizardData.endLocation || '').trim();
+    const stopRanges = { '0.5小時': [1, 2], '1小時': [2, 3], '2小時': [2, 4], '半天': [3, 5], '1天': [5, 8], '2天': [8, 14] };
+    const [min, max] = stopRanges[days] || [4, 7];
+    return [
+      '你是台灣微旅行規劃 AI。根據以下條件，生成一份完整、可執行的行程，使用 JSON 格式回覆。',
+      '',
+      '【行程條件】',
+      `目的地：${dest}`,
+      `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
+      `旅伴：${people}，節奏：${pace}，風格：${theme}`,
+      `興趣：${interests}`,
+      startLoc ? `出發集合點：${startLoc}` : null,
+      endLoc ? `結束返回點：${endLoc}` : null,
+      '',
+      '【規劃規則】',
+      `1. 必須包含 ${min}–${max} 個主要景點`,
+      `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
+      `3. 每個景點必須是台灣 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
+      '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
+      '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
+      '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
+      '',
+      '【JSON 回傳格式（只回傳 JSON，不加任何說明文字）】',
+      '{"title":"行程標題","stops":[{"name":"景點正式名稱","emoji":"📍","time":"HH:MM","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
+    ].filter(l => l !== null).join('\n');
+  }
+
+  async function replanWithAI() {
+    const wizardData = currentTripPreferences || {};
+    const dest = wizardData.dest || wizardData.destCustom || currentTripRegion;
+    if (!dest) {
+      window.alert('找不到目的地資訊，請先匯入行程後再重新規劃。');
+      return;
+    }
+
+    enterReplanMode();
+
+    const planningList = document.getElementById('replanSortableList');
+    const totalTimeEl = document.getElementById('replanTotalWindow');
+    if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ AI 正在生成新行程，請稍候…</div>`;
+    if (totalTimeEl) totalTimeEl.textContent = '--';
+
+    try {
+      const vertex = getVertexConfig();
+      let endpoint;
+      if (vertex.ready) {
+        endpoint = `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
+      } else {
+        const apiKey = ensureGeminiApiKey();
+        if (!apiKey) { cancelReplan(); return; }
+        endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData) }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.8 }
+        })
+      });
+      if (!response.ok) throw new Error(`Gemini API 錯誤（${response.status}）`);
+
+      const data = await response.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const parsed = safeParseJson(text);
+      if (!parsed?.stops?.length) throw new Error('AI 未回傳有效景點清單');
+
+      if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">🔍 驗證景點真實性（共 ${parsed.stops.length} 個）…</div>`;
+
+      const region = currentTripRegion || dest;
+      const newStops = [];
+      for (const s of parsed.stops) {
+        const template = {
+          name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+          stayMin: Math.max(10, Math.min(180, s.duration || 30)),
+          transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+          lat: s.lat, lng: s.lng, businessHours: s.businessHours || null, toiletLocations: []
+        };
+        const validated = await validateAiStopTemplate(template, region, currentTripTitle);
+        if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); continue; }
+        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null });
+        newStops.push(stop);
+      }
+
+      if (newStops.length < 2) throw new Error(`驗證後只剩 ${newStops.length} 個有效景點，無法建立行程`);
+
+      replanStops = newStops;
+      renderReplanBoard();
+      refreshRouteDirections();
+      schedulePersistTrip();
+
+    } catch (e) {
+      console.error('[replanWithAI]', e);
+      cancelReplan();
+      window.alert(`AI 重新規劃失敗：${e.message}\n\n請確認 API Key 正確，並再試一次。`);
     }
   }
 

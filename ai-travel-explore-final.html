@@ -1311,12 +1311,12 @@ function getPromptRuleLines(wizardData, mode) {
 
   if (detailed) {
     const { min, max } = getDurationStopRange(days);
-    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、必須安排至 ${endTime} 左右結束，最後一站的 time 必須接近 ${endTime}；嚴禁提前於 ${endTime} 一小時前結束行程，若景點不足請加入餐廳、咖啡廳、市場、公園等補充體驗`);
+    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、行程最後一站的結束時間必須在 ${endTime} 前後 15 分鐘內，嚴禁行程在 ${endTime} 的 15 分鐘前完全結束；若景點不足請加入具體名稱的餐廳、咖啡廳、市場、公園等補充體驗（禁止使用「在地午餐」等模糊名稱）`);
     lines.push('6. 每站包含時間、景點名稱、景點 WGS84 精確座標、推薦理由、營業時間、附近廁所位置（1-3個，必須距離該景點 500 公尺以內）');
     lines.push('7. 廁所座標必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代');
     lines.push('8. 廁所輸出格式：{name:"正式名稱", lat:數字, lng:數字, address:"地址或位置描述", source:"資料來源", confidence:"high|medium"}；若無法確認精確座標，請保留 name/address 並省略 lat/lng');
     lines.push('9. 廁所名稱與座標必須互相對應；若 Firebase 候選、data.gov.tw 公廁資料、Google Maps/Places 名稱或地址互相矛盾，優先使用可定位到實際廁所設施且距離景點最近的資料，無法確認則不要輸出座標');
-    lines.push('10. 景點須考慮營業時間，且使用正式可定位名稱');
+    lines.push('10. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
     lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
     lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
     lines.push('13. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
@@ -2109,7 +2109,11 @@ function isBroadPlaceLabel(value) {
   const normalized = normalizeLookupText(value);
   if (!normalized) return true;
   if (normalized.length <= 2) return true;
-  return /^(公園|景點|市場|老街|商圈|車站|夜市|海灘|步道|寺|廟|館|橋|港|湖|山|公路|道路|大道)$/.test(String(value || '').trim());
+  const str = String(value || '').trim();
+  if (/^(公園|景點|市場|老街|商圈|車站|夜市|海灘|步道|寺|廟|館|橋|港|湖|山|公路|道路|大道)$/.test(str)) return true;
+  // 模糊飲食標籤：在地午餐、當地早餐、附近餐廳、在地美食 等
+  if (/^(在地|當地|附近).{0,4}[餐飯食吃]/.test(str) || /[在當].{0,3}[早午晚]餐/.test(str)) return true;
+  return false;
 }
 
 function findPoiCacheCoordinate(stop, poiCache) {
@@ -2530,6 +2534,56 @@ async function enrichMissingCoordinates(stops, destinationText) {
   return stops;
 }
 
+async function verifyAndFilterStopsWithPlaces(stops, destination) {
+  const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
+  if (!key || !destination || !Array.isArray(stops)) return stops;
+
+  const results = await Promise.all(stops.map(async (stop) => {
+    if (stop.type === 'start' || stop.type === 'end') return stop;
+    const name = stop.name || stop.title;
+    if (!name) return null;
+
+    try {
+      const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours'
+        },
+        body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 })
+      });
+      const data = await res.json();
+      const place = data.places?.[0];
+      if (!place) return null;
+
+      if (place.location) {
+        const placeCoord = { lat: place.location.latitude, lng: place.location.longitude };
+        const destCenter = getDestinationCenter(destination);
+        const maxDist = getDestinationMaxDistanceMeters(destination) || 55000;
+        if (destCenter && getDistanceMeters(destCenter, placeCoord) > maxDist) {
+          return null; // 找到的地點不在目的地範圍內 → 排除
+        }
+        stop.lat = placeCoord.lat;
+        stop.lng = placeCoord.lng;
+        stop.coordinateSource = 'google_places';
+      }
+      const hours = place.regularOpeningHours?.weekdayDescriptions;
+      if (Array.isArray(hours) && hours.length) {
+        stop.businessHours = hours.join('\n');
+      }
+      stop.placeVerified = true;
+      return stop;
+    } catch (e) {
+      return null;
+    }
+  }));
+
+  const verified = results.filter(Boolean);
+  const mainStops = verified.filter(s => s.type !== 'start' && s.type !== 'end');
+  return mainStops.length >= 2 ? verified : stops;
+}
+
 async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const sourceStops = Array.isArray(stops) ? stops.filter(Boolean) : [];
   if (!sourceStops.length) return [];
@@ -2537,7 +2591,8 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const poiCache = await fetchDestinationPoiCache(destination);
   const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
   const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
-  const geographicallySorted = sortStopsByNearestRoute(enrichedStops, wizardData);
+  const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination);
+  const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops);
   const defaultHub = getDefaultTransitHub(destination);
@@ -3556,6 +3611,11 @@ async function finishWizard() {
     saveState(); renderSideMyTrips(); renderMyTrips();
     showToast(`✅ 「${newTrip.title}」已建立！背景補齊細節中...`, 'green');
     setTimeout(() => showMainView('mytrips'), 400);
+
+    // initial plan 一拿到就立刻背景同步到 Firebase，避免使用者在 final 完成前關掉頁面而遺失
+    if (firebaseEnabled) {
+      persistMicroTripInBackground(newTrip);
+    }
 
     (async () => {
       try {
