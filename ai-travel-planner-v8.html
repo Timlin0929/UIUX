@@ -567,6 +567,58 @@ body.prototype-mode .prototype-id-chip {
   margin-top: 2px;
 }
 
+/* ── Image Lightbox ── */
+.img-lightbox {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.88);
+  align-items: center; justify-content: center;
+  overflow-y: auto;
+}
+.img-lightbox.open { display: flex; }
+.img-lightbox-inner {
+  position: relative;
+  max-width: 96vw;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 48px 12px 24px;
+}
+.img-lightbox-inner img {
+  max-width: 100%; max-height: 80vh;
+  border-radius: 12px; object-fit: contain;
+  cursor: zoom-in; display: block;
+}
+.img-lightbox-inner img.zoomed {
+  max-width: none; max-height: none;
+  width: 160%; cursor: zoom-out;
+}
+.img-lightbox-close {
+  position: absolute; top: 8px; right: 8px;
+  background: rgba(255,255,255,0.2); border: none;
+  color: #fff; font-size: 18px; width: 32px; height: 32px;
+  border-radius: 50%; cursor: pointer; line-height: 32px; text-align: center;
+}
+.img-lightbox-actions {
+  display: flex; gap: 8px;
+}
+.img-lightbox-btn {
+  background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+  color: #fff; font-size: 13px; padding: 7px 18px;
+  border-radius: 20px; cursor: pointer;
+}
+.img-lightbox-btn:hover { background: rgba(255,255,255,0.28); }
+.img-share-row {
+  display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-top: 8px;
+}
+.img-share-btn {
+  padding: 9px 4px; border-radius: 10px;
+  font-size: 12px; font-weight: 600;
+  border: none; cursor: pointer; text-align: center; white-space: nowrap;
+}
+.img-share-btn.line   { background: #00C300; color: #fff; }
+.img-share-btn.fb     { background: #1877f2; color: #fff; }
+.img-share-btn.copy   { background: var(--surface2,#f0ede8); color: var(--ink,#22201d); border: 1px solid var(--border,#e0dbd2); }
+.img-share-btn.native { background: #2e7d6d; color: #fff; }
+
 .replan-duration-select,
 .replan-transit-select {
   border: 1px solid var(--border);
@@ -2995,6 +3047,7 @@ body.prototype-mode .prototype-id-chip {
 <script src="./weather.env.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script>
   let currentItineraryId = 'TRIP-EMPTY';
   let currentTripTitle = '';
@@ -3018,6 +3071,8 @@ body.prototype-mode .prototype-id-chip {
   let posterCharacterDraft = '';
   let posterGeneratedImageBase64 = null;
   let posterImageGenerating = false;
+  let posterImageUploadUrl = null;
+  let posterImageUploading = false;
   let importedTravelPinSerial = 0;
   let replanStopSerial = 0;
   const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -3033,6 +3088,7 @@ body.prototype-mode .prototype-id-chip {
   let aiWelcomeSignature = '';
   let tripSessionId = `${currentItineraryId || 'prototype-empty'}-${Date.now()}`;
   let firebaseDb = null;
+  let firebaseStorage = null;
   let firebaseEnabled = false;
   const geocodeCache = new Map();
   const scenicPointCache = new Map();
@@ -4692,6 +4748,7 @@ body.prototype-mode .prototype-id-chip {
     posterCharacterDraft = character;
     posterImageGenerating = true;
     posterGeneratedImageBase64 = null;
+    posterImageUploadUrl = null;
     renderTravelTools();
 
     const prompt = buildImagePrompt(character);
@@ -4741,6 +4798,125 @@ body.prototype-mode .prototype-id-chip {
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
+  }
+
+  // ── Lightbox（圖片放大預覽） ──
+  function openImageLightbox(src) {
+    const box = document.getElementById('imgLightbox');
+    const img = document.getElementById('imgLightboxImg');
+    if (!box || !img) return;
+    img.src = src;
+    img.classList.remove('zoomed');
+    box.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeImageLightbox(evt) {
+    if (evt && evt.target !== document.getElementById('imgLightbox')) return;
+    const box = document.getElementById('imgLightbox');
+    if (box) box.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+  function toggleLightboxZoom(img) {
+    img.classList.toggle('zoomed');
+  }
+  function downloadFromLightbox() {
+    const img = document.getElementById('imgLightboxImg');
+    if (!img || !img.src || img.src === window.location.href) return;
+    const anchor = document.createElement('a');
+    anchor.href = img.src;
+    anchor.download = `${currentInviteCode || 'travel'}-poster.png`;
+    anchor.click();
+  }
+
+  // ── 圖片分享功能 ──
+  async function shareGeneratedImage() {
+    if (!posterGeneratedImageBase64) { window.alert('請先生成插圖再分享。'); return; }
+    try {
+      const res  = await fetch(posterGeneratedImageBase64);
+      const blob = await res.blob();
+      const file = new File([blob], `${currentInviteCode || 'travel'}-poster.png`, { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: currentTripTitle || '旅遊行程', text: buildShareText() });
+        return;
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') console.warn('File share failed:', e);
+    }
+    await copyImageUrl();
+  }
+
+  async function shareImageToLine() {
+    const text = buildShareText();
+    if (posterGeneratedImageBase64 && navigator.canShare) {
+      try {
+        const res  = await fetch(posterGeneratedImageBase64);
+        const blob = await res.blob();
+        const file = new File([blob], `${currentInviteCode || 'travel'}-poster.png`, { type: 'image/png' });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: currentTripTitle || '旅遊行程', text });
+          return;
+        }
+      } catch (e) { if (e.name !== 'AbortError') console.warn(e); }
+    }
+    window.open(`https://line.me/R/msg/text/?${encodeURIComponent(text)}`, '_blank');
+  }
+
+  function shareImageToFacebook() {
+    const text = buildShareText();
+    if (posterGeneratedImageBase64 && navigator.canShare) {
+      fetch(posterGeneratedImageBase64).then((r) => r.blob()).then((blob) => {
+        const file = new File([blob], 'poster.png', { type: 'image/png' });
+        if (navigator.canShare({ files: [file] })) {
+          navigator.share({ files: [file], title: currentTripTitle || '旅遊行程' }).catch(() => {});
+          return;
+        }
+        _fbDesktopShare(text);
+      }).catch(() => _fbDesktopShare(text));
+    } else {
+      _fbDesktopShare(text);
+    }
+  }
+  function _fbDesktopShare(text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    window.open('https://www.facebook.com/', '_blank');
+    window.alert('行程文字已複製！請在 Facebook 新貼文中貼上，並手動上傳圖片。');
+  }
+
+  async function copyImageUrl() {
+    if (!posterGeneratedImageBase64) {
+      window.alert('請先生成插圖再複製連結。');
+      return;
+    }
+    // 已有快取 URL 直接複製
+    if (posterImageUploadUrl) {
+      await navigator.clipboard.writeText(posterImageUploadUrl).catch(() => {});
+      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。');
+      return;
+    }
+    if (!firebaseStorage) {
+      window.alert('Firebase Storage 尚未初始化，請確認 Firebase 專案已啟用 Storage。');
+      return;
+    }
+    posterImageUploading = true;
+    renderTravelTools();
+    try {
+      const res  = await fetch(posterGeneratedImageBase64);
+      const blob = await res.blob();
+      const code = currentInviteCode || 'trip';
+      const path = `posters/${code}-${Date.now()}.png`;
+      const ref  = firebaseStorage.ref(path);
+      const snapshot = await ref.put(blob, { contentType: 'image/png' });
+      const url = await snapshot.ref.getDownloadURL();
+      posterImageUploadUrl = url;
+      await navigator.clipboard.writeText(url).catch(() => {});
+      window.alert('圖片連結已複製！可直接貼到 LINE、Facebook 等任何地方。');
+    } catch (e) {
+      console.warn('上傳失敗：', e);
+      window.alert(`上傳失敗：${e.message}\n請確認 Firebase Storage 已啟用，並設定允許寫入的存取規則。`);
+    } finally {
+      posterImageUploading = false;
+      renderTravelTools();
+    }
   }
 
   function openTravelTools(tab = 'import') {
@@ -4839,9 +5015,20 @@ body.prototype-mode .prototype-id-chip {
           </div>
           ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">✨ AI 正在繪製插圖，請稍候（約 10–30 秒）…</div>` : ''}
           ${posterGeneratedImageBase64 ? `
-            <img id="posterGeneratedImg" src="${posterGeneratedImageBase64}" alt="AI 生成旅遊插圖" style="width:100%;border-radius:16px;border:1px solid var(--border);display:block;">
+            <img id="posterGeneratedImg"
+                 src="${posterGeneratedImageBase64}"
+                 alt="AI 生成旅遊插圖"
+                 style="width:100%;border-radius:16px;border:1px solid var(--border);display:block;cursor:pointer;"
+                 onclick="openImageLightbox(this.src)"
+                 title="點擊放大預覽">
+            <div style="font-size:11px;color:var(--ink3);text-align:center;margin-top:4px;">點擊圖片可放大預覽</div>
+            <div class="img-share-row">
+              <button class="img-share-btn line"   onclick="shareImageToLine()">💬 LINE</button>
+              <button class="img-share-btn fb"     onclick="shareImageToFacebook()">📘 Facebook</button>
+              <button class="img-share-btn copy"   onclick="copyImageUrl()" ${posterImageUploading ? 'disabled' : ''}>${posterImageUploading ? '上傳中…' : posterImageUploadUrl ? '📋 複製連結' : '🔗 複製連結'}</button>
+            </div>
             <div class="travel-action-row">
-              <button class="travel-btn secondary" onclick="downloadGeneratedImage()">下載插圖</button>
+              <button class="travel-btn secondary" onclick="downloadGeneratedImage()">↓ 下載插圖</button>
             </div>
           ` : ''}
         </div>
@@ -6259,6 +6446,9 @@ body.prototype-mode .prototype-id-chip {
         firebase.initializeApp(config);
       }
       firebaseDb = firebase.firestore();
+      if (firebase.storage && config.storageBucket) {
+        firebaseStorage = firebase.storage();
+      }
       firebaseEnabled = true;
       return true;
     } catch (error) {
@@ -8849,5 +9039,16 @@ body.prototype-mode .prototype-id-chip {
   });
 </script>
 <script src="https://maps.googleapis.com/maps/api/js?key=<REDACTED>&libraries=places&language=zh-TW&region=TW" async defer></script>
+
+<div id="imgLightbox" class="img-lightbox" onclick="closeImageLightbox(event)">
+  <div class="img-lightbox-inner" onclick="event.stopPropagation()">
+    <button class="img-lightbox-close" onclick="closeImageLightbox()">✕</button>
+    <img id="imgLightboxImg" src="" alt="行程圖預覽" onclick="toggleLightboxZoom(this)">
+    <div class="img-lightbox-actions">
+      <button class="img-lightbox-btn" onclick="downloadFromLightbox()">↓ 下載</button>
+      <button class="img-lightbox-btn" onclick="shareGeneratedImage()">↗ 分享</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
