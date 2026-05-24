@@ -7168,12 +7168,14 @@ body.prototype-mode .prototype-id-chip {
   function buildReplenishPrompt(dest, needed, excludedNames, wizardData = {}) {
     const interests = (wizardData.interests || []).join('、') || '多元體驗';
     const theme = wizardData.theme || '經典旅人';
+    const people = wizardData.people || '2人';
+    const isSolo = people === '1人';
     const excluded = excludedNames.slice(0, 30).join('、');
     return [
       `你是台灣微旅行規劃 AI。請為 ${dest} 地區補充 ${needed + 1} 個景點（多補 1 個備用以防驗證失敗）。`,
       '【重要限制】',
       `以下景點已使用或驗證失敗，絕對禁止重複：${excluded}`,
-      `興趣方向：${interests}，風格：${theme}`,
+      isSolo ? `旅行方式：獨旅，風格：${theme}，興趣：${interests}` : `同行人數：${people}，風格：${theme}，興趣：${interests}`,
       '【要求】',
       `1. 景點必須是 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '2. 禁止模糊描述（如「部落巷弄深度探索」「當地文化體驗」），必須是具體場所名稱',
@@ -7190,13 +7192,14 @@ body.prototype-mode .prototype-id-chip {
     const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
     const endTime = calcReplanEndTime(startTime, days);
     const people = wizardData.people || '2人';
+    const isSolo = people === '1人';
     const pace = wizardData.pace || '平衡';
     const excluded = allExcluded.slice(0, 40).join('、');
     return [
       `你是台灣微旅行規劃 AI。${dest} 地區景點驗證不足，請改為推薦距離 ${dest} 合理車程（50 公里內）的 ${needed + 1} 個替代景點（多補 1 個備用）。`,
       '【行程限制（必須符合）】',
       `時間窗口：${startTime} ～ ${endTime}，行程長度：${days}`,
-      `旅伴：${people}，節奏：${pace}，風格：${theme}`,
+      isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `旅伴：${people}，節奏：${pace}，風格：${theme}`,
       `興趣方向：${interests}`,
       '【排除清單（絕對禁止重複）】',
       excluded || '（無）',
@@ -7216,27 +7219,39 @@ body.prototype-mode .prototype-id-chip {
     const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
     const endTime = calcReplanEndTime(startTime, days);
     const people = wizardData.people || '2人';
+    const isSolo = people === '1人';
     const pace = wizardData.pace || '平衡';
     const interests = (wizardData.interests || []).join('、') || '多元體驗';
     const theme = wizardData.theme || '經典旅人';
     const startLoc = (wizardData.startLocation || '').trim();
     const endLoc = (wizardData.endLocation || '').trim();
+    const budget = (wizardData.budget || '').trim();
+    const accommodation = (wizardData.accommodation || '').trim();
+    const desiredSpots = (wizardData.desiredSpots || '').trim();
     const stopRanges = { '0.5小時': [1, 2], '1小時': [2, 3], '2小時': [2, 4], '半天': [3, 5], '1天': [5, 8], '2天': [8, 14] };
     const [min, max] = stopRanges[days] || [4, 7];
     const blockedSpots = getBlockedSpotNames(dest).slice(-25);
     const blockedHint = blockedSpots.length
       ? `7. 以下景點驗證失敗或不真實，絕對禁止使用：${blockedSpots.join('、')}`
       : null;
+    const desiredNote = desiredSpots
+      ? `\n⚠️ 用戶特別希望前往：${desiredSpots}。請優先安排這些景點，並圍繞它們規劃行程。`
+      : '';
     return [
-      '你是台灣微旅行規劃 AI。根據以下條件，生成一份完整、可執行的行程，使用 JSON 格式回覆。',
+      isSolo
+        ? '你是台灣微旅行規劃 AI。根據以下條件，生成一份適合獨旅者的完整可執行行程，重視個人節奏與自我探索，使用 JSON 格式回覆。'
+        : `你是台灣微旅行規劃 AI。根據以下條件，生成一份適合 ${people} 同行的完整可執行行程，考慮團體動態與共同用餐安排，使用 JSON 格式回覆。`,
       '',
       '【行程條件】',
       `目的地：${dest}`,
       `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
-      `旅伴：${people}，節奏：${pace}，風格：${theme}`,
+      isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `同行人數：${people}，節奏：${pace}，風格：${theme}`,
       `興趣：${interests}`,
-      startLoc ? `出發集合點：${startLoc}` : null,
-      endLoc ? `結束返回點：${endLoc}` : null,
+      budget ? `預算：${budget}` : null,
+      accommodation ? `住宿安排：${accommodation}` : null,
+      startLoc ? `出發車站：${startLoc}` : null,
+      endLoc ? `回程車站：${endLoc}` : null,
+      desiredSpots ? desiredNote : null,
       '',
       '【規劃規則】',
       `1. 必須包含 ${min}–${max} 個主要景點`,

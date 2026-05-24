@@ -307,12 +307,19 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-block-title{margin:0 0 4px;font-weight:900;font-size:19px;color:#2b3043;}
 .wizard-block-help{margin:0 0 12px;color:#6b6f79;font-size:13px;line-height:1.5;}
 .wizard-field{margin-bottom:12px;}
-.wizard-field label{display:block;margin-bottom:6px;font-size:13px;font-weight:700;color:#2f3448;}
+.wizard-field > label{display:block;margin-bottom:6px;font-size:13px;font-weight:700;color:#2f3448;}
 .wizard-field input,.wizard-field select,.wizard-field textarea{width:100%;border:1px solid #d9dde4;border-radius:12px;padding:10px 12px;font-size:15px;font-family:inherit;color:#1e2430;background:#fff;}
 .wizard-field input:focus,.wizard-field select:focus,.wizard-field textarea:focus{outline:3px solid rgba(31,142,250,.18);border-color:#7db8ee;}
 .wizard-time-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
 .wizard-choice-grid{display:grid;gap:8px;grid-template-columns:repeat(2,minmax(0,1fr));}
-.wizard-check-pill{display:flex;align-items:center;gap:8px;background:#f8fafc;border:1px solid #dce6f2;border-radius:11px;padding:8px 10px;font-size:13px;cursor:pointer;}
+.wizard-check-pill{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;background:#f8fafc;border:2px solid #dce6f2;border-radius:14px;padding:14px 8px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;text-align:center;user-select:none;color:#2f3a52;}
+.wizard-check-pill input[type="checkbox"]{display:none;}
+.wizard-check-pill .pill-emoji{font-size:22px;line-height:1;}
+.wizard-check-pill .pill-label{font-size:12px;font-weight:700;color:#3a4a62;}
+.wizard-check-pill:hover{background:#edf5ff;border-color:#a8cff0;transform:translateY(-2px);box-shadow:0 4px 12px rgba(17,118,201,.1);}
+.wizard-check-pill:has(input:checked){background:linear-gradient(135deg,#dff1ff,#c5e4ff);border-color:#5aaae8;box-shadow:0 4px 14px rgba(17,118,201,.2);}
+.wizard-check-pill:has(input:checked) .pill-label{color:#0f4c81;}
+.wizard-check-pill:has(input:checked) .pill-emoji{filter:drop-shadow(0 2px 4px rgba(17,118,201,.25));}
 .wizard-hint-box{background:#fff4ec;border:1px solid #ffd9c6;border-radius:12px;padding:10px;font-size:13px;color:#9a4f2d;margin-bottom:10px;}
 .wizard-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
 .wizard-tag{border:1px solid #d8e2ef;background:#f7fbff;color:#2b4c6b;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;}
@@ -610,13 +617,17 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   .wizard-form{padding:20px;}
   .wizard-card{padding:18px;border-radius:20px;}
   .wizard-block-title{font-size:22px;}
-  .wizard-block-help,.wizard-field label,.wizard-check-pill,.wizard-hint-box,.wizard-node-desc,.wizard-summary{font-size:15px;}
+  .wizard-block-help,.wizard-field > label,.wizard-check-pill,.wizard-hint-box,.wizard-node-desc,.wizard-summary{font-size:15px;}
   .wizard-field input,.wizard-field select,.wizard-field textarea{
     min-height:48px;
     font-size:16px;
     padding:12px 14px;
   }
-  .wizard-check-pill,.wizard-tag{
+  .wizard-check-pill{
+    min-height:72px;
+    padding:12px 8px;
+  }
+  .wizard-tag{
     min-height:44px;
     font-size:14px;
     padding:10px 12px;
@@ -1297,6 +1308,7 @@ function calcTripEndTime(startTime, days) {
 function getPromptRuleLines(wizardData, mode) {
   const days = wizardData.days || '1天';
   const people = wizardData.people || '2人';
+  const isSolo = people === '1人';
   const pace = wizardData.pace || '平衡';
   const interests = (wizardData.interests || []).join('、') || '多元';
   const detailed = mode !== 'preview';
@@ -1304,7 +1316,9 @@ function getPromptRuleLines(wizardData, mode) {
   const endTime = calcTripEndTime(startTime, days);
   const lines = [
     `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
-    `2. 適合 ${people} 人同行`,
+    isSolo
+      ? '2. 獨旅行程：重視個人節奏與安靜體驗，景點不須考慮大型團體容納量，可含較私密或需排隊的場所'
+      : `2. 適合 ${people} 人同行，優先選擇可接待 ${people} 的景點、餐廳與活動場所`,
     `3. 符合 ${pace} 的節奏`,
     `4. 強調 ${interests} 面向`
   ];
@@ -1343,15 +1357,22 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const destination = wizardData.dest || wizardData.destCustom || '台東';
   const tripStartTime = normalizeClockInput(wizardData.startTime, '09:00');
   const tripEndTime = calcTripEndTime(tripStartTime, wizardData.days || '1天');
+  const isSolo = (wizardData.people || '2人') === '1人';
+
   const contextBlock = [
     `目的地：${destination}`,
+    wizardData.departureDate ? `出發日期：${wizardData.departureDate}` : null,
+    wizardData.returnDate ? `回程日期：${wizardData.returnDate}` : null,
     `時間長度：${wizardData.days || '1天'}（${tripStartTime} ～ ${tripEndTime}，請安排景點填滿此時段）`,
-    `旅伴：${wizardData.people || '2人'}`,
+    isSolo ? '旅行方式：獨旅' : `同行人數：${wizardData.people || '2人'}`,
     `行程節奏：${wizardData.pace || '平衡'}`,
     `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
     `旅程風格：${wizardData.theme || '經典旅人'}`,
-    (wizardData.startLocation || '').trim() ? `出發點（集合點）：${wizardData.startLocation.trim()}` : null,
-    (wizardData.endLocation || '').trim() ? `結束點（返回點）：${wizardData.endLocation.trim()}` : null
+    wizardData.budget ? `預算：${wizardData.budget}` : null,
+    wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
+    wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
+    (wizardData.startLocation || '').trim() ? `出發車站：${wizardData.startLocation.trim()}` : null,
+    (wizardData.endLocation || '').trim() ? `回程車站：${wizardData.endLocation.trim()}` : null
   ].filter(Boolean).join('\n');
 
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
@@ -1363,7 +1384,15 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     ? `\n\n${firebaseHint}`
     : '';
 
-  const prompt = `你是台東微旅行的 AI 規劃助手。根據用戶需求生成可執行行程。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}`;
+  const intro = isSolo
+    ? '你是台東微旅行的 AI 規劃助手。根據用戶需求生成一份適合獨旅者的可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往且不須等候大型團體的地點。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。'
+    : `你是台東微旅行的 AI 規劃助手。根據用戶需求生成一份適合 ${wizardData.people || '多人'} 同行的可執行行程，考慮團體動態，優先選擇可接待多人的景點、餐廳與活動場所，並安排共同用餐時段。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。`;
+
+  const desiredNote = wizardData.desiredSpots
+    ? `\n\n⚠️ 用戶特別希望前往：${wizardData.desiredSpots}。請優先安排這些景點（時間不足時選最重要的），並圍繞它們規劃行程。`
+    : '';
+
+  const prompt = `${intro}${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}${desiredNote}`;
 
   return { prompt, contextBlock };
 }
@@ -3124,7 +3153,8 @@ function closeModeChoice() {
 }
 function selectTripMode(mode) {
   closeModeChoice();
-  wizStep = 0; wizData = { days: '1天', tripMode: mode };
+  wizStep = 0;
+  wizData = { days: '1天', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
@@ -3137,9 +3167,8 @@ function copyCollabCode() {
 }
 
 function renderWizard() {
-  // Steps bar with new class names
   const steps = document.getElementById('wizSteps');
-  const stepTitles = ['基本資料', '時間與節奏', '興趣點', '旅程風格'];
+  const stepTitles = ['目的地', '交通 & 偏好', '出發日期 & 時間', '預算 & 其他'];
   steps.innerHTML = Array(WIZ_TOTAL).fill(0).map((_,i)=>`
     <div class="wizard-step ${i<wizStep?'done':i===wizStep?'active':''}"><span class="step-num">${i+1}</span><span class="step-label">${stepTitles[i]}</span></div>`).join('');
   document.getElementById('wizardBadge').textContent = `Step ${wizStep+1} / ${WIZ_TOTAL}`;
@@ -3147,7 +3176,10 @@ function renderWizard() {
   document.getElementById('wizNextBtn').textContent = wizStep===WIZ_TOTAL-1 ? '🚀 建立行程' : '下一步 →';
 
   const body = document.getElementById('wizBody');
+
   if (wizStep===0) {
+    // Step 0：目的地
+    wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '1天', wizData.pace || '平衡');
     body.innerHTML = `<h3 class="wizard-block-title">✈️ 想去哪裡探險？</h3>
       <p class="wizard-block-help">選擇熱門景點，或自由輸入任何地點</p>
       <div class="wizard-field">
@@ -3159,25 +3191,51 @@ function renderWizard() {
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr)">
           ${WIZ_DESTS.map(d=>`<button class="wizard-tag${wizData.dest===d.label?' active':''}" onclick="selectDest('${d.label}')" type="button" style="background:${wizData.dest===d.label?'#dff1ff':'#f7fbff'};border-color:${wizData.dest===d.label?'#7db8ee':'#d8e2ef'}">${d.emoji} ${d.label}</button>`).join('')}
         </div>
-      </div>`;
-  } else if (wizStep===1) {
-    const days = wizData.days || '1天';
-    const stopCount = clampPreviewStopsByDuration(days);
-    wizData.slotMinutes = getSafeSlotMinutes(days, wizData.pace || '平衡');
-
-    body.innerHTML = `<h3 class="wizard-block-title">📅 時間與節奏</h3>
-      <p class="wizard-block-help">微旅行的時間長度會決定推薦景點的距離和密度</p>
+      </div>
       <div class="wizard-field">
-        <label>旅伴</label>
-        <select id="wizPeople" onchange="wizData.people=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-people')">
+        <label>旅行人數</label>
+        <select id="wizPeople" onchange="wizData.people=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step0-people')">
           ${['1人','2人','3-4人','5-8人'].map(p=>`<option ${wizData.people===p?'selected':''}>${p}</option>`).join('')}
         </select>
       </div>
       <div class="wizard-field">
-        <label>時間長度</label>
+        <label>整體旅行時間</label>
         <select id="wizDays" onchange="updateWizardDays(this.value)">
           ${['0.5小時','1小時','2小時','半天','1天','2天'].map(d=>`<option value="${d}" ${wizData.days==d?'selected':''}>${d}</option>`).join('')}
         </select>
+      </div>`;
+
+  } else if (wizStep===1) {
+    // Step 1：交通 + 偏好（合併）
+    const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
+    const startHint = autoHub ? `留空自動設為「${autoHub}」` : '例：台東火車站、民宿名稱、停車場入口';
+    const endHint = autoHub ? `留空自動設為「${autoHub}」` : (isLongTrip(wizData.days) ? '例：台東火車站、知本溫泉飯店' : '例：台東火車站、停車場');
+    body.innerHTML = `<h3 class="wizard-block-title">🚆 交通 & 旅遊偏好</h3>
+      <p class="wizard-block-help">設定交通安排，並選擇興趣方向與風格</p>
+      <div class="wizard-field">
+        <label>出發車站 / 集合點</label>
+        <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">上車或集合的起點車站、停車場或民宿名稱</p>
+      </div>
+      <div class="wizard-field">
+        <label>回程車站 / 返回點</label>
+        <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程結束時要回到的車站或飯店</p>
+      </div>
+      <div class="wizard-field" style="margin-top:16px">
+        <label>興趣方向（可複選 2-4 項）<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重，例：選「美食」會多安排餐廳體驗</span></label>
+        <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;">
+          ${(()=>{
+            const emojiMap={'美食':'🍜','文化':'🏛️','自然':'🌿','打卡':'📸','運動':'🏃','放鬆':'😌'};
+            return ['美食','文化','自然','打卡','運動','放鬆'].map(item=>`
+              <label class="wizard-check-pill">
+                <input type="checkbox" value="${item}" ${wizData.interests&&wizData.interests.includes(item)?'checked':''}>
+                <span class="pill-emoji">${emojiMap[item]}</span>
+                <span class="pill-label">${item}</span>
+              </label>
+            `).join('');
+          })()}
+        </div>
       </div>
       <div class="wizard-field">
         <label>行程節奏</label>
@@ -3186,51 +3244,59 @@ function renderWizard() {
         </select>
       </div>
       <div class="wizard-field">
-        <label>出發時間</label>
-        <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
-        <p style="margin-top:8px;font-size:12px;color:#5f6876;">行程將依「${wizData.pace||'平衡'}」節奏自動計算每站間距</p>
-      </div>
-      ${(()=>{ const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
-        const startHint = autoHub ? `留空自動設為「${autoHub}」` : '例：台東火車站、民宿名稱、停車場入口';
-        const endHint = autoHub ? `留空自動設為「${autoHub}」` : (isLongTrip(wizData.days) ? '例：台東火車站、知本溫泉飯店' : '例：台東火車站、停車場');
-        return `<div class="wizard-field">
-        <label>出發點 / 集合點</label>
-        <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程從這裡開始，系統會計算到第一個景點的移動時間</p>
-      </div>
-      <div class="wizard-field">
-        <label>${isLongTrip(wizData.days) ? '結束點 / 飯店' : '結束點 / 返回車站'}</label>
-        <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程在這裡結束，系統會計算從最後景點返回的時間</p>
-      </div>`; })()}`;
-  } else if (wizStep===2) {
-    body.innerHTML = `<h3 class="wizard-block-title">🎨 興趣點</h3>
-      <p class="wizard-block-help">選擇 2-4 項，AI 會強調這些體驗點在行程中</p>
-      <div class="wizard-choice-grid">
-        ${['美食','文化','自然','打卡','運動','放鬆'].map(item=>`
-          <label class="wizard-check-pill">
-            <input type="checkbox" value="${item}" ${wizData.interests&&wizData.interests.includes(item)?'checked':''}>
-            <span>${item}</span>
-          </label>
-        `).join('')}
-      </div>`;
-  } else if (wizStep===3) {
-    body.innerHTML = `<h3 class="wizard-block-title">🎭 選擇旅程風格</h3>
-      <p class="wizard-block-help">用角色和主題詮釋你的微旅行故事</p>
-      <div class="wizard-hint-box">範例：「冒險獵人」「療癒漫步者」「美食尋寶家」「在地故事家」</div>
-      <div class="wizard-field">
-        <label>描述你想要的旅程感受</label>
-        <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step4-theme')">${wizData.theme||''}</textarea>
+        <label>旅程風格<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與上方興趣方向互補，各有作用</span></label>
+        <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-theme')">${wizData.theme||''}</textarea>
       </div>
       <div class="wizard-chips">
         ${['冒險獵人','療癒漫步者','美食尋寶家','在地故事家','拍照家'].map(t=>`
           <button class="wizard-tag${wizData.theme===t?' active':''}" type="button" data-theme="${t}" onclick="selectTheme('${t}')">${t}</button>
         `).join('')}
       </div>`;
+
+  } else if (wizStep===2) {
+    // Step 2：出發日期 + 回程日期 + 出發時間
+    body.innerHTML = `<h3 class="wizard-block-title">📅 出發日期 & 時間</h3>
+      <p class="wizard-block-help">設定出發與回程日期，以及當天的出發時間</p>
+      <div class="wizard-field">
+        <label>出發日期</label>
+        <input type="date" id="wizDepartureDate" min="${new Date().toISOString().split('T')[0]}" value="${wizData.departureDate||''}" onchange="wizData.departureDate=this.value;autoUpdateReturnDate();renderWizard()">
+        ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:12px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${ wizData.returnDate !== wizData.departureDate ? '（隔日）' : '（當天）'}</p>` : ''}
+      </div>
+
+      <div class="wizard-field">
+        <label>出發時間</label>
+        <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
+        <p style="margin-top:8px;font-size:12px;color:#5f6876;">行程將依「${wizData.pace||'平衡'}」節奏自動計算每站間距</p>
+      </div>`;
+
+  } else if (wizStep===3) {
+    // Step 3：預算、住宿、希望景點
+    body.innerHTML = `<h3 class="wizard-block-title">💰 預算 & 其他</h3>
+      <p class="wizard-block-help">設定旅行預算，並可選填希望拜訪的景點</p>
+      <div class="wizard-field">
+        <label>預算</label>
+        <div class="wizard-choice-grid" style="grid-template-columns:repeat(2,1fr)">
+          ${['節省（$500 內）','適中（$500-1500）','舒適（$1500-3000）','豪華（$3000+）'].map(b=>`
+            <button class="wizard-tag${wizData.budget===b?' active':''}" type="button"
+              onclick="wizData.budget='${b}';renderWizard()"
+              style="background:${wizData.budget===b?'#dff1ff':'#f7fbff'};border-color:${wizData.budget===b?'#7db8ee':'#d8e2ef'}">${b}</button>`).join('')}
+        </div>
+      </div>
+      ${isLongTrip(wizData.days)?`
+      <div class="wizard-field">
+        <label>住宿安排</label>
+        <select id="wizAccommodation" onchange="wizData.accommodation=this.value">
+          ${['飯店','民宿','背包客棧','露營','自備住宿'].map(a=>`<option ${wizData.accommodation===a?'selected':''}>${a}</option>`).join('')}
+        </select>
+      </div>`:''}
+      <div class="wizard-field">
+        <label>希望去的景點 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
+        <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value">${wizData.desiredSpots||''}</textarea>
+      </div>`;
   }
-  
-  // 处理第 2 步复选框的事件
-  if (wizStep === 2) {
+
+  // 興趣勾選事件（Step 1，交通 & 偏好合併頁）
+  if (wizStep === 1) {
     setTimeout(() => {
       const checkboxes = document.querySelectorAll('.wizard-check-pill input[type="checkbox"]');
       checkboxes.forEach(cb => {
@@ -3243,7 +3309,7 @@ function renderWizard() {
       });
     }, 10);
   }
-  
+
   renderFlowPreview();
   syncWizardTimeOptionAvailability();
 }
@@ -3305,7 +3371,7 @@ function updateWizardPace(value) {
 }
 
 function syncWizardTimeOptionAvailability() {
-  if (wizStep !== 1) return;
+  if (wizStep !== 0) return;
   const daysSelect = document.getElementById('wizDays');
   if (!daysSelect) return;
 
@@ -3440,7 +3506,10 @@ function renderFlowPreview() {
   const maxSlotMinutes = getMaxSlotMinutes(days, previewStopCount);
   let effectiveSlotMinutes = Math.min(slotMinutes, maxSlotMinutes);
   wizData.slotMinutes = effectiveSlotMinutes;
-  const baseTimes = previewStops.map((_, index) => minutesToTimeString(baseMinutes + effectiveSlotMinutes * index));
+  const displaySlotMinutes = previewStops.length > 1
+    ? Math.floor(durationMinutes / (previewStops.length - 1))
+    : durationMinutes;
+  const baseTimes = previewStops.map((_, index) => minutesToTimeString(baseMinutes + displaySlotMinutes * index));
 
   if (!wizData.customNodeTimes || typeof wizData.customNodeTimes !== 'object') {
     wizData.customNodeTimes = {};
@@ -3465,12 +3534,13 @@ function renderFlowPreview() {
     </div>
   `).join('');
 
-  const endTime = times.length ? times[times.length - 1] : startTime;
+  const endTime = calcTripEndTime(startTime, days);
   const interestSummary = interests.length ? interests.join('、') : '多元探索';
   const startLocSummary = wizData.startLocation ? `出發：${wizData.startLocation}` : '';
   const endLocSummary = wizData.endLocation ? `結束：${wizData.endLocation}` : '';
   const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
-  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${wizData.people || '2人'}人同行，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
+  const peopleStr = wizData.people === '1人' ? '獨旅' : `${wizData.people || '2人'}人同行`;
+  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${peopleStr}，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
 }
 
 function onDestInput(val) {
@@ -3507,9 +3577,23 @@ function selectTheme(theme) {
   renderWizard();
 }
 
+function autoUpdateReturnDate() {
+  if (!wizData.departureDate) return;
+  const durationMap = { '0.5小時': 0, '1小時': 0, '2小時': 0, '半天': 0, '1天': 0, '2天': 1 };
+  const addDays = Object.prototype.hasOwnProperty.call(durationMap, wizData.days || '1天')
+    ? durationMap[wizData.days || '1天'] : 0;
+  const d = new Date(wizData.departureDate);
+  d.setDate(d.getDate() + addDays);
+  wizData.returnDate = d.toISOString().split('T')[0];
+  const el = document.getElementById('wizReturnDate');
+  if (el) el.value = wizData.returnDate;
+}
+
 function wizNext() {
   if (isGeneratingTrip) { showToast('正在生成行程中，請稍候…', 'orange'); return; }
   if (wizStep===0 && !wizData.dest && !wizData.destCustom) { showToast('請選擇或輸入目的地', 'orange'); return; }
+  // Step 1：若有出發日期但回程日期空，自動推算
+  if (wizStep===2 && wizData.departureDate && !wizData.returnDate) autoUpdateReturnDate();
   if (wizStep===WIZ_TOTAL-1) { finishWizard(); return; }
   wizStep++; renderWizard();
 }
@@ -3570,15 +3654,22 @@ async function finishWizard() {
     emoji: {台東:'🌊',花蓮:'🏔',台北:'🏙',日本:'⛩️',韓國:'🌸',歐洲:'🏛'}[dest]||'✈️',
     cc: ['c0','c1','c2','c3'][Math.floor(Math.random()*4)],
     days, region:dest, budget:wizData.budget||budgetMap[days]||'$1,500',
-    people:wizData.people||'2人', status:'planning',
+    people:wizData.people||(wizData.tripMode==='solo'?'1人':'2人'), status:'planning',
     createdAt:new Date().toLocaleDateString('zh-TW'),
     tripMode,
     ...(inviteCode ? { inviteCode } : {}),
     wizardData: {
-      dest, days, people: wizData.people||'2人', pace: wizData.pace||'平衡',
+      dest, days,
+      people: wizData.people||(wizData.tripMode==='solo'?'1人':'2人'),
+      pace: wizData.pace||'平衡',
       interests: wizData.interests||[], theme: wizData.theme||'經典旅人',
       startTime: wizData.startTime||'09:00',
-      startLocation: wizData.startLocation||'', endLocation: wizData.endLocation||''
+      startLocation: wizData.startLocation||'', endLocation: wizData.endLocation||'',
+      departureDate: wizData.departureDate||'',
+      returnDate: wizData.returnDate||'',
+      budget: wizData.budget||'',
+      accommodation: isLongTrip(days) ? (wizData.accommodation||'飯店') : '',
+      desiredSpots: (wizData.desiredSpots||'').trim()
     },
     stops: []
   };
