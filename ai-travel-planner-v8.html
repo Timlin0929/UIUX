@@ -4035,7 +4035,7 @@ body.prototype-mode .prototype-id-chip {
     return refinedFallback || fallbackPosition;
   }
 
-  async function validateAiStopTemplate(template, region, title = '') {
+  async function validateAiStopTemplate(template, region, title = '', aiCoordHint = null) {
     if (!template || !template.name) return null;
 
     const exactPosition = getExactCoordinateFromStop(template);
@@ -4067,7 +4067,10 @@ body.prototype-mode .prototype-id-chip {
       };
     }
 
-    const biasCenter = await resolveTripCenterAsync(region, title);
+    const regionCenter = await resolveTripCenterAsync(region, title);
+    const biasCenter = (aiCoordHint && !isCoordinatesOutsideRegion(aiCoordHint, region, title))
+      ? aiCoordHint
+      : regionCenter;
     const searchQuery = String(template.name || '').trim();
     let candidate = await searchVerifiedPlaceCandidate(searchQuery, template, region, title, biasCenter);
     if (candidate && isCoordinatesOutsideRegion(candidate.position, region, title)) {
@@ -4090,19 +4093,22 @@ body.prototype-mode .prototype-id-chip {
       ? await fetchPlaceOpeningHours(candidate.placeId)
       : null;
 
-    // 永久關閉的場所排除，不加入行程
-    if (hoursInfo && hoursInfo.businessStatus === 'CLOSED_PERMANENTLY') {
-      console.info(`景點已永久關閉，排除：${template.name}`);
-      return null;
-    }
-
     const openTimeStr = hoursInfo && hoursInfo.weekdayText.length
       ? (hoursInfo.isOpen24Hours ? '24小時' : hoursInfo.weekdayText.join('\n'))
       : '';
 
+    // 永久關閉標記：Google Maps 資料可能過舊（尤其偏遠社區設施）。
+    // 保留 Places API 的精確座標，僅在營業時間欄位加上提示，讓使用者自行判斷。
+    const possiblyClosedNote = (hoursInfo && hoursInfo.businessStatus === 'CLOSED_PERMANENTLY')
+      ? '⚠️ Google Maps 標記為已停業，出發前請再確認'
+      : '';
+    if (possiblyClosedNote) {
+      console.info(`景點可能已停業，保留座標繼續規劃：${template.name}`);
+    }
+
     const enrichedTemplate = {
       ...template,
-      businessHours: openTimeStr || template.businessHours || '',
+      businessHours: possiblyClosedNote || openTimeStr || template.businessHours || '',
       placeId: candidate.placeId || template.placeId || ''
     };
 
@@ -7046,6 +7052,44 @@ body.prototype-mode .prototype-id-chip {
     return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
   }
 
+  const BLOCKED_SPOTS_KEY = 'wai_blocked_spots';
+
+  function getBlockedSpotNames(region) {
+    try {
+      const data = JSON.parse(localStorage.getItem(BLOCKED_SPOTS_KEY) || '{}');
+      return Array.isArray(data[region]) ? data[region] : [];
+    } catch { return []; }
+  }
+
+  function saveBlockedSpotNames(names, region) {
+    if (!names.length || !region) return;
+    try {
+      const data = JSON.parse(localStorage.getItem(BLOCKED_SPOTS_KEY) || '{}');
+      const existing = new Set(data[region] || []);
+      names.forEach(n => { if (n) existing.add(n); });
+      data[region] = Array.from(existing).slice(-100);
+      localStorage.setItem(BLOCKED_SPOTS_KEY, JSON.stringify(data));
+    } catch {}
+  }
+
+  function buildReplenishPrompt(dest, needed, excludedNames, wizardData = {}) {
+    const interests = (wizardData.interests || []).join('、') || '多元體驗';
+    const theme = wizardData.theme || '經典旅人';
+    const excluded = excludedNames.slice(0, 30).join('、');
+    return [
+      `你是台灣微旅行規劃 AI。請為 ${dest} 地區補充 ${needed + 1} 個景點（多補 1 個備用以防驗證失敗）。`,
+      '【重要限制】',
+      `以下景點已使用或驗證失敗，絕對禁止重複：${excluded}`,
+      `興趣方向：${interests}，風格：${theme}`,
+      '【要求】',
+      `1. 景點必須是 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
+      '2. 禁止模糊描述（如「部落巷弄深度探索」「當地文化體驗」），必須是具體場所名稱',
+      '3. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
+      '【JSON 格式（只回傳 JSON）】',
+      '{"stops":[{"name":"景點正式名稱","emoji":"📍","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
+    ].join('\n');
+  }
+
   function buildAiReplanPrompt(wizardData) {
     const dest = wizardData.dest || wizardData.destCustom || currentTripRegion || '台東';
     const days = wizardData.days || '1天';
@@ -7059,6 +7103,10 @@ body.prototype-mode .prototype-id-chip {
     const endLoc = (wizardData.endLocation || '').trim();
     const stopRanges = { '0.5小時': [1, 2], '1小時': [2, 3], '2小時': [2, 4], '半天': [3, 5], '1天': [5, 8], '2天': [8, 14] };
     const [min, max] = stopRanges[days] || [4, 7];
+    const blockedSpots = getBlockedSpotNames(dest).slice(-25);
+    const blockedHint = blockedSpots.length
+      ? `7. 以下景點驗證失敗或不真實，絕對禁止使用：${blockedSpots.join('、')}`
+      : null;
     return [
       '你是台灣微旅行規劃 AI。根據以下條件，生成一份完整、可執行的行程，使用 JSON 格式回覆。',
       '',
@@ -7077,6 +7125,7 @@ body.prototype-mode .prototype-id-chip {
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
+      blockedHint,
       '',
       '【JSON 回傳格式（只回傳 JSON，不加任何說明文字）】',
       '{"title":"行程標題","stops":[{"name":"景點正式名稱","emoji":"📍","time":"HH:MM","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
@@ -7128,22 +7177,75 @@ body.prototype-mode .prototype-id-chip {
 
       const region = currentTripRegion || dest;
       const newStops = [];
+      const rejectedNames = [];
       for (const s of parsed.stops) {
         const template = {
           name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
           stayMin: Math.max(10, Math.min(180, s.duration || 30)),
           transitMode: 'car', transitMin: null, baseId: 'replan-ai',
-          lat: s.lat, lng: s.lng, businessHours: s.businessHours || null, toiletLocations: []
+          businessHours: s.businessHours || null, toiletLocations: []
         };
-        const validated = await validateAiStopTemplate(template, region, currentTripTitle);
-        if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); continue; }
+        const aiHint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+          ? normalizeCoordinatePair(s.lat, s.lng)
+          : null;
+        let validated = await validateAiStopTemplate(template, region, currentTripTitle, aiHint);
+        if (!validated && aiHint && !isCoordinatesOutsideRegion(aiHint, region, s.name)) {
+          validated = { ...template, scenicCoordinates: aiHint };
+        }
+        if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); rejectedNames.push(s.name); continue; }
         const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null });
         newStops.push(stop);
       }
 
+      saveBlockedSpotNames(rejectedNames, region);
+
+      const MIN_REPLAN_STOPS = 3;
+      if (newStops.length < MIN_REPLAN_STOPS && rejectedNames.length > 0) {
+        const needed = MIN_REPLAN_STOPS - newStops.length + 1;
+        const allUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
+        if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⚠️ 已排除 ${rejectedNames.length} 個無法驗證的景點，正在補充新景點…</div>`;
+        const replenishRes = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: buildReplenishPrompt(dest, needed, [...rejectedNames, ...newStops.map(s => s.name)], wizardData) }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.9 }
+          })
+        });
+        if (replenishRes.ok) {
+          const repData = await replenishRes.json();
+          const repText = repData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          const repParsed = safeParseJson(repText);
+          if (repParsed?.stops?.length) {
+            for (const s of repParsed.stops) {
+              if (allUsedNorm.has(normalizeText(s.name))) continue;
+              const tmpl = {
+                name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+                stayMin: Math.max(10, Math.min(180, s.duration || 30)),
+                transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+                businessHours: s.businessHours || null, toiletLocations: []
+              };
+              const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+                ? normalizeCoordinatePair(s.lat, s.lng) : null;
+              let val = await validateAiStopTemplate(tmpl, region, currentTripTitle, hint);
+              if (!val && hint && !isCoordinatesOutsideRegion(hint, region, s.name)) {
+                val = { ...tmpl, scenicCoordinates: hint };
+              }
+              if (!val) { saveBlockedSpotNames([s.name], region); continue; }
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null }));
+              allUsedNorm.add(normalizeText(s.name));
+            }
+          }
+        }
+      }
+
       if (newStops.length < 2) throw new Error(`驗證後只剩 ${newStops.length} 個有效景點，無法建立行程`);
 
+      const preservedStartStop = replanStops.find(s => s.type === 'start');
+      const preservedEndStop = replanStops.find(s => s.type === 'end');
       replanStops = newStops;
+      if (preservedStartStop) replanStops.unshift(preservedStartStop);
+      if (preservedEndStop) replanStops.push(preservedEndStop);
       renderReplanBoard();
       refreshRouteDirections();
       schedulePersistTrip();
