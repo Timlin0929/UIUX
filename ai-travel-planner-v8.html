@@ -1473,6 +1473,7 @@ body.prototype-mode .prototype-id-chip {
 .spot-name { font-size: 16px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
 .spot-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .tag { font-size: 11px; padding: 4px 10px; border-radius: 8px; font-weight: 600; background: var(--surface2); color: var(--ink2); }
+.stop-hours-row { font-size: 11px; color: var(--ink2); margin-bottom: 4px; }
 .transit-block { margin: 12px 0 12px 64px; padding: 12px 16px; background: var(--surface); border-radius: 14px; border: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--ink2); flex-wrap: wrap; }
 .transit-block-main { min-width: 180px; flex: 1; }
 .transit-mode-wrap { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink3); }
@@ -1556,7 +1557,8 @@ body.prototype-mode .prototype-id-chip {
   padding: 4px 8px;
   font-size: 12px;
   color: var(--ink2);
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-all;
 }
 
 .voice-guide-card {
@@ -6257,6 +6259,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
                 <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
                 </div>
