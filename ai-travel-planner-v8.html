@@ -1474,6 +1474,7 @@ body.prototype-mode .prototype-id-chip {
 .spot-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .tag { font-size: 11px; padding: 4px 10px; border-radius: 8px; font-weight: 600; background: var(--surface2); color: var(--ink2); }
 .stop-hours-row { font-size: 11px; color: var(--ink2); margin-bottom: 4px; }
+.stop-dur-select{font-size:11px;border:1px solid var(--border);border-radius:6px;padding:2px 6px;background:var(--surface2,#f4f8fb);color:var(--ink2);cursor:pointer;}
 .transit-block { margin: 12px 0 12px 64px; padding: 12px 16px; background: var(--surface); border-radius: 14px; border: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--ink2); flex-wrap: wrap; }
 .transit-block-main { min-width: 180px; flex: 1; }
 .transit-mode-wrap { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink3); }
@@ -2383,6 +2384,7 @@ body.prototype-mode .prototype-id-chip {
 .map-time-banner { position: fixed; top: 72px; right: 16px; background: rgba(255,255,255,0.97); border: 1px solid var(--border); border-radius: 18px; padding: 10px 18px; box-shadow: var(--shadow-lg); z-index: 100; display: none; flex-direction: column; align-items: flex-end; gap: 3px; pointer-events: none; }
 .map-time-banner-range { font-size: 20px; font-weight: 800; color: var(--ink); letter-spacing: 0.5px; line-height: 1.2; }
 .map-time-banner-duration { font-size: 12px; color: var(--ink3); font-weight: 500; }
+.map-time-banner-warn { font-size: 11px; color: #e05a2b; font-weight: 600; display: none; }
 .map-draggable-layer { position: absolute; top: 0; left: 0; width: 150%; height: 150%; transform-origin: 0 0; }
 .map-svg { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .map-pin { position: absolute; transform: translate(-50%, -100%); cursor: pointer; z-index: 10; transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
@@ -2916,6 +2918,7 @@ body.prototype-mode .prototype-id-chip {
     <div class="map-time-banner" id="mapTimeBanner">
       <div class="map-time-banner-range" id="mapTimeBannerRange">09:00 – 17:00</div>
       <div class="map-time-banner-duration" id="mapTimeBannerDuration">共 8 小時</div>
+      <div class="map-time-banner-warn" id="mapTimeBannerWarn">⚠ 超出行程規劃時間</div>
     </div>
 
     <!-- ── 路線文字導航面板 (預設隱藏) ── -->
@@ -4065,6 +4068,12 @@ body.prototype-mode .prototype-id-chip {
       if (locked) return locked;
     }
 
+    // start/end stops return stored coordinates directly without Firebase lookup
+    if (stop.type === 'start' || stop.type === 'end') {
+      const ownCoords = getExactCoordinateFromStop(stop) || readCoordinateObject(stop.scenicCoordinates);
+      if (ownCoords) return ownCoords;
+    }
+
     const scenicRecord = await resolveScenicPointRecord(stop, region, title);
     if (scenicRecord && scenicRecord.scenicCoordinates) {
       return scenicRecord.scenicCoordinates;
@@ -4243,6 +4252,19 @@ body.prototype-mode .prototype-id-chip {
         }
       }
 
+      // start/end stops use their stored coordinates directly — skip Firebase lookup
+      if (stop.type === 'start' || stop.type === 'end') {
+        const ownPos = readCoordinateObject(stop.scenicCoordinates) || readCoordinateObject(stop);
+        if (ownPos) {
+          const safePos = safeLatLng(ownPos);
+          stop.scenicCoordinates = ownPos;
+          nextLocations[pinId] = { lat: safePos.lat, lng: safePos.lng, title: `${stop.emoji || '📍'} ${stop.name || '景點'}` };
+          if (typeof pinData !== 'undefined') {
+            pinData[pinId] = Object.assign({}, pinData[pinId] || {}, { lat: safePos.lat, lng: safePos.lng });
+          }
+          continue;
+        }
+      }
       const scenicRecord = await resolveScenicPointRecord(stop, currentTripRegion, currentTripTitle);
       const resolvedPosition = await resolveStopCoordinatesAsync(stop, idx, currentTripRegion, currentTripTitle);
       if (rebuildToken !== mapRebuildToken) return false;
@@ -4392,11 +4414,17 @@ body.prototype-mode .prototype-id-chip {
                 }
               }
 
-              const scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
-              const cachedCoords = scenicRecord?.scenicCoordinates;
-              const resolvedPosition = (cachedCoords && !isCoordinatesOutsideRegion(cachedCoords, trip.region, s.name))
-                ? cachedCoords
-                : await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
+              let resolvedPosition;
+              let scenicRecord = null;
+              if ((s.type === 'start' || s.type === 'end') && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) {
+                resolvedPosition = { lat: Number(s.lat), lng: Number(s.lng) };
+              } else {
+                scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
+                const cachedCoords = scenicRecord?.scenicCoordinates;
+                resolvedPosition = (cachedCoords && !isCoordinatesOutsideRegion(cachedCoords, trip.region, s.name))
+                  ? cachedCoords
+                  : await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
+              }
               const normalizedTransitMode = normalizeTransitMode(s.transitMode);
               const persistedTransitMin = normalizeTransitMinutesValue(s.transitMin);
 
@@ -5327,6 +5355,7 @@ body.prototype-mode .prototype-id-chip {
     const banner = document.getElementById('mapTimeBanner');
     const rangeEl = document.getElementById('mapTimeBannerRange');
     const durEl = document.getElementById('mapTimeBannerDuration');
+    const warnEl = document.getElementById('mapTimeBannerWarn');
     if (!banner || !rangeEl || !durEl) return;
     if (!startStr || !endStr) { banner.style.display = 'none'; return; }
     const startMin = clockToMinutes(startStr);
@@ -5339,6 +5368,22 @@ body.prototype-mode .prototype-id-chip {
       durEl.textContent = m > 0 ? `共 ${h} 小時 ${m} 分` : `共 ${h} 小時`;
     } else {
       durEl.textContent = '';
+    }
+    if (warnEl) {
+      const prefs = currentTripPreferences || {};
+      const planStart = prefs.startTime || startStr;
+      const planDays = prefs.days;
+      const planEndStr = planDays ? calcReplanEndTime(planStart, planDays) : null;
+      const planEndMin = planEndStr ? clockToMinutes(planEndStr) : null;
+      const overrun = planEndMin != null && Number.isFinite(endMin) && endMin > planEndMin + 1;
+      warnEl.style.display = overrun ? 'block' : 'none';
+      if (overrun) {
+        const overMin = endMin - planEndMin;
+        const oh = Math.floor(overMin / 60);
+        const om = overMin % 60;
+        const overStr = oh > 0 ? (om > 0 ? `${oh}小時${om}分` : `${oh}小時`) : `${om}分`;
+        warnEl.textContent = `⚠ 超出規劃時間 ${overStr}（預計 ${planEndStr} 結束）`;
+      }
     }
     banner.style.display = 'flex';
   }
@@ -6258,7 +6303,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
-                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag" style="background:var(--accent-light);color:var(--accent-dark)">⏱ ${stop.stayMin} 分鐘</span>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<select class="stop-dur-select tag" onclick="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${[15,30,45,60,90,120,150,180].map(m => `<option value="${m}"${stop.stayMin===m?' selected':''}>⏱ ${m}分</option>`).join('')}</select>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
@@ -6327,6 +6372,14 @@ body.prototype-mode .prototype-id-chip {
     isReplanning = false;
     activeStopMenuId = null;
     closeModifyWindow();
+    // Remove only stale markers (stops no longer in replanStops) to avoid coordinate re-resolution
+    const activeIds = new Set(replanStops.map(s => s.mapPinId).filter(Boolean));
+    Object.entries(markers).forEach(([id, marker]) => {
+      if (!activeIds.has(id)) {
+        if (marker && typeof marker.setMap === 'function') marker.setMap(null);
+        delete markers[id];
+      }
+    });
     renderItineraryDisplay();
     refreshRouteDirections();
     switchView('itinerary');
@@ -9244,6 +9297,7 @@ body.prototype-mode .prototype-id-chip {
             const renderer = new google.maps.DirectionsRenderer({
               map: map,
               suppressMarkers: true,
+              preserveViewport: true,
               polylineOptions: {
                 strokeColor: segColor,
                 strokeWeight: 6,
