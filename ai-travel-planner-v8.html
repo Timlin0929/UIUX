@@ -3094,6 +3094,9 @@ body.prototype-mode .prototype-id-chip {
   const geocodeCache = new Map();
   const scenicPointCache = new Map();
   const placeSearchCache = new Map();
+  const tdxSpotsCache = new Map();
+  const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
+  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/v2/Tourism/ScenicSpot';
   const replanStartMinutes = 14 * 60;
   let replanStops = [];
   let persistTripDebounceTimer = null;
@@ -3138,7 +3141,18 @@ body.prototype-mode .prototype-id-chip {
         { keywords: ['海濱公園', '海濱', '濱海公園', 'seaside park', 'waterfront park'], lat: 22.76191, lng: 121.15756 },
         { keywords: ['森林公園', '台東森林公園', 'forest park', 'taitung forest park'], lat: 22.76773, lng: 121.15492 },
         { keywords: ['正氣路', '夜市', '觀光夜市', 'night market', 'zhengqi'], lat: 22.75268, lng: 121.14657 },
-        { keywords: ['富岡', '漁港', 'fugang', 'harbor', 'harbour'], lat: 22.79088, lng: 121.18735 }
+        { keywords: ['富岡', '漁港', 'fugang', 'harbor', 'harbour'], lat: 22.79088, lng: 121.18735 },
+        { keywords: ['土坂', '達仁', '撒布優', 'taban'], lat: 22.3797, lng: 120.8953 },
+        { keywords: ['金峰', '歷坵', '嘉蘭', 'jinfeng'], lat: 22.5091, lng: 120.8897 },
+        { keywords: ['海端', '霧鹿', '利稻', 'haiduan'], lat: 23.0583, lng: 121.0408 },
+        { keywords: ['長濱', '真柄', '竹湖', 'changbin'], lat: 23.2965, lng: 121.3913 },
+        { keywords: ['池上', 'chishang'], lat: 23.1111, lng: 121.2139 },
+        { keywords: ['關山', 'guanshan'], lat: 23.0508, lng: 121.1694 },
+        { keywords: ['鹿野', '龍田', 'luye'], lat: 22.9017, lng: 121.1483 },
+        { keywords: ['卑南', '初鹿', '泰安', 'beinan'], lat: 22.7020, lng: 121.0779 },
+        { keywords: ['太麻里', '多良', 'taimali'], lat: 22.6103, lng: 121.0194 },
+        { keywords: ['東河', '泰源', 'donghe'], lat: 23.1057, lng: 121.3502 },
+        { keywords: ['成功', '三仙台', 'chenggong'], lat: 23.0965, lng: 121.3691 }
       ]
     },
     {
@@ -3279,6 +3293,13 @@ body.prototype-mode .prototype-id-chip {
     return distance > maxDistance;
   }
 
+  function isInTaiwanBounds(coords) {
+    if (!coords) return false;
+    const { lat, lng } = coords;
+    return Number.isFinite(lat) && Number.isFinite(lng) &&
+      lat >= 21.5 && lat <= 26.5 && lng >= 118.5 && lng <= 122.5;
+  }
+
   function buildRegionAwareSearchQueries(stop, region, title = '') {
     const name = String(stop?.name || '').trim();
     const regionName = String(region || '').trim();
@@ -3316,6 +3337,66 @@ body.prototype-mode .prototype-id-chip {
     return preset.spots.find((spot) =>
       spot.keywords.some((keyword) => stopText.includes(keyword.toLowerCase()))
     ) || null;
+  }
+
+  function resolveTdxCounty(region, title = '') {
+    const text = normalizeMapText(`${region} ${title}`);
+    if (text.includes('台東') || text.includes('taitung')) return 'Taitung';
+    if (text.includes('花蓮') || text.includes('hualien')) return 'Hualien';
+    if (text.includes('屏東') || text.includes('pingtung')) return 'Pingtung';
+    if (text.includes('台南') || text.includes('tainan')) return 'Tainan';
+    if (text.includes('高雄') || text.includes('kaohsiung')) return 'Kaohsiung';
+    return null;
+  }
+
+  async function fetchTdxScenicSpots(county) {
+    if (!county) return [];
+    if (tdxSpotsCache.has(county)) return tdxSpotsCache.get(county);
+    const cfg = window.TRAVEL_APP_CONFIG || {};
+    const appId = cfg.TDX_APP_ID;
+    const appKey = cfg.TDX_APP_KEY;
+    if (!appId || !appKey) return [];
+    try {
+      const tokenRes = await fetch(TDX_AUTH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=client_credentials&client_id=${encodeURIComponent(appId)}&client_secret=${encodeURIComponent(appKey)}`
+      });
+      if (!tokenRes.ok) return [];
+      const { access_token } = await tokenRes.json();
+      const dataRes = await fetch(
+        `${TDX_SCENIC_BASE}/${county}?$select=ScenicSpotName,Position,OpenTime,DescriptionDetail&$top=200&$format=JSON`,
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      );
+      if (!dataRes.ok) return [];
+      const spots = await dataRes.json();
+      const normalized = spots
+        .filter(s => s.Position?.PositionLat && s.Position?.PositionLon)
+        .map(s => ({
+          name: s.ScenicSpotName,
+          lat: s.Position.PositionLat,
+          lng: s.Position.PositionLon,
+          openTime: s.OpenTime || '',
+          desc: (s.DescriptionDetail || '').slice(0, 100)
+        }));
+      tdxSpotsCache.set(county, normalized);
+      console.info(`[TDX] 載入 ${county} 景點 ${normalized.length} 筆`);
+      return normalized;
+    } catch (e) {
+      console.warn('[TDX] 抓取失敗，跳過 TDX 驗證', e.message);
+      tdxSpotsCache.set(county, []);
+      return [];
+    }
+  }
+
+  function findTdxScenicMatch(stopName, county) {
+    const spots = tdxSpotsCache.get(county) || [];
+    const norm = normalizeText(stopName);
+    if (!norm) return null;
+    return spots.find(s => {
+      const sNorm = normalizeText(s.name);
+      return sNorm.includes(norm) || norm.includes(sNorm);
+    }) || null;
   }
 
   function getExactCoordinateFromStop(stop = {}) {
@@ -4065,6 +4146,18 @@ body.prototype-mode .prototype-id-chip {
         ...template,
         scenicCoordinates: coordinates
       };
+    }
+
+    // TDX 觀光 Open Data 查詢：在 Places API 之前，優先用政府資料比對
+    const tdxCounty = resolveTdxCounty(region, title);
+    await fetchTdxScenicSpots(tdxCounty);
+    const tdxMatch = findTdxScenicMatch(String(template.name || '').trim(), tdxCounty);
+    if (tdxMatch) {
+      const pos = { lat: tdxMatch.lat, lng: tdxMatch.lng };
+      const enriched = { ...template, businessHours: tdxMatch.openTime || template.businessHours || '' };
+      await upsertScenicPointRecord(enriched, pos, region, title);
+      console.info(`[TDX] 命中景點：${template.name}`);
+      return { ...enriched, scenicCoordinates: pos };
     }
 
     const regionCenter = await resolveTripCenterAsync(region, title);
@@ -7090,6 +7183,33 @@ body.prototype-mode .prototype-id-chip {
     ].join('\n');
   }
 
+  function buildNearbyFallbackPrompt(dest, needed, allExcluded, wizardData = {}) {
+    const interests = (wizardData.interests || []).join('、') || '多元體驗';
+    const theme = wizardData.theme || '經典旅人';
+    const days = wizardData.days || '1天';
+    const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
+    const endTime = calcReplanEndTime(startTime, days);
+    const people = wizardData.people || '2人';
+    const pace = wizardData.pace || '平衡';
+    const excluded = allExcluded.slice(0, 40).join('、');
+    return [
+      `你是台灣微旅行規劃 AI。${dest} 地區景點驗證不足，請改為推薦距離 ${dest} 合理車程（50 公里內）的 ${needed + 1} 個替代景點（多補 1 個備用）。`,
+      '【行程限制（必須符合）】',
+      `時間窗口：${startTime} ～ ${endTime}，行程長度：${days}`,
+      `旅伴：${people}，節奏：${pace}，風格：${theme}`,
+      `興趣方向：${interests}`,
+      '【排除清單（絕對禁止重複）】',
+      excluded || '（無）',
+      '【景點要求】',
+      `1. 優先選擇距 ${dest} 50 公里內、適合當日安排的具體景點`,
+      '2. 必須是台灣真實存在、能在 Google Maps 搜尋到的地點，使用正式名稱',
+      '3. 禁止模糊描述（如「附近景點」「周邊步道」），必須是具體場所名稱',
+      '4. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
+      '【JSON 格式（只回傳 JSON）】',
+      '{"stops":[{"name":"景點正式名稱","emoji":"📍","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
+    ].join('\n');
+  }
+
   function buildAiReplanPrompt(wizardData) {
     const dest = wizardData.dest || wizardData.destCustom || currentTripRegion || '台東';
     const days = wizardData.days || '1天';
@@ -7234,6 +7354,48 @@ body.prototype-mode .prototype-id-chip {
               if (!val) { saveBlockedSpotNames([s.name], region); continue; }
               newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null }));
               allUsedNorm.add(normalizeText(s.name));
+            }
+          }
+        }
+      }
+
+      // 第三層 fallback：景點仍不足時，放寬地區限制搜尋附近景點
+      if (newStops.length < MIN_REPLAN_STOPS) {
+        const nearbyNeeded = MIN_REPLAN_STOPS - newStops.length + 1;
+        const nearbyUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
+        if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">🗺️ 正在搜尋 ${dest} 周邊替代景點…</div>`;
+        const nearbyRes = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: buildNearbyFallbackPrompt(dest, nearbyNeeded, [...rejectedNames, ...newStops.map(s => s.name)], wizardData) }] }],
+            generationConfig: { responseMimeType: 'application/json', temperature: 1.0 }
+          })
+        });
+        if (nearbyRes.ok) {
+          const nearbyData = await nearbyRes.json();
+          const nearbyText = nearbyData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          const nearbyParsed = safeParseJson(nearbyText);
+          if (nearbyParsed?.stops?.length) {
+            for (const s of nearbyParsed.stops) {
+              if (nearbyUsedNorm.has(normalizeText(s.name))) continue;
+              const tmpl = {
+                name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+                stayMin: Math.max(10, Math.min(180, s.duration || 30)),
+                transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+                businessHours: s.businessHours || null, toiletLocations: []
+              };
+              const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+                ? normalizeCoordinatePair(s.lat, s.lng) : null;
+              let val = await validateAiStopTemplate(tmpl, region, currentTripTitle, hint);
+              // 附近景點放寬地區限制：AI 座標在台灣範圍內即接受
+              if (!val && hint && isInTaiwanBounds(hint)) {
+                val = { ...tmpl, scenicCoordinates: hint };
+              }
+              if (!val) continue;
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null }));
+              nearbyUsedNorm.add(normalizeText(s.name));
+              if (newStops.length >= MIN_REPLAN_STOPS) break;
             }
           }
         }
