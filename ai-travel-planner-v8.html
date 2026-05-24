@@ -2541,6 +2541,7 @@ body.prototype-mode .prototype-id-chip {
 .mic-notice span:last-child {
   flex: 1;
 }
+.mic-hours{font-size:12px;color:var(--ink2);padding:6px 10px;background:var(--surface2,#f4f8fb);border-radius:8px;margin-top:8px;display:flex;align-items:center;gap:6px;}
 
 /* ── 浮動 AI 抽屜 (Slide-over Chat) ── */
 .ai-drawer {
@@ -2937,6 +2938,7 @@ body.prototype-mode .prototype-id-chip {
       </div>
       <div class="mic-body">
         <div class="mic-desc" id="micDesc">這裡會顯示導覽說明。</div>
+        <div class="mic-hours" id="micHours" style="display:none"></div>
         <div class="mic-notice">
           <span>⚠️</span>
           <span id="micNotice">這裡會顯示注意事項。</span>
@@ -4285,7 +4287,8 @@ body.prototype-mode .prototype-id-chip {
           title: currentTripTitle
           }),
           lat: _pos.lat,
-          lng: _pos.lng
+          lng: _pos.lng,
+          businessHours: stop.businessHours || scenicRecord?.businessHours || null
         };
       }
     }
@@ -6000,12 +6003,20 @@ body.prototype-mode .prototype-id-chip {
   function getBusinessHoursWarning(stop) {
     const hours = String(stop.businessHours || '').trim();
     if (!hours || hours === '24小時') return '';
-    const firstLine = hours.split('\n')[0] || hours;
-    const window = parseBusinessHoursWindow(firstLine);
+    const departureDate = currentTripPreferences?.departureDate;
+    let checkLine = hours.split('\n')[0] || hours;
+    if (departureDate) {
+      const jsDay = new Date(departureDate + 'T00:00:00').getDay();
+      const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
+      const lines = hours.split('\n');
+      if (lines[apiIndex]) checkLine = lines[apiIndex];
+      if (/休息|closed|不營業/i.test(checkLine)) return '⚠️ 當天公休';
+    }
+    const window = parseBusinessHoursWindow(checkLine);
     if (!window) return '';
     const { open, close } = window;
     const startMin = stop.start ?? 0;
-    const endMin   = stop.end   ?? startMin + (stop.stayMin || 0);
+    const endMin = stop.end ?? startMin + (stop.stayMin || 0);
     if (startMin >= close || endMin <= open) {
       return `⚠️ 可能在非營業時間（${minutesToClock(open)}–${minutesToClock(close)}）`;
     }
@@ -9372,6 +9383,18 @@ body.prototype-mode .prototype-id-chip {
   // ── 行程標點導覽資料與邏輯 ──
   const pinData = {};
 
+  function formatDayBusinessHours(businessHoursStr, departureDate) {
+    if (!businessHoursStr) return '';
+    const lines = String(businessHoursStr).split('\n');
+    if (departureDate) {
+      const jsDay = new Date(departureDate + 'T00:00:00').getDay();
+      const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
+      const dayLine = lines[apiIndex];
+      if (dayLine) return /休息|closed/i.test(dayLine) ? '🔴 ' + dayLine : '🕐 ' + dayLine;
+    }
+    return '🕐 ' + (lines[0] || businessHoursStr);
+  }
+
   function showPinInfo(pinId) {
     const data = pinData[pinId];
     if (!data) return;
@@ -9391,6 +9414,13 @@ body.prototype-mode .prototype-id-chip {
     document.getElementById('micTitle').innerText = data.title;
     document.getElementById('micDesc').innerText = finalDesc;
     document.getElementById('micNotice').innerText = finalNotice;
+    const micHoursEl = document.getElementById('micHours');
+    if (micHoursEl) {
+      const deptDate = currentTripPreferences?.departureDate;
+      const hoursText = formatDayBusinessHours(data.businessHours, deptDate);
+      micHoursEl.textContent = hoursText;
+      micHoursEl.style.display = hoursText ? '' : 'none';
+    }
     
     // 顯示卡片
     document.getElementById('mapInfoCard').classList.add('show');

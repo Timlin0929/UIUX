@@ -2424,6 +2424,23 @@ function parseBusinessHoursWindow(value) {
   return { open, close };
 }
 
+function extractDayHoursWindow(businessHoursStr, departureDate) {
+  if (!businessHoursStr) return null;
+  if (!departureDate) return parseBusinessHoursWindow(businessHoursStr);
+  const jsDay = new Date(departureDate + 'T00:00:00').getDay();
+  const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
+  const lines = String(businessHoursStr).split('\n');
+  const dayLine = lines[apiIndex];
+  if (!dayLine) return parseBusinessHoursWindow(businessHoursStr);
+  if (/休息|closed|不營業/i.test(dayLine)) return { closed: true, label: dayLine };
+  const match = dayLine.match(/(\d{1,2}):(\d{2})\s*[–\-~]+\s*(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const open = Number(match[1]) * 60 + Number(match[2]);
+  const close = Number(match[3]) * 60 + Number(match[4]);
+  if (!Number.isFinite(open) || !Number.isFinite(close)) return null;
+  return { open, close: close < open ? close + 1440 : close, closed: false, label: dayLine };
+}
+
 function applyTripPlanningRules(stops, wizardData = {}) {
   const pace = wizardData.pace || '平衡';
   const maxGapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
@@ -2437,17 +2454,23 @@ function applyTripPlanningRules(stops, wizardData = {}) {
     let currentMinutes = defaultStart;
 
     // 營業時間調整：若需等候且等候時長在上限內，推遲開始
-    const businessWindow = parseBusinessHoursWindow(normalized.businessHours);
-    if (businessWindow && currentMinutes < businessWindow.open) {
-      const waitTime = businessWindow.open - currentMinutes;
-      if (waitTime <= maxGapMinutes) {
-        currentMinutes = businessWindow.open;
-      } else {
+    const businessWindow = extractDayHoursWindow(normalized.businessHours, wizardData.departureDate);
+    if (businessWindow) {
+      if (businessWindow.closed) {
         normalized.scheduleWarning = 'outside_business_hours';
+      } else {
+        if (currentMinutes < businessWindow.open) {
+          const waitTime = businessWindow.open - currentMinutes;
+          if (waitTime <= maxGapMinutes) {
+            currentMinutes = businessWindow.open;
+          } else {
+            normalized.scheduleWarning = 'outside_business_hours';
+          }
+        }
+        if (currentMinutes > businessWindow.close) {
+          normalized.scheduleWarning = 'outside_business_hours';
+        }
       }
-    }
-    if (businessWindow && currentMinutes > businessWindow.close) {
-      normalized.scheduleWarning = 'outside_business_hours';
     }
 
     normalized.time = minutesToTimeString(currentMinutes);
@@ -2563,7 +2586,7 @@ async function enrichMissingCoordinates(stops, destinationText) {
   return stops;
 }
 
-async function verifyAndFilterStopsWithPlaces(stops, destination) {
+async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {}) {
   const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
   if (!key || !destination || !Array.isArray(stops)) return stops;
 
@@ -2600,6 +2623,10 @@ async function verifyAndFilterStopsWithPlaces(stops, destination) {
       const hours = place.regularOpeningHours?.weekdayDescriptions;
       if (Array.isArray(hours) && hours.length) {
         stop.businessHours = hours.join('\n');
+        if (wizardData.departureDate) {
+          const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+          if (dayWindow && dayWindow.closed) return null;
+        }
       }
       stop.placeVerified = true;
       return stop;
@@ -2620,7 +2647,7 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}) {
   const poiCache = await fetchDestinationPoiCache(destination);
   const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
   const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
-  const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination);
+  const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops);
