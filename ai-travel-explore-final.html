@@ -1100,6 +1100,9 @@ let wizData = {};
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
+const VERTEX_API_BASE = 'https://us-central1-aiplatform.googleapis.com/v1';
+const VERTEX_LOCAL_KEY = 'TRAVEL_VERTEX_API_KEY';
+const VERTEX_LOCAL_PROJECT = 'TRAVEL_VERTEX_PROJECT_ID';
 let firebaseDb = null;
 let firebaseEnabled = false;
 let isGeneratingTrip = false;
@@ -1242,27 +1245,7 @@ async function buildFirebasePoiHintBlock(wizardData) {
         ? `景點座標：lat ${poiLat}, lng ${poiLng}`
         : '景點座標：未知';
       const durationHint = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0 ? `${poi.duration} 分鐘` : '未知';
-      const toiletLines = Array.isArray(poi.nearbyToiletLocations)
-        ? poi.nearbyToiletLocations.slice(0, 3).map((toilet, index) => {
-          if (!toilet || typeof toilet !== 'object') return null;
-          const toiletLat = Number(toilet.lat);
-          const toiletLng = Number(toilet.lng);
-          const toiletCoord = Number.isFinite(toiletLat) && Number.isFinite(toiletLng)
-            ? `lat ${toiletLat}, lng ${toiletLng}`
-            : '座標未知';
-          const toiletName = toilet.name || toilet.title || `廁所 ${index + 1}`;
-          const toiletMeta = [
-            toilet.address || toilet.vicinity || '',
-            toilet.source || toilet.coordinateSource || '',
-            toilet.distanceMeters ? `距離約 ${toilet.distanceMeters}m` : ''
-          ].filter(Boolean).join('；');
-          return `- ${toiletName}：${toiletCoord}${toiletMeta ? `（${toiletMeta}）` : ''}`;
-        }).filter(Boolean)
-        : [];
-      const toiletHint = toiletLines.length
-        ? `附近廁所候選（僅沿用距離景點 500 公尺內且名稱相符者）：\n${toiletLines.join('\n')}`
-        : '附近廁所候選：無可信快取';
-      return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n${toiletHint}\n`;
+      return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`;
     });
 
     return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
@@ -1300,6 +1283,16 @@ async function prefetchFirebasePoiHint(wizardData, force = false) {
       wizardPrefetchPromise = null;
     });
   return wizardPrefetchPromise;
+}
+
+async function fetchAndBuildLiveMapsHint(wizardData) {
+  const destination = getWizardDestination(wizardData);
+  if (!destination) return '';
+  const destCenter = getDestinationCenter(destination);
+  const interests = wizardData.interests || [];
+  const places = await fetchGoogleMapsPoiList(destination, interests, destCenter);
+  if (!places.length) return '';
+  return buildLiveMapsPoiHintBlock(places);
 }
 
 function isLongTrip(days) {
@@ -1347,27 +1340,21 @@ function getPromptRuleLines(wizardData, mode) {
   if (detailed) {
     const { min, max } = getDurationStopRange(days);
     lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、行程最後一站的結束時間必須在 ${endTime} 前後 15 分鐘內，嚴禁行程在 ${endTime} 的 15 分鐘前完全結束；若景點不足請加入具體名稱的餐廳、咖啡廳、市場、公園等補充體驗（禁止使用「在地午餐」等模糊名稱）`);
-    lines.push('6. 每站包含時間、景點名稱、景點 WGS84 精確座標、推薦理由、營業時間、附近廁所位置（1-3個，必須距離該景點 500 公尺以內）');
-    lines.push('7. 廁所座標必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代');
-    lines.push('8. 廁所輸出格式：{name:"正式名稱", lat:數字, lng:數字, address:"地址或位置描述", source:"資料來源", confidence:"high|medium"}；若無法確認精確座標，請保留 name/address 並省略 lat/lng');
-    lines.push('9. 廁所名稱與座標必須互相對應；若 Firebase 候選、data.gov.tw 公廁資料、Google Maps/Places 名稱或地址互相矛盾，優先使用可定位到實際廁所設施且距離景點最近的資料，無法確認則不要輸出座標');
-    lines.push('10. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
-    lines.push('11. 請勿自行編造座標，無法確認請省略座標欄位');
-    lines.push('12. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35；景點座標與廁所座標優先參考 Firebase 已驗證快取、data.gov.tw 開放資料（https://data.gov.tw）中的觀光景點資料集/公廁位置資料集');
-    lines.push('13. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
+    lines.push('6. 每站包含時間、景點名稱、推薦理由、營業時間；請勿在 JSON 中輸出 lat/lng 座標或廁所資料，座標與廁所由系統自動查詢');
+    lines.push('7. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
+    lines.push('8. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35');
+    lines.push('9. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
     if (isLongTrip(days)) {
       lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
       lines.push('14. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
       lines.push('15. 需安排 12:00-13:30 的彈性午餐停留時段');
     }
-    const startLoc = (wizardData.startLocation || '').trim();
-    const endLoc = (wizardData.endLocation || '').trim();
-    if (startLoc) {
-      lines.push(`${lines.length + 1}. 行程第一站必須從「${startLoc}」出發，這是旅客的集合起始點，需計算從此處到第一景點的移動時間`);
-    }
-    if (endLoc) {
-      lines.push(`${lines.length + 1}. 行程最後一站必須返回「${endLoc}」，這是旅客的結束點，需計算從最後景點返回此處的移動時間`);
-    }
+    const dest = wizardData.dest || wizardData.destCustom || '台東';
+    const defaultHub = getDefaultTransitHub(dest);
+    const startLoc = (wizardData.startLocation || '').trim() || defaultHub;
+    const endLoc = (wizardData.endLocation || '').trim() || defaultHub;
+    lines.push(`${lines.length + 1}. 行程第一站必須從「${startLoc}」出發，這是旅客的集合起始點，需計算從此處到第一景點的移動時間`);
+    lines.push(`${lines.length + 1}. 行程最後一站必須返回「${endLoc}」，這是旅客的結束點，需計算從最後景點返回此處的移動時間`);
   } else {
     lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
   }
@@ -1392,28 +1379,44 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     wizardData.budget ? `預算：${wizardData.budget}` : null,
     wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
     wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
-    (wizardData.startLocation || '').trim() ? `出發車站：${wizardData.startLocation.trim()}` : null,
-    (wizardData.endLocation || '').trim() ? `回程車站：${wizardData.endLocation.trim()}` : null
+    `出發站點：${(wizardData.startLocation || '').trim() || getDefaultTransitHub(destination)}`,
+    `回程站點：${(wizardData.endLocation || '').trim() || getDefaultTransitHub(destination)}`
   ].filter(Boolean).join('\n');
 
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
     ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
-    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,lat,lng,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode,nearbyToiletLocations:[{name,lat,lng,address,source,confidence}]}]`;
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
     ? `\n\n${firebaseHint}`
     : '';
 
+  const destCenter = getDestinationCenter(destination);
+  const destRadiusKm = Math.round(getDestinationMaxDistanceMeters(destination) / 1000);
+  const geoConstraint = destCenter
+    ? `所有景點必須真實位於「${destination}」範圍內（中心座標 lat ${destCenter.lat}, lng ${destCenter.lng}，有效半徑約 ${destRadiusKm} 公里），嚴禁規劃其他地區的景點。`
+    : `所有景點必須真實位於「${destination}」指定地區，嚴禁規劃目的地以外的景點。`;
+
   const intro = isSolo
-    ? '你是台東微旅行的 AI 規劃助手。根據用戶需求生成一份適合獨旅者的可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往且不須等候大型團體的地點。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。'
-    : `你是台東微旅行的 AI 規劃助手。根據用戶需求生成一份適合 ${wizardData.people || '多人'} 同行的可執行行程，考慮團體動態，優先選擇可接待多人的景點、餐廳與活動場所，並安排共同用餐時段。景點座標與廁所座標請以可定位、可查證、精確到實際設施點位為準；優先參考 Firebase 已驗證快取與 data.gov.tw（https://data.gov.tw）的觀光景點資料集、公廁位置資料集，必要時交叉比對可定位地圖資料。`;
+    ? `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}根據用戶需求生成一份適合獨旅者的可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往且不須等候大型團體的地點。`
+    : `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}根據用戶需求生成一份適合 ${wizardData.people || '多人'} 同行的可執行行程，考慮團體動態，優先選擇可接待多人的景點、餐廳與活動場所，並安排共同用餐時段。`;
 
   const desiredNote = wizardData.desiredSpots
     ? `\n\n⚠️ 用戶特別希望前往：${wizardData.desiredSpots}。請優先安排這些景點（時間不足時選最重要的），並圍繞它們規劃行程。`
     : '';
 
-  const prompt = `${intro}${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}${desiredNote}`;
+  const visitedPlaces = (() => {
+    try {
+      const all = JSON.parse(localStorage.getItem('wai_visited_places') || '[]');
+      return all.filter(p => !p.region || p.region === destination).map(p => p.name).slice(-30);
+    } catch { return []; }
+  })();
+  const visitedNote = visitedPlaces.length
+    ? `\n\n🚫 以下景點用戶已去過，請勿再次安排（可改推附近其他景點）：${visitedPlaces.join('、')}`
+    : '';
+
+  const prompt = `${intro}${firebaseSection}\n\n行程規則：\n${rules}\n\n${outputSchema}\n\n用戶需求：\n${contextBlock}${desiredNote}${visitedNote}`;
 
   return { prompt, contextBlock };
 }
@@ -1440,7 +1443,10 @@ function parsePlanJsonFromText(text) {
 }
 
 async function fetchGeminiJson({ apiKey, model, payload }) {
-  const endpoint = `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const vertex = getVertexConfig();
+  const endpoint = vertex.ready
+    ? `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
+    : `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1453,7 +1459,10 @@ async function fetchGeminiJson({ apiKey, model, payload }) {
 }
 
 async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
-  const endpoint = `${GEMINI_API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  const vertex = getVertexConfig();
+  const endpoint = vertex.ready
+    ? `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`
+    : `${GEMINI_API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1504,6 +1513,13 @@ function getGeminiApiKey() {
     return fromStorage.trim();
   }
   return '';
+}
+
+function getVertexConfig() {
+  const cfg = window.TRAVEL_APP_CONFIG || {};
+  const apiKey = (cfg.VERTEX_API_KEY || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_KEY) || '').trim();
+  const projectId = (cfg.VERTEX_PROJECT_ID || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_PROJECT) || '').trim();
+  return { apiKey, projectId, ready: !!(apiKey && projectId) };
 }
 
 function setGeminiApiKey(apiKey) {
@@ -1649,9 +1665,10 @@ function getCachedWizardPreviewPlan() {
 }
 
 async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
+  const vertex = getVertexConfig();
   const shouldPromptForKey = options.promptForKey !== false;
-  const apiKey = shouldPromptForKey ? ensureGeminiApiKey() : getGeminiApiKey();
-  if (!apiKey) {
+  const apiKey = vertex.ready ? '' : (shouldPromptForKey ? ensureGeminiApiKey() : getGeminiApiKey());
+  if (!vertex.ready && !apiKey) {
     throw new Error('尚未設定 Gemini API Key。');
   }
 
@@ -1662,7 +1679,12 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
     ? (await prefetchFirebasePoiHint(wizardData).catch(() => ''))
     : '';
 
-  const built = buildPrompt(wizardData, firebasePromptBlock, mode);
+  const livePoiBlock = (includeFirebase && !firebasePromptBlock && options.livePoiHint !== undefined)
+    ? (options.livePoiHint || '')
+    : '';
+
+  const hintBlock = firebasePromptBlock || livePoiBlock;
+  const built = buildPrompt(wizardData, hintBlock, mode);
   const preferredModel = GEMINI_MODEL;
   const payload = {
     contents: [
@@ -1848,6 +1870,10 @@ const DESTINATION_CENTER_MAP = {
   '綠島': { lat: 22.666, lng: 121.494 },
   '蘭嶼': { lat: 22.046, lng: 121.548 },
   '小琉球': { lat: 22.341, lng: 120.372 },
+  '土坂': { lat: 22.3797, lng: 120.8953 },
+  '土坂村': { lat: 22.3797, lng: 120.8953 },
+  '達仁': { lat: 22.3797, lng: 120.8953 },
+  '達仁鄉': { lat: 22.3797, lng: 120.8953 },
   '澎湖': { lat: 23.571, lng: 119.579 },
   '金門': { lat: 24.432, lng: 118.317 },
   '馬祖': { lat: 26.160, lng: 119.920 },
@@ -1859,13 +1885,38 @@ const DESTINATION_CENTER_MAP = {
 const MILITARY_EXCLUSION_KEYWORDS = ['空軍', '海軍基地', '軍用', '軍港', '軍機場', '基地', '海巡署'];
 
 const CIVIL_TRANSIT_HUB_MAP = {
-  '台東': '台東火車站', '台東縣': '台東火車站', '台東市': '台東火車站',
-  '綠島': '富岡漁港', '蘭嶼': '富岡漁港',
-  '成功': '成功漁港', '長濱': '成功漁港',
-  '卑南': '台東火車站', '知本': '台東火車站',
+  // 台東縣 — 市區
+  '台東': '台東車站', '台東縣': '台東車站', '台東市': '台東車站',
+  // 台東縣 — 各鄉鎮
+  '卑南': '台東車站', '知本': '知本車站',
+  '太麻里': '太麻里車站', '金峰': '金崙車站',
+  '大武': '大武車站', '土坂': '大武車站', '達仁': '大武車站',
   '鹿野': '鹿野車站', '關山': '關山車站',
   '池上': '池上車站', '富里': '富里車站',
-  '太麻里': '太麻里車站',
+  '成功': '成功漁港', '長濱': '成功漁港', '東河': '台東車站',
+  // 離島（從台東富岡出發）
+  '綠島': '富岡漁港', '蘭嶼': '富岡漁港',
+  // 花蓮縣
+  '花蓮': '花蓮車站', '玉里': '玉里車站', '瑞穗': '瑞穗車站',
+  '光復': '光復車站', '壽豐': '壽豐車站',
+  '秀林': '新城車站', '太魯閣': '新城車站', '七星潭': '花蓮車站',
+  // 宜蘭縣
+  '宜蘭': '宜蘭車站', '羅東': '羅東車站', '蘇澳': '蘇澳新車站',
+  '礁溪': '礁溪車站', '頭城': '頭城車站', '龜山島': '烏石港', '龜山': '烏石港',
+  // 新北、台北、基隆
+  '基隆': '基隆車站', '台北': '台北車站', '新北': '板橋車站',
+  // 桃竹苗
+  '桃園': '桃園車站', '新竹': '新竹車站', '苗栗': '苗栗車站',
+  // 中部
+  '台中': '台中車站', '彰化': '彰化車站',
+  // 雲嘉南
+  '嘉義': '嘉義車站', '台南': '台南車站',
+  // 高屏
+  '高雄': '高雄車站', '屏東': '屏東車站',
+  '恆春': '枋寮車站', '墾丁': '枋寮車站', '枋寮': '枋寮車站',
+  // 離島
+  '澎湖': '馬公港', '金門': '水頭碼頭', '馬祖': '南竿福澳港',
+  '小琉球': '東港漁港',
 };
 
 const TRAFFIC_RISK_KEYWORDS = [
@@ -1899,11 +1950,11 @@ function getDestinationCenter(destinationText) {
 }
 
 function getDefaultTransitHub(destination) {
-  if (!destination) return '台東火車站';
+  if (!destination) return '台東車站';
   const text = String(destination).trim();
   if (CIVIL_TRANSIT_HUB_MAP[text]) return CIVIL_TRANSIT_HUB_MAP[text];
   const hit = Object.keys(CIVIL_TRANSIT_HUB_MAP).find(key => text.includes(key));
-  return hit ? CIVIL_TRANSIT_HUB_MAP[hit] : '台東火車站';
+  return hit ? CIVIL_TRANSIT_HUB_MAP[hit] : '台東車站';
 }
 
 function getDestinationMaxDistanceMeters(destinationText) {
@@ -1912,6 +1963,7 @@ function getDestinationMaxDistanceMeters(destinationText) {
   if (/日本|韓國|歐洲/.test(lookup)) return 120000;
   if (/台北|新北|桃園|台中|台南|高雄|基隆|新竹/.test(lookup)) return 40000;
   if (/台東|花蓮|宜蘭|屏東|南投|嘉義|苗栗/.test(lookup)) return 55000;
+  if (/土坂|達仁/.test(lookup)) return 8000;
   // 離島：地域極小，嚴格限縮半徑防止 AI 座標嚴重偏移通過驗證
   if (/綠島/.test(lookup)) return 6000;
   if (/蘭嶼/.test(lookup)) return 7000;
@@ -2516,12 +2568,19 @@ function assignTransportModes(stops) {
   return stops.map((stop, index) => {
     if (index >= stops.length - 1) return stop;
     const existing = String(stop.transitMode || stop.transportMode || '').trim().toLowerCase();
-    if (VALID_MODES.includes(existing)) return stop;
     const fromCoord = getStopCoordinate(stop);
     const toCoord = getStopCoordinate(stops[index + 1]);
-    if (!fromCoord || !toCoord) return { ...stop, transitMode: dominantMode };
-    const dist = getDistanceMeters(fromCoord, toCoord);
-    const transitMode = dist <= 800 ? 'walk' : dist <= 3000 ? 'scooter' : 'car';
+    const dist = (fromCoord && toCoord) ? getDistanceMeters(fromCoord, toCoord) : null;
+    // 若 Gemini 已指定合法模式，先採用，但距離不合理時強制覆蓋
+    if (VALID_MODES.includes(existing)) {
+      if (dist !== null) {
+        if (existing === 'walk' && dist > 500) return { ...stop, transitMode: dist <= 3000 ? 'scooter' : 'car' };
+        if (existing === 'scooter' && dist > 8000) return { ...stop, transitMode: 'car' };
+      }
+      return stop;
+    }
+    if (dist === null) return { ...stop, transitMode: dominantMode };
+    const transitMode = dist <= 500 ? 'walk' : dist <= 3000 ? 'scooter' : 'car';
     return { ...stop, transitMode };
   });
 }
@@ -2569,6 +2628,122 @@ function injectEndpointStops(stops, wizardData = {}) {
   return result;
 }
 
+const INTEREST_QUERY_TERMS = {
+  '美食': ['美食', '餐廳'],
+  '文化': ['文化', '部落', '工藝'],
+  '自然': ['步道', '自然景觀'],
+  '休閒': ['公園', '景點'],
+  '藝術': ['藝術', '博物館'],
+  '歷史': ['歷史', '古蹟'],
+  '購物': ['市集'],
+  '戶外': ['戶外', '山林'],
+};
+
+async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = null) {
+  const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
+  if (!key || !destination) return [];
+
+  const terms = new Set(['景點', '餐廳']);
+  (interests || []).forEach(interest => {
+    (INTEREST_QUERY_TERMS[interest] || []).forEach(t => terms.add(t));
+  });
+  const queries = Array.from(terms).slice(0, 5).map(t => `${destination} ${t}`);
+
+  const radius = getDestinationMaxDistanceMeters(destination) || 15000;
+  const seenNames = new Set();
+  const allPlaces = [];
+
+  for (const query of queries) {
+    const body = {
+      textQuery: query,
+      languageCode: 'zh-TW',
+      maxResultCount: 10,
+    };
+    if (destCenter) {
+      body.locationBias = {
+        circle: {
+          center: { latitude: destCenter.lat, longitude: destCenter.lng },
+          radius: Math.min(radius, 50000)
+        }
+      };
+    }
+    try {
+      const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.types,places.regularOpeningHours,places.formattedAddress,places.rating'
+        },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!Array.isArray(data.places)) continue;
+      for (const place of data.places) {
+        const name = place.displayName?.text;
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        allPlaces.push({
+          name,
+          lat: place.location?.latitude,
+          lng: place.location?.longitude,
+          businessHours: (place.regularOpeningHours?.weekdayDescriptions || []).join('；') || '未知',
+          address: place.formattedAddress || '',
+          rating: place.rating ?? null,
+        });
+        if (allPlaces.length >= 25) break;
+      }
+    } catch (e) {
+      console.warn('fetchGoogleMapsPoiList 失敗:', e);
+    }
+    if (allPlaces.length >= 25) break;
+  }
+  return allPlaces;
+}
+
+function buildLiveMapsPoiHintBlock(places) {
+  if (!Array.isArray(places) || !places.length) return '';
+  const lines = places.map(p => {
+    const coordLine = (p.lat != null && p.lng != null)
+      ? `景點座標：lat ${p.lat}, lng ${p.lng}`
+      : '景點座標：未知';
+    return [
+      `景點名稱：${p.name}`,
+      coordLine,
+      `營業時間：${p.businessHours}`,
+      `地址：${p.address || '無'}`,
+      p.rating ? `評分：${p.rating}` : ''
+    ].filter(Boolean).join('\n');
+  });
+  return `【Google Maps 景點清單】以下景點已直接從 Google Maps 取得，座標均已驗證。你的任務是從此清單中挑選景點並排成行程，禁止自行創造或加入清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
+}
+
+function findBestPoiMatch(stopName, livePlaces) {
+  if (!stopName || !Array.isArray(livePlaces) || !livePlaces.length) return null;
+  const exact = livePlaces.find(p => p.name === stopName);
+  if (exact) return exact;
+  return livePlaces.find(p => fuzzyMatchLocation(stopName, p.name)) || null;
+}
+
+function matchStopsToLivePlaces(stops, livePlaces) {
+  if (!Array.isArray(livePlaces) || !livePlaces.length) return stops;
+  return stops.map(stop => {
+    if (!stop || typeof stop !== 'object') return stop;
+    if (stop.type === 'start' || stop.type === 'end') return stop;
+    const match = findBestPoiMatch(stop.name || stop.title, livePlaces);
+    if (!match) return stop;
+    return {
+      ...stop,
+      name: match.name,
+      lat: match.lat,
+      lng: match.lng,
+      businessHours: stop.businessHours || match.businessHours || null,
+      address: stop.address || match.address || '',
+      coordinateSource: 'google_places_matched'
+    };
+  });
+}
+
 async function fetchCoordinateFromGooglePlaces(name, destination) {
   const key = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.GOOGLE_MAPS_API_KEY;
   if (!key || !name) return null;
@@ -2607,6 +2782,19 @@ async function enrichMissingCoordinates(stops, destinationText) {
   return stops;
 }
 
+function placeNameMatchesQuery(displayName, queryName) {
+  if (!displayName || !queryName) return true;
+  const clean = s => s.replace(/[\s（）()[\]「」·\-_\/,.。，、！!？?～~]/g, '').toLowerCase();
+  const dn = clean(displayName);
+  const qn = clean(queryName);
+  if (!dn || !qn) return true;
+  if (dn.includes(qn) || qn.includes(dn)) return true;
+  const uniqueChars = [...new Set(qn.split(''))];
+  if (uniqueChars.length < 2) return true;
+  const matchCount = uniqueChars.filter(c => dn.includes(c)).length;
+  return matchCount / uniqueChars.length >= 0.35;
+}
+
 async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {}) {
   const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
   if (!key || !destination || !Array.isArray(stops)) return stops;
@@ -2629,6 +2817,8 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
       const data = await res.json();
       const place = data.places?.[0];
       if (!place) return null;
+      const placeName = (place.displayName?.text || '').trim();
+      if (placeName && !placeNameMatchesQuery(placeName, name)) return null;
 
       if (place.location) {
         const placeCoord = { lat: place.location.latitude, lng: place.location.longitude };
@@ -2657,38 +2847,58 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
   }));
 
   const verified = results.filter(Boolean);
-  const mainStops = verified.filter(s => s.type !== 'start' && s.type !== 'end');
+  // Exclude transit hub stops (start/end location) from the "real attraction" count.
+  // Without this, if the AI includes the hub (e.g. 大武車站) as both first and last stop,
+  // those 2 verified hub entries would satisfy the >= 2 threshold even though every actual
+  // attraction was filtered out, causing all middle stops to be silently discarded.
+  const defaultHub = getDefaultTransitHub(destination);
+  const startLoc = (wizardData.startLocation || '').trim() || defaultHub;
+  const endLoc   = (wizardData.endLocation   || '').trim() || defaultHub;
+  const mainStops = verified.filter(s => {
+    if (s.type === 'start' || s.type === 'end') return false;
+    if (fuzzyMatchLocation(s.name, startLoc) || fuzzyMatchLocation(s.name, endLoc)) return false;
+    return true;
+  });
   return mainStops.length >= 2 ? verified : stops;
 }
 
-async function optimizeGeneratedTripStops(stops, wizardData = {}) {
+async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = []) {
   const sourceStops = Array.isArray(stops) ? stops.filter(Boolean) : [];
   if (!sourceStops.length) return [];
+  // When Places API POIs are available, match AI-selected names back to those objects
+  // to assign authoritative coordinates before any further processing.
+  const preMatchedStops = livePlaces.length > 0
+    ? matchStopsToLivePlaces(sourceStops, livePlaces)
+    : sourceStops;
   const destination = wizardData.dest || wizardData.destCustom || wizardData.region || '';
   const poiCache = await fetchDestinationPoiCache(destination);
-  const sanitizedStops = sanitizeStopCoordinates(sourceStops, wizardData, poiCache);
+  const sanitizedStops = sanitizeStopCoordinates(preMatchedStops, wizardData, poiCache);
   const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
   const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops);
   const defaultHub = getDefaultTransitHub(destination);
-  const startLoc = (wizardData.startLocation || '').trim() || defaultHub;
-  const endLoc = (wizardData.endLocation || '').trim() || defaultHub;
+  const userStartLoc = (wizardData.startLocation || '').trim();
+  const userEndLoc = (wizardData.endLocation || '').trim();
+  const startLocForCalc = userStartLoc || defaultHub;
+  const endLocForCalc = userEndLoc || defaultHub;
 
-  // Geocode start/end locations so assignTransportModes can compute real distances
+  // Geocode for transport-mode distance estimation (always uses defaultHub as fallback)
   const [startCoords, endCoords] = await Promise.all([
-    fetchCoordinateFromGooglePlaces(startLoc, destination).catch(() => null),
-    startLoc === endLoc
+    fetchCoordinateFromGooglePlaces(startLocForCalc, destination).catch(() => null),
+    startLocForCalc === endLocForCalc
       ? Promise.resolve(null)
-      : fetchCoordinateFromGooglePlaces(endLoc, destination).catch(() => null),
+      : fetchCoordinateFromGooglePlaces(endLocForCalc, destination).catch(() => null),
   ]);
-  const resolvedEndCoords = startLoc === endLoc ? startCoords : endCoords;
+  const resolvedEndCoords = startLocForCalc === endLocForCalc ? startCoords : endCoords;
 
+  const effectiveStartLoc = userStartLoc || defaultHub;
+  const effectiveEndLoc = userEndLoc || defaultHub;
   const enrichedWizardData = {
     ...wizardData,
-    startLocation: startLoc,
-    endLocation: endLoc,
+    startLocation: effectiveStartLoc,
+    endLocation: effectiveEndLoc,
     startCoords: startCoords || null,
     endCoords: resolvedEndCoords || null,
   };
@@ -3256,19 +3466,19 @@ function renderWizard() {
   } else if (wizStep===1) {
     // Step 1：交通 + 偏好（合併）
     const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
-    const startHint = autoHub ? `留空自動設為「${autoHub}」` : '例：台東火車站、民宿名稱、停車場入口';
-    const endHint = autoHub ? `留空自動設為「${autoHub}」` : (isLongTrip(wizData.days) ? '例：台東火車站、知本溫泉飯店' : '例：台東火車站、停車場');
+    const startHint = autoHub ? `留空則自動使用「${autoHub}」` : '可填車站名、停車場或民宿名稱';
+    const endHint = autoHub ? `留空則自動使用「${autoHub}」` : (isLongTrip(wizData.days) ? '可填飯店或車站名稱' : '可填停車場或車站名稱');
     body.innerHTML = `<h3 class="wizard-block-title">🚆 交通 & 旅遊偏好</h3>
       <p class="wizard-block-help">設定交通安排，並選擇興趣方向與風格</p>
       <div class="wizard-field">
-        <label>出發車站 / 集合點</label>
+        <label>出發站點 / 集合地點</label>
         <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">上車或集合的起點車站、停車場或民宿名稱</p>
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">可填車站、停車場或民宿；留空自動使用目的地最近的交通樞紐</p>
       </div>
       <div class="wizard-field">
-        <label>回程車站 / 返回點</label>
+        <label>回程站點 / 返回地點</label>
         <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程結束時要回到的車站或飯店</p>
+        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程結束的返回地點；留空則與出發站點相同</p>
       </div>
       <div class="wizard-field" style="margin-top:16px">
         <label>興趣方向（可複選 2-4 項）<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重，例：選「美食」會多安排餐廳體驗</span></label>
@@ -3522,12 +3732,8 @@ function buildInterestDrivenStops(dest, interests = [], pace = '平衡', startLo
       ? '留更多緩衝時間慢慢體驗。'
       : '維持移動與停留的平衡感。';
 
-  const firstStop = startLocation
-    ? { title: startLocation, desc: `從${startLocation}出發，先確認旅伴與路線重點。` }
-    : { title: `${dest}出發點`, desc: `從集合點出發，先確認旅伴與路線重點。` };
-  const lastStop = endLocation
-    ? { title: endLocation, desc: `返回${endLocation}，完成本次旅程。${paceTail}` }
-    : { title: '溫暖結尾', desc: `回到方便解散的位置，${paceTail}` };
+  const firstStop = { title: startLocation || `${dest}附近車站`, desc: `從${startLocation || dest}出發，先確認旅伴與路線重點。` };
+  const lastStop = { title: endLocation || startLocation || `${dest}附近車站`, desc: `返回${endLocation || startLocation || dest}，完成本次旅程。${paceTail}` };
   return [firstStop, ...middleStops, lastStop];
 }
 
@@ -3544,7 +3750,8 @@ function renderFlowPreview() {
   document.getElementById('themeNote').textContent = `目前主題：${theme}`;
   document.getElementById('flowTitle').textContent = `${dest}・${days}微旅行`;
 
-  const allStops = buildInterestDrivenStops(dest, interests, pace, wizData.startLocation || '', wizData.endLocation || '');
+  const defaultHub = getDefaultTransitHub(dest);
+  const allStops = buildInterestDrivenStops(dest, interests, pace, wizData.startLocation || defaultHub, wizData.endLocation || defaultHub);
   const stopCount = clampPreviewStopsByDuration(days);
   const durationMinutes = getPreviewDurationMinutes(days);
   const previewStops = allStops.slice(0, Math.max(2, stopCount));
@@ -3584,8 +3791,11 @@ function renderFlowPreview() {
 
   const endTime = calcTripEndTime(startTime, days);
   const interestSummary = interests.length ? interests.join('、') : '多元探索';
-  const startLocSummary = wizData.startLocation ? `出發：${wizData.startLocation}` : '';
-  const endLocSummary = wizData.endLocation ? `結束：${wizData.endLocation}` : '';
+  const effectiveHub = getDefaultTransitHub(dest);
+  const effectiveStart = wizData.startLocation || effectiveHub;
+  const effectiveEnd = wizData.endLocation || effectiveHub;
+  const startLocSummary = `出發：${effectiveStart}`;
+  const endLocSummary = effectiveStart !== effectiveEnd ? `結束：${effectiveEnd}` : '';
   const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
   const peopleStr = wizData.people === '1人' ? '獨旅' : `${wizData.people || '2人'}人同行`;
   document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${peopleStr}，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
@@ -3788,10 +3998,24 @@ async function finishWizard() {
   showGenPanel(newTrip.title);
 
   try {
+    addGenLine('> 正在從 Google Maps 查詢可用景點清單…', 'info');
+    setGenPhase('查詢景點中…');
+    const _liveDest = wizData.dest || wizData.destCustom || '';
+    const _liveCenter = getDestinationCenter(_liveDest);
+    const livePlaces = await fetchGoogleMapsPoiList(_liveDest, wizData.interests || [], _liveCenter).catch(() => []);
+    const livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
+    if (livePlaces.length > 0) {
+      addGenLine(`> 已從 Google Maps 取得 ${livePlaces.length} 個景點，交由 AI 安排行程…`, 'info');
+    } else {
+      addGenLine('> 使用備用景點資料，繼續規劃…', 'info');
+    }
+    setGenPhase('AI 規劃行程中…');
+
     let lastNames = [];
     const finalPlan = await requestGeminiMicroTravelPlan(wizData, {
       mode: 'final',
-      includeFirebase: true,
+      includeFirebase: livePlaces.length === 0,
+      livePoiHint,
       useStreaming: true,
       onChunk: (_chunk, fullText) => {
         const names = extractNamesFromStream(fullText);
@@ -3805,11 +4029,11 @@ async function finishWizard() {
       }
     });
 
-    addGenLine('> AI 生成完畢，正在驗證景點與地圖資訊…', 'info');
-    setGenPhase('驗證地圖資訊中…');
+    addGenLine('> AI 已安排行程，正在對應地圖座標…', 'info');
+    setGenPhase('對應地圖資訊中…');
 
     if (finalPlan && finalPlan.stops) {
-      newTrip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wizData);
+      newTrip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wizData, livePlaces);
       newTrip.aiTitle = finalPlan.title || newTrip.title;
       newTrip.aiReply = finalPlan.reply || '';
     }

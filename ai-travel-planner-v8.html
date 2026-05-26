@@ -671,6 +671,76 @@ body.prototype-mode .prototype-id-chip {
   color: #ad4e1f;
 }
 
+.replan-inline-btn.visited-toggle-btn.visited {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-color: #a5d6a7;
+}
+
+.travellog-region {
+  margin-bottom: 20px;
+}
+.travellog-region-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink2);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.travellog-spots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.travellog-spot-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 14px;
+}
+.travellog-spot-emoji {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+.travellog-spot-info {
+  flex: 1;
+  min-width: 0;
+}
+.travellog-spot-name {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.travellog-spot-meta {
+  display: block;
+  font-size: 11px;
+  color: var(--ink2);
+  margin-top: 2px;
+}
+.travellog-remove-btn {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink3, #bbb);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 8px;
+  line-height: 1;
+}
+.travellog-remove-btn:hover {
+  background: #fdecea;
+  color: #c62828;
+}
+
 .modify-overlay {
   position: fixed;
   inset: 0;
@@ -1475,6 +1545,18 @@ body.prototype-mode .prototype-id-chip {
 .tag { font-size: 11px; padding: 4px 10px; border-radius: 8px; font-weight: 600; background: var(--surface2); color: var(--ink2); }
 .stop-hours-row { font-size: 11px; color: var(--ink2); margin-bottom: 4px; }
 .stop-dur-select{font-size:11px;border:1px solid var(--border);border-radius:6px;padding:2px 6px;background:var(--surface2,#f4f8fb);color:var(--ink2);cursor:pointer;}
+.stay-time-tag{font-size:11px;padding:4px 10px;border-radius:8px;font-weight:600;background:var(--surface2);color:var(--ink2);}
+.stay-edit-btn{font-size:11px;padding:3px 8px;border-radius:8px;border:1px dashed var(--border);background:transparent;color:var(--ink2);cursor:pointer;line-height:1.4;vertical-align:middle;}
+.stay-edit-btn:hover{background:var(--accent-light);border-color:var(--accent);color:var(--accent-dark);}
+#stayModal{position:fixed;inset:0;z-index:9000;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.45);padding:16px;}
+.stay-modal-box{background:var(--surface);border-radius:24px 24px 18px 18px;width:100%;max-width:480px;padding:24px 20px 28px;box-shadow:0 -8px 40px rgba(0,0,0,.18);}
+.stay-modal-title{font-size:16px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+.stay-modal-sub{font-size:12px;color:var(--ink3);margin-bottom:18px;}
+.stay-modal-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;}
+.stay-opt-btn{padding:10px 0;border-radius:12px;border:1.5px solid var(--border);background:var(--surface2);color:var(--ink2);font-size:13px;font-weight:600;cursor:pointer;text-align:center;}
+.stay-opt-btn.active{border-color:var(--accent);background:var(--accent-light);color:var(--accent-dark);}
+.stay-opt-btn:hover:not(.active){background:var(--surface);border-color:var(--accent);}
+.stay-modal-cancel{width:100%;padding:12px;border-radius:14px;border:none;background:var(--surface2);color:var(--ink2);font-size:14px;font-weight:600;cursor:pointer;}
 .transit-block { margin: 12px 0 12px 64px; padding: 12px 16px; background: var(--surface); border-radius: 14px; border: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--ink2); flex-wrap: wrap; }
 .transit-block-main { min-width: 180px; flex: 1; }
 .transit-mode-wrap { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink3); }
@@ -2622,6 +2704,7 @@ body.prototype-mode .prototype-id-chip {
       <button class="nav-pill" onclick="switchView('budget')">預算</button>
       <button class="nav-pill" onclick="switchView('members')">旅伴</button>
       <button class="nav-pill" onclick="switchView('weather')">天氣</button>
+      <button class="nav-pill" onclick="switchView('travellog')">旅記</button>
       <button class="nav-pill nav-pill-rideflow" onclick="switchView('rideflow')">說明</button>
     </div>
   </div>
@@ -2906,6 +2989,24 @@ body.prototype-mode .prototype-id-chip {
           </div>
         </div>
         <div class="screen-footnote">點選上方任一畫面卡，就能切換下方手機預覽。這一區對應你截圖裡的身份、司機、乘客、改道與回憶等功能流程。</div>
+      </div>
+    </div>
+
+    <div id="view-travellog" class="view-section">
+      <div class="hero-section" style="padding-bottom: 16px;">
+        <div class="hero-title">我的旅遊紀錄</div>
+        <div class="hero-meta">
+          <div class="hero-tag" id="travellog-count">0 個景點</div>
+        </div>
+      </div>
+      <div style="padding: 0 16px 16px;">
+        <p style="font-size:13px;color:var(--ink2);margin-bottom:16px;">已標記的景點會在 AI 重新規劃時自動排除，讓每次旅行都有新體驗。</p>
+        <div id="travellog-list"></div>
+        <div id="travellog-empty" style="text-align:center;padding:48px 16px;color:var(--ink3,#aaa);">
+          <div style="font-size:40px;margin-bottom:12px;">🗺️</div>
+          <div style="font-size:15px;font-weight:600;color:var(--ink2);">還沒有旅遊紀錄</div>
+          <div style="font-size:13px;margin-top:6px;">在行程中點景點，選「📌 去過了」即可加入</div>
+        </div>
       </div>
     </div>
 
@@ -3820,14 +3921,50 @@ body.prototype-mode .prototype-id-chip {
     });
   }
 
+  function isTubanVillageContext(region, title) {
+    const src = `${region || ''} ${title || ''}`.toLowerCase();
+    return ['土坂', '達仁', 'tuban', 'taban', '撒布優'].some(kw => src.includes(kw));
+  }
+
+  const TUBAN_NAME_ALIASES = {
+    '土坂部落入口意象': '土坂公園',
+    '土坂入口意象': '土坂公園',
+    '部落入口意象': '土坂公園',
+    '土坂部落五年祭會場': 'Tjuwabar Maljeveq祭場',
+    '五年祭會場': 'Tjuwabar Maljeveq祭場',
+    '土坂五年祭會場': 'Tjuwabar Maljeveq祭場',
+    '土坂部落祭場': 'Tjuwabar Maljeveq祭場',
+    '土坂祭場': 'Tjuwabar Maljeveq祭場',
+    'Maljeveq祭場': 'Tjuwabar Maljeveq祭場',
+  };
+
+  function resolveTubanAlias(name) {
+    if (!name) return name;
+    if (TUBAN_NAME_ALIASES[name]) return TUBAN_NAME_ALIASES[name];
+    const lower = name.toLowerCase();
+    for (const [key, val] of Object.entries(TUBAN_NAME_ALIASES)) {
+      if (lower.includes(key.toLowerCase()) || key.toLowerCase().includes(lower)) return val;
+    }
+    return name;
+  }
+
   function buildStopSearchTerms(stop, region, title = '', presetMatch = null) {
-    const name = String(stop?.name || '').trim();
+    const rawName = String(stop?.name || '').trim();
+    const name = isTubanVillageContext(String(region || ''), String(title || ''))
+      ? resolveTubanAlias(rawName)
+      : rawName;
     const regionName = String(region || '').trim();
     const titleName = String(title || '').trim();
     const terms = new Set();
     if (name) terms.add(name);
     if (name && regionName) terms.add(`${name} ${regionName}`);
     if (name && titleName) terms.add(`${name} ${titleName}`);
+    if (name && isTubanVillageContext(regionName, titleName)) {
+      terms.add(`${name} 土坂達仁`);
+      collectSearchTokens(name).forEach(token => {
+        if (token.length >= 2 && token !== name) terms.add(`${token} 土坂`);
+      });
+    }
     if (!name && regionName) terms.add(regionName);
     return Array.from(terms)
       .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
@@ -3996,6 +4133,35 @@ body.prototype-mode .prototype-id-chip {
     return result;
   }
 
+  async function searchNearbyWithTokens(stop, areaCenter, radius = 4000) {
+    const service = getPlacesService();
+    if (!service || !areaCenter) return null;
+    const tokens = collectSearchTokens(stop?.name, stop?.desc)
+      .filter(t => t.length >= 2)
+      .slice(0, 4);
+
+    for (const token of tokens) {
+      const results = await new Promise(resolve => {
+        service.nearbySearch({
+          location: new google.maps.LatLng(areaCenter.lat, areaCenter.lng),
+          radius,
+          keyword: token
+        }, (res, status) => {
+          const ok = hasGooglePlacesService()
+            ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+          if (status !== ok || !Array.isArray(res) || !res.length) return resolve([]);
+          resolve(res);
+        });
+      });
+
+      if (results.length) {
+        const loc = results[0]?.geometry?.location;
+        if (loc) return { lat: loc.lat(), lng: loc.lng() };
+      }
+    }
+    return null;
+  }
+
   async function refineStopCoordinatesAsync(stop, basePosition, region, title = '', presetMatch = null) {
     if (!basePosition) return null;
 
@@ -4062,6 +4228,11 @@ body.prototype-mode .prototype-id-chip {
   }
 
   async function resolveStopCoordinatesAsync(stop, index, region, title = '') {
+    if (isTubanVillageContext(region, title) && stop && stop.name) {
+      const aliased = resolveTubanAlias(stop.name);
+      if (aliased !== stop.name) stop = { ...stop, name: aliased };
+    }
+
     // 若座標被鎖定（如離島返程本島港口），直接回傳，不觸發 Firebase 或地理編碼
     if (stop._lockedCoordinates) {
       const locked = readCoordinateObject(stop._lockedCoordinates);
@@ -4110,6 +4281,17 @@ body.prototype-mode .prototype-id-chip {
       resolvedSearchPosition = await enforceRegionAwareCoordinates(stop, resolvedSearchPosition, region, title, found);
       await upsertScenicPointRecord(stop, resolvedSearchPosition, region, title);
       return resolvedSearchPosition;
+    }
+
+    const TUBAN_CENTER = { lat: 22.3797, lng: 120.8953 };
+    if (isTubanVillageContext(region, title)) {
+      const nearbyPos = await searchNearbyWithTokens(stop, TUBAN_CENTER, 4000);
+      if (nearbyPos) {
+        await upsertScenicPointRecord(stop, nearbyPos, region, title);
+        return nearbyPos;
+      }
+      await upsertScenicPointRecord(stop, TUBAN_CENTER, region, title);
+      return TUBAN_CENTER;
     }
 
     const center = await resolveTripCenterAsync(region, title);
@@ -5519,6 +5701,12 @@ body.prototype-mode .prototype-id-chip {
     return `${minutesToClock(startMin)} - ${minutesToClock(endMin)}`;
   }
 
+  function isDistanceAbnormallySmall(distanceText) {
+    if (!distanceText) return false;
+    const m = String(distanceText).match(/^(\d+(?:\.\d+)?)\s*公尺/);
+    return !!(m && parseFloat(m[1]) < 100);
+  }
+
   function syncRouteStageScheduleTimes(schedule = buildReplanSchedule()) {
     routeStageCache.forEach((stage, index) => {
       if (!stage) return;
@@ -5893,6 +6081,91 @@ body.prototype-mode .prototype-id-chip {
     schedulePersistTrip();
   }
 
+  function handleToggleVisited(stopId, btn) {
+    const stop = replanStops.find(s => s.id === stopId);
+    if (!stop) return;
+    const nowVisited = toggleVisitedPlace(stop);
+    btn.textContent = nowVisited ? '✓ 已去過' : '📌 去過了';
+    btn.classList.toggle('visited', nowVisited);
+    showVisitedToast(nowVisited ? `${stop.name} 已加入旅遊紀錄` : `${stop.name} 已從旅遊紀錄移除`);
+    const travellogList = document.getElementById('travellog-list');
+    if (travellogList) renderTravelLog();
+  }
+
+  function showVisitedToast(msg) {
+    let el = document.getElementById('visited-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'visited-toast';
+      el.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:9999;pointer-events:none;transition:opacity 0.3s;white-space:nowrap;';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.opacity = '1';
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.opacity = '0'; }, 2200);
+  }
+
+  function refreshStopVisitedButtons() {
+    document.querySelectorAll('.visited-toggle-btn').forEach(btn => {
+      const stopId = btn.dataset.stopId;
+      const stop = replanStops.find(s => s.id === stopId);
+      if (!stop) return;
+      const v = isPlaceVisited(stop.name);
+      btn.textContent = v ? '✓ 已去過' : '📌 去過了';
+      btn.classList.toggle('visited', v);
+    });
+  }
+
+  function renderTravelLog() {
+    const places = getVisitedPlaces();
+    const countEl = document.getElementById('travellog-count');
+    const listEl = document.getElementById('travellog-list');
+    const emptyEl = document.getElementById('travellog-empty');
+    if (!listEl) return;
+
+    if (countEl) countEl.textContent = `${places.length} 個景點`;
+
+    if (places.length === 0) {
+      listEl.innerHTML = '';
+      if (emptyEl) emptyEl.style.display = '';
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+
+    const byRegion = {};
+    places.forEach(p => {
+      const r = p.region || '其他';
+      (byRegion[r] = byRegion[r] || []).push(p);
+    });
+
+    listEl.innerHTML = Object.entries(byRegion).map(([region, spots]) => `
+      <div class="travellog-region">
+        <div class="travellog-region-title">📍 ${region}（${spots.length} 個景點）</div>
+        <div class="travellog-spots">
+          ${spots.map(s => `
+            <div class="travellog-spot-card">
+              <span class="travellog-spot-emoji">${s.emoji || '📍'}</span>
+              <div class="travellog-spot-info">
+                <span class="travellog-spot-name">${s.name}</span>
+                <span class="travellog-spot-meta">${s.visitDate || ''}${s.tripTitle ? ' · ' + s.tripTitle : ''}</span>
+              </div>
+              <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${s.name.replace(/'/g, '&#39;')}')">✕</button>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function removeVisitedPlaceByName(name) {
+    const places = getVisitedPlaces().filter(p => p.name !== name);
+    localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places));
+    renderTravelLog();
+    refreshStopVisitedButtons();
+    showVisitedToast(`${name} 已從旅遊紀錄移除`);
+  }
+
   function toggleStopQuickActions(stopId) {
     const willClose = activeStopMenuId === stopId;
     activeStopMenuId = willClose ? null : stopId;
@@ -6126,6 +6399,7 @@ body.prototype-mode .prototype-id-chip {
         <div class="replan-inline-actions ${activeStopMenuId === stop.id ? 'active' : ''}">
           <button class="replan-inline-btn" onclick="event.stopPropagation(); modifyStopById('${stop.id}')">✎ 修改</button>
           <button class="replan-inline-btn delete" onclick="event.stopPropagation(); removeStopById('${stop.id}')">－ 刪除</button>
+          <button class="replan-inline-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
         </div>
       </div>
     `).join('');
@@ -6203,6 +6477,26 @@ body.prototype-mode .prototype-id-chip {
     const options = new Set(presets);
     options.add(current);
     return Array.from(options).sort((a, b) => a - b);
+  }
+
+  function openStayTimeAdjuster(stopId) {
+    const stop = replanStops.find(s => s.id === stopId);
+    if (!stop) return;
+    document.getElementById('stayModalTitle').textContent = '⏱ 調整停留時間';
+    document.getElementById('stayModalSub').textContent = stop.name || '';
+    const grid = document.getElementById('stayModalGrid');
+    grid.innerHTML = '';
+    [15,30,45,60,90,120,150,180].forEach(m => {
+      const btn = document.createElement('button');
+      btn.className = 'stay-opt-btn' + (stop.stayMin === m ? ' active' : '');
+      btn.textContent = m < 60 ? m + '分' : (m % 60 === 0 ? (m/60) + '小時' : Math.floor(m/60) + '時' + (m%60) + '分');
+      btn.onclick = function() { updateStopStayTime(stopId, m); closeStayModal(); };
+      grid.appendChild(btn);
+    });
+    document.getElementById('stayModal').style.display = 'flex';
+  }
+  function closeStayModal() {
+    document.getElementById('stayModal').style.display = 'none';
   }
 
   function updateStopStayTime(stopId, minutes) {
@@ -6303,7 +6597,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
-                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<select class="stop-dur-select tag" onclick="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${[15,30,45,60,90,120,150,180].map(m => `<option value="${m}"${stop.stayMin===m?' selected':''}>⏱ ${m}分</option>`).join('')}</select>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
@@ -6332,7 +6626,7 @@ body.prototype-mode .prototype-id-chip {
         }
         // 如果有路線距離資訊，一併顯示
         const routeInfo = getRouteStageBySourceStopIndex(index);
-        if (routeInfo && routeInfo.distance) {
+        if (routeInfo && routeInfo.distance && !isDistanceAbnormallySmall(routeInfo.distance)) {
           transitText += ` · 距離 ${routeInfo.distance}`;
         }
         if (routeInfo && getRouteStageTimeText(routeInfo)) {
@@ -6409,6 +6703,8 @@ body.prototype-mode .prototype-id-chip {
       section.classList.remove('active');
     });
     document.getElementById('view-' + viewId).classList.add('active');
+
+    if (viewId === 'travellog') renderTravelLog();
 
     // 手機上的視圖模式邏輯
     if (isMobileLayout()) {
@@ -7213,6 +7509,37 @@ body.prototype-mode .prototype-id-chip {
   }
 
   const BLOCKED_SPOTS_KEY = 'wai_blocked_spots';
+  const VISITED_PLACES_KEY = 'wai_visited_places';
+
+  function getVisitedPlaces() {
+    try { return JSON.parse(localStorage.getItem(VISITED_PLACES_KEY) || '[]'); } catch { return []; }
+  }
+
+  function isPlaceVisited(name) {
+    const norm = (name || '').replace(/\s/g, '').toLowerCase();
+    return getVisitedPlaces().some(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+  }
+
+  function toggleVisitedPlace(stop) {
+    const places = getVisitedPlaces();
+    const norm = (stop.name || '').replace(/\s/g, '').toLowerCase();
+    const idx = places.findIndex(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    if (idx >= 0) {
+      places.splice(idx, 1);
+    } else {
+      places.push({
+        userId: (typeof currentUser !== 'undefined' && currentUser?.id) || null,
+        name: stop.name,
+        region: currentTripRegion || '',
+        visitDate: new Date().toISOString().slice(0, 10),
+        tripId: currentItineraryId || '',
+        tripTitle: currentTripTitle || '',
+        emoji: stop.emoji || '📍'
+      });
+    }
+    localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places));
+    return idx < 0;
+  }
 
   function getBlockedSpotNames(region) {
     try {
@@ -7301,6 +7628,13 @@ body.prototype-mode .prototype-id-chip {
     const blockedHint = blockedSpots.length
       ? `7. 以下景點驗證失敗或不真實，絕對禁止使用：${blockedSpots.join('、')}`
       : null;
+    const visitedInRegion = getVisitedPlaces()
+      .filter(p => !p.region || p.region === dest)
+      .map(p => p.name)
+      .slice(-30);
+    const visitedHint = visitedInRegion.length
+      ? `8. 以下景點用戶已去過，請勿再次安排（可安排附近其他景點）：${visitedInRegion.join('、')}`
+      : null;
     const desiredNote = desiredSpots
       ? `\n⚠️ 用戶特別希望前往：${desiredSpots}。請優先安排這些景點，並圍繞它們規劃行程。`
       : '';
@@ -7328,6 +7662,7 @@ body.prototype-mode .prototype-id-chip {
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
       blockedHint,
+      visitedHint,
       '',
       '【JSON 回傳格式（只回傳 JSON，不加任何說明文字）】',
       '{"title":"行程標題","stops":[{"name":"景點正式名稱","emoji":"📍","time":"HH:MM","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
@@ -7485,10 +7820,16 @@ body.prototype-mode .prototype-id-chip {
 
       if (newStops.length < 2) throw new Error(`驗證後只剩 ${newStops.length} 個有效景點，無法建立行程`);
 
-      const preservedStartStop = replanStops.find(s => s.type === 'start');
+      // 若沒有 type='start' 的注入起點，改以第一站作為錨點保留
+      const preservedStartStop = replanStops.find(s => s.type === 'start') || replanStops[0];
       const preservedEndStop = replanStops.find(s => s.type === 'end');
-      replanStops = newStops;
-      if (preservedStartStop) replanStops.unshift(preservedStartStop);
+      // 過濾掉 AI 新生成中與保留起點重名的站點，避免重複
+      const startNorm = preservedStartStop ? normalizeText(preservedStartStop.name) : '';
+      const filteredNewStops = startNorm
+        ? newStops.filter(s => normalizeText(s.name) !== startNorm)
+        : newStops;
+      replanStops = filteredNewStops;
+      if (preservedStartStop) replanStops.unshift({ ...preservedStartStop, transitMin: null });
       if (preservedEndStop) replanStops.push(preservedEndStop);
       renderReplanBoard();
       refreshRouteDirections();
@@ -9159,7 +9500,7 @@ body.prototype-mode .prototype-id-chip {
             <div class="mobile-route-item-time">${escapeHtml(getRouteStageTimeText(stage) || '時間計算中')}</div>
             <div class="mobile-route-item-name">階段 ${stage.index + 1}：${escapeHtml(stage.origin.name || stage.origin.title)} → ${escapeHtml(stage.destination.name || stage.destination.title)}</div>
           </div>
-          <div class="mobile-route-item-meta">${escapeHtml(getTransitModeMeta(stage.mode).icon)} ${escapeHtml(getTransitModeMeta(stage.mode).label)} · ${escapeHtml(stage.distance || '距離計算中')} · ${escapeHtml(getRouteStageTimeText(stage) || '路線時間計算中')}</div>
+          <div class="mobile-route-item-meta">${escapeHtml(getTransitModeMeta(stage.mode).icon)} ${escapeHtml(getTransitModeMeta(stage.mode).label)} · ${escapeHtml((!stage.distance || isDistanceAbnormallySmall(stage.distance)) ? '距離計算中' : stage.distance)} · ${escapeHtml(getRouteStageTimeText(stage) || '路線時間計算中')}</div>
         </div>
         <div class="mobile-route-item-badge">${activeRouteStage === stage.index ? '聚焦中' : '點看'}</div>
       </button>
@@ -9249,7 +9590,7 @@ body.prototype-mode .prototype-id-chip {
       destination: locations[index + 1],
       sourceStopIndex: origin.stopIndex,
       destinationStopIndex: locations[index + 1].stopIndex,
-      mode: schedule[origin.stopIndex] ? normalizeTransitMode(schedule[origin.stopIndex].transitMode) : 'walk',
+      mode: schedule[origin.stopIndex] ? normalizeTransitMode(schedule[origin.stopIndex].transitMode) : 'car',
       distance: '',
       duration: '',
       departureMin: null,
@@ -9386,7 +9727,7 @@ body.prototype-mode .prototype-id-chip {
                 階段 ${i + 1}：${origin.name || origin.title} ➔ ${destination.name || destination.title}
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
-                ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'} · 距離：${legEstimate.distanceText} · 預估 ${legEstimate.durationText}
+                ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
               </div>
             `;
 
@@ -9576,6 +9917,14 @@ body.prototype-mode .prototype-id-chip {
       <button class="img-lightbox-btn" onclick="downloadFromLightbox()">↓ 下載</button>
       <button class="img-lightbox-btn" onclick="shareGeneratedImage()">↗ 分享</button>
     </div>
+  </div>
+</div>
+<div id="stayModal" style="display:none" onclick="if(event.target===this)closeStayModal()">
+  <div class="stay-modal-box">
+    <div class="stay-modal-title" id="stayModalTitle">⏱ 調整停留時間</div>
+    <div class="stay-modal-sub" id="stayModalSub"></div>
+    <div class="stay-modal-grid" id="stayModalGrid"></div>
+    <button class="stay-modal-cancel" onclick="closeStayModal()">取消</button>
   </div>
 </div>
 </body>
