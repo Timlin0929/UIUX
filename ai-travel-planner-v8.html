@@ -3281,7 +3281,7 @@ body.prototype-mode .prototype-id-chip {
       keywords: ['台東', 'taitung', '三仙台', '成功', '池上', '關山', '鹿野', '太麻里', '東河', '長濱', '海端', '卑南', '土坂', '達仁', '金峰', '富岡', '比西里岸'],
       center: { lat: 22.7583, lng: 121.1444 },
       spots: [
-        { keywords: ['台東車站', '車站', 'taitung station', 'station'], lat: 22.79323, lng: 121.12373, isHub: true },
+        { keywords: ['台東車站', 'taitung station'], lat: 22.79323, lng: 121.12373, isHub: true },
         { keywords: ['鐵花', '鐵花村', '音樂聚落', 'tiehua', 'tiehua village'], lat: 22.75463, lng: 121.14581 },
         { keywords: ['海濱公園', '海濱', '濱海公園', 'seaside park', 'waterfront park'], lat: 22.76191, lng: 121.15756 },
         { keywords: ['森林公園', '台東森林公園', 'forest park', 'taitung forest park'], lat: 22.76773, lng: 121.15492 },
@@ -3490,54 +3490,6 @@ body.prototype-mode .prototype-id-chip {
     return preset.spots.find((spot) =>
       spot.keywords.some((keyword) => stopText.includes(keyword.toLowerCase()))
     ) || null;
-  }
-
-  // Step 2.5：若 AI 把起終點放到離景點群很遠的樞紐（例如三仙台行程選了 40km 外的台東車站），
-  // 改用 preset 內離景點群重心最近的「樞紐型景點」(isHub: true)。
-  // 回傳 { swapped: [{type, fromName, toName, toLat, toLng}, ...] } 或 null。
-  function autoPickClosestHub(stops, region, title = '') {
-    if (!Array.isArray(stops) || stops.length < 2) return null;
-    const preset = findRegionMapPreset(region, title);
-    if (!preset) return null;
-    const hubs = (preset.spots || []).filter(sp => sp.isHub);
-    if (!hubs.length) return null;
-
-    // 中段景點重心（非 start/end，且要有有效座標）
-    const midStops = stops.filter(s => s.type !== 'start' && s.type !== 'end'
-      && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)));
-    if (midStops.length === 0) return null;
-    const center = {
-      lat: midStops.reduce((sum, s) => sum + Number(s.lat), 0) / midStops.length,
-      lng: midStops.reduce((sum, s) => sum + Number(s.lng), 0) / midStops.length
-    };
-
-    // 從樞紐中挑離重心最近的
-    const ranked = hubs
-      .map(h => ({ hub: h, distance: measureDistanceMeters(center, { lat: h.lat, lng: h.lng }) }))
-      .sort((a, b) => a.distance - b.distance);
-    const closest = ranked[0];
-    if (!closest || closest.distance > 10000) return null;
-
-    // 評估 AI 原本選的起終點是否太遠
-    const swapped = [];
-    ['start', 'end'].forEach(type => {
-      const s = stops.find(x => x.type === type);
-      if (!s) return;
-      const aiCoord = Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))
-        ? { lat: Number(s.lat), lng: Number(s.lng) } : null;
-      if (!aiCoord) return;
-      const aiDistance = measureDistanceMeters(center, aiCoord);
-      if (aiDistance > 20000 && closest.distance < aiDistance - 5000) {
-        swapped.push({
-          type,
-          fromName: s.name || '原起終點',
-          toName: closest.hub.keywords[0],
-          toLat: closest.hub.lat,
-          toLng: closest.hub.lng
-        });
-      }
-    });
-    return swapped.length ? { swapped, hub: closest.hub, center } : null;
   }
 
   function resolveTdxCounty(region, title = '') {
@@ -4656,26 +4608,6 @@ body.prototype-mode .prototype-id-chip {
             const dedupedStops = deduplicateAdjacentTripStops(trip.stops);
             const islandConfig = getIslandFerryConfig(trip.region);
             const normalizedStops = islandConfig ? normalizeIslandHarborStops(dedupedStops, islandConfig) : dedupedStops;
-
-            // Step 2.5：若 AI 把起終點放到離景點群很遠的樞紐（例如三仙台行程選了 40km 外的台東車站），
-            // 用 preset 內最靠近景點群重心的「樞紐型景點」自動替換，避免行程動線拉太長。
-            const _hubSwap = islandConfig ? null : autoPickClosestHub(normalizedStops, trip.region, currentTripTitle);
-            if (_hubSwap && _hubSwap.swapped.length) {
-              normalizedStops.forEach((s) => {
-                const swap = _hubSwap.swapped.find(w => w.type === s.type);
-                if (!swap) return;
-                s.name = swap.toName;
-                s.lat = swap.toLat;
-                s.lng = swap.toLng;
-                if (s.scenicCoordinates) s.scenicCoordinates = { lat: swap.toLat, lng: swap.toLng };
-              });
-              const fromName = _hubSwap.swapped[0].fromName;
-              const toName = _hubSwap.swapped[0].toName;
-              if (typeof showVisitedToast === 'function') {
-                showVisitedToast(`考量景點分布，已把起終點從「${fromName}」改為「${toName}」`);
-              }
-              console.info('[hubSwap]', _hubSwap);
-            }
 
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
