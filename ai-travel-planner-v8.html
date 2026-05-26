@@ -677,6 +677,40 @@ body.prototype-mode .prototype-id-chip {
   border-color: #a5d6a7;
 }
 
+.stay-edit-btn.visited-toggle-btn.visited {
+  background: #e8f5e9;
+  border-style: solid;
+  border-color: #a5d6a7;
+  color: #2e7d32;
+}
+
+.mic-visited-row {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+.mic-visited-btn {
+  background: var(--surface2, #f4f8fb);
+  border: 1px dashed var(--border, #d4dbe6);
+  color: var(--ink2, #4a5568);
+  padding: 8px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mic-visited-btn:hover {
+  background: #fff4e6;
+  border-color: #ffb84d;
+  color: #8c4a00;
+}
+.mic-visited-btn.visited {
+  background: #e8f5e9;
+  border-style: solid;
+  border-color: #a5d6a7;
+  color: #2e7d32;
+}
+
 .travellog-region {
   margin-bottom: 20px;
 }
@@ -3049,6 +3083,9 @@ body.prototype-mode .prototype-id-chip {
           <span>⚠️</span>
           <span id="micNotice">這裡會顯示注意事項。</span>
         </div>
+        <div class="mic-visited-row" id="micVisitedRow" style="display:none;">
+          <button class="mic-visited-btn visited-toggle-btn" id="micVisitedBtn" type="button">📌 去過了</button>
+        </div>
       </div>
     </div>
   </aside>
@@ -3241,15 +3278,15 @@ body.prototype-mode .prototype-id-chip {
   };
   const REGION_MAP_PRESETS = [
     {
-      keywords: ['台東', 'taitung'],
+      keywords: ['台東', 'taitung', '三仙台', '成功', '池上', '關山', '鹿野', '太麻里', '東河', '長濱', '海端', '卑南', '土坂', '達仁', '金峰', '富岡', '比西里岸'],
       center: { lat: 22.7583, lng: 121.1444 },
       spots: [
-        { keywords: ['台東車站', '車站', 'taitung station', 'station'], lat: 22.79323, lng: 121.12373 },
+        { keywords: ['台東車站', '車站', 'taitung station', 'station'], lat: 22.79323, lng: 121.12373, isHub: true },
         { keywords: ['鐵花', '鐵花村', '音樂聚落', 'tiehua', 'tiehua village'], lat: 22.75463, lng: 121.14581 },
         { keywords: ['海濱公園', '海濱', '濱海公園', 'seaside park', 'waterfront park'], lat: 22.76191, lng: 121.15756 },
         { keywords: ['森林公園', '台東森林公園', 'forest park', 'taitung forest park'], lat: 22.76773, lng: 121.15492 },
         { keywords: ['正氣路', '夜市', '觀光夜市', 'night market', 'zhengqi'], lat: 22.75268, lng: 121.14657 },
-        { keywords: ['富岡', '漁港', 'fugang', 'harbor', 'harbour'], lat: 22.79088, lng: 121.18735 },
+        { keywords: ['富岡', '漁港', 'fugang', 'harbor', 'harbour'], lat: 22.79088, lng: 121.18735, isHub: true },
         { keywords: ['土坂', '達仁', '撒布優', 'taban'], lat: 22.3797, lng: 120.8953 },
         { keywords: ['金峰', '歷坵', '嘉蘭', 'jinfeng'], lat: 22.5091, lng: 120.8897 },
         { keywords: ['海端', '霧鹿', '利稻', 'haiduan'], lat: 23.0583, lng: 121.0408 },
@@ -3260,7 +3297,15 @@ body.prototype-mode .prototype-id-chip {
         { keywords: ['卑南', '初鹿', '泰安', 'beinan'], lat: 22.7020, lng: 121.0779 },
         { keywords: ['太麻里', '多良', 'taimali'], lat: 22.6103, lng: 121.0194 },
         { keywords: ['東河', '泰源', 'donghe'], lat: 23.1057, lng: 121.3502 },
-        { keywords: ['成功', '三仙台', 'chenggong'], lat: 23.0965, lng: 121.3691 }
+        { keywords: ['成功', '三仙台', 'chenggong'], lat: 23.0965, lng: 121.3691 },
+        { keywords: ['成功車站', '成功站', 'chenggong station'], lat: 23.0992, lng: 121.3819, isHub: true },
+        { keywords: ['池上車站', '池上站', 'chishang station'], lat: 23.1228, lng: 121.2153, isHub: true },
+        { keywords: ['關山車站', '關山站', 'guanshan station'], lat: 23.0473, lng: 121.1659, isHub: true },
+        { keywords: ['鹿野車站', '鹿野站', 'luye station'], lat: 22.9148, lng: 121.1276, isHub: true },
+        { keywords: ['太麻里車站', '太麻里站', 'taimali station'], lat: 22.6113, lng: 121.0067, isHub: true },
+        { keywords: ['多良車站', '多良站', 'duoliang station'], lat: 22.5575, lng: 120.9580, isHub: true },
+        { keywords: ['大武車站', '大武站', 'dawu station'], lat: 22.3563, lng: 120.9028, isHub: true },
+        { keywords: ['比西里岸', '比西里岸部落', 'pisirian'], lat: 23.1199, lng: 121.4136 }
       ]
     },
     {
@@ -3445,6 +3490,54 @@ body.prototype-mode .prototype-id-chip {
     return preset.spots.find((spot) =>
       spot.keywords.some((keyword) => stopText.includes(keyword.toLowerCase()))
     ) || null;
+  }
+
+  // Step 2.5：若 AI 把起終點放到離景點群很遠的樞紐（例如三仙台行程選了 40km 外的台東車站），
+  // 改用 preset 內離景點群重心最近的「樞紐型景點」(isHub: true)。
+  // 回傳 { swapped: [{type, fromName, toName, toLat, toLng}, ...] } 或 null。
+  function autoPickClosestHub(stops, region, title = '') {
+    if (!Array.isArray(stops) || stops.length < 2) return null;
+    const preset = findRegionMapPreset(region, title);
+    if (!preset) return null;
+    const hubs = (preset.spots || []).filter(sp => sp.isHub);
+    if (!hubs.length) return null;
+
+    // 中段景點重心（非 start/end，且要有有效座標）
+    const midStops = stops.filter(s => s.type !== 'start' && s.type !== 'end'
+      && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)));
+    if (midStops.length === 0) return null;
+    const center = {
+      lat: midStops.reduce((sum, s) => sum + Number(s.lat), 0) / midStops.length,
+      lng: midStops.reduce((sum, s) => sum + Number(s.lng), 0) / midStops.length
+    };
+
+    // 從樞紐中挑離重心最近的
+    const ranked = hubs
+      .map(h => ({ hub: h, distance: measureDistanceMeters(center, { lat: h.lat, lng: h.lng }) }))
+      .sort((a, b) => a.distance - b.distance);
+    const closest = ranked[0];
+    if (!closest || closest.distance > 10000) return null;
+
+    // 評估 AI 原本選的起終點是否太遠
+    const swapped = [];
+    ['start', 'end'].forEach(type => {
+      const s = stops.find(x => x.type === type);
+      if (!s) return;
+      const aiCoord = Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))
+        ? { lat: Number(s.lat), lng: Number(s.lng) } : null;
+      if (!aiCoord) return;
+      const aiDistance = measureDistanceMeters(center, aiCoord);
+      if (aiDistance > 20000 && closest.distance < aiDistance - 5000) {
+        swapped.push({
+          type,
+          fromName: s.name || '原起終點',
+          toName: closest.hub.keywords[0],
+          toLat: closest.hub.lat,
+          toLng: closest.hub.lng
+        });
+      }
+    });
+    return swapped.length ? { swapped, hub: closest.hub, center } : null;
   }
 
   function resolveTdxCounty(region, title = '') {
@@ -4563,6 +4656,27 @@ body.prototype-mode .prototype-id-chip {
             const dedupedStops = deduplicateAdjacentTripStops(trip.stops);
             const islandConfig = getIslandFerryConfig(trip.region);
             const normalizedStops = islandConfig ? normalizeIslandHarborStops(dedupedStops, islandConfig) : dedupedStops;
+
+            // Step 2.5：若 AI 把起終點放到離景點群很遠的樞紐（例如三仙台行程選了 40km 外的台東車站），
+            // 用 preset 內最靠近景點群重心的「樞紐型景點」自動替換，避免行程動線拉太長。
+            const _hubSwap = islandConfig ? null : autoPickClosestHub(normalizedStops, trip.region, currentTripTitle);
+            if (_hubSwap && _hubSwap.swapped.length) {
+              normalizedStops.forEach((s) => {
+                const swap = _hubSwap.swapped.find(w => w.type === s.type);
+                if (!swap) return;
+                s.name = swap.toName;
+                s.lat = swap.toLat;
+                s.lng = swap.toLng;
+                if (s.scenicCoordinates) s.scenicCoordinates = { lat: swap.toLat, lng: swap.toLng };
+              });
+              const fromName = _hubSwap.swapped[0].fromName;
+              const toName = _hubSwap.swapped[0].toName;
+              if (typeof showVisitedToast === 'function') {
+                showVisitedToast(`考量景點分布，已把起終點從「${fromName}」改為「${toName}」`);
+              }
+              console.info('[hubSwap]', _hubSwap);
+            }
+
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
 
@@ -4599,7 +4713,22 @@ body.prototype-mode .prototype-id-chip {
               let resolvedPosition;
               let scenicRecord = null;
               if ((s.type === 'start' || s.type === 'end') && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) {
-                resolvedPosition = { lat: Number(s.lat), lng: Number(s.lng) };
+                const aiCoord = { lat: Number(s.lat), lng: Number(s.lng) };
+                // Step 2：preset 座標校正 — AI hallucinate 出錯誤的車站座標時，用 preset 內已驗證的座標把它 snap 回正確位置
+                const presetSpot = findPresetSpotMatch(s, trip.region, currentTripTitle);
+                if (presetSpot && measureDistanceMeters(aiCoord, { lat: presetSpot.lat, lng: presetSpot.lng }) > 3000) {
+                  console.info('[start/end coord snap]', s.name, 'AI:', aiCoord, '→ preset:', presetSpot);
+                  resolvedPosition = { lat: presetSpot.lat, lng: presetSpot.lng };
+                } else if (!presetSpot && isCoordinatesOutsideRegion(aiCoord, trip.region, currentTripTitle)) {
+                  // 沒有 preset 比對基準，但 AI 給的座標已超出 region 範圍 → 落到下方完整解析流程
+                  scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
+                  const cachedCoords = scenicRecord?.scenicCoordinates;
+                  resolvedPosition = (cachedCoords && !isCoordinatesOutsideRegion(cachedCoords, trip.region, s.name))
+                    ? cachedCoords
+                    : await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
+                } else {
+                  resolvedPosition = aiCoord;
+                }
               } else {
                 scenicRecord = await resolveScenicPointRecord(s, trip.region, currentTripTitle);
                 const cachedCoords = scenicRecord?.scenicCoordinates;
@@ -6085,8 +6214,16 @@ body.prototype-mode .prototype-id-chip {
     const stop = replanStops.find(s => s.id === stopId);
     if (!stop) return;
     const nowVisited = toggleVisitedPlace(stop);
-    btn.textContent = nowVisited ? '✓ 已去過' : '📌 去過了';
-    btn.classList.toggle('visited', nowVisited);
+    const label = nowVisited ? '✓ 已去過' : '📌 去過了';
+    // 同步更新所有 view 中同一景點的「去過了」按鈕（replan 卡片、planned timeline、pin info）
+    document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stopId}"]`).forEach(b => {
+      b.textContent = label;
+      b.classList.toggle('visited', nowVisited);
+    });
+    if (btn && !btn.dataset.stopId) {
+      btn.textContent = label;
+      btn.classList.toggle('visited', nowVisited);
+    }
     showVisitedToast(nowVisited ? `${stop.name} 已加入旅遊紀錄` : `${stop.name} 已從旅遊紀錄移除`);
     const travellogList = document.getElementById('travellog-list');
     if (travellogList) renderTravelLog();
@@ -6597,7 +6734,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
-                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button><button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
@@ -7368,6 +7505,24 @@ body.prototype-mode .prototype-id-chip {
       };
     }
 
+    // 防呆：若 template 化推薦名稱剛好撞到行程中既有景點 / 已去過 / 被封鎖名單，回退到基本「在地輕食小店」
+    const recName = template.recommendation?.stop?.name;
+    if (recName) {
+      const recNorm = (recName || '').replace(/\s/g, '').toLowerCase();
+      const conflicts = findDuplicateStopByName(recName)
+        || (typeof isPlaceVisited === 'function' && isPlaceVisited(recName))
+        || ((typeof getBlockedSpotNames === 'function')
+            && getBlockedSpotNames(currentTripRegion || '').some(n => n.replace(/\s/g, '').toLowerCase() === recNorm));
+      if (conflicts) {
+        template.recommendation = {
+          title: `順路補給：${signals.region} 在地輕食小店`,
+          subtitle: `步行 4 分鐘 · 停留 20 分鐘 · 適合目前節奏`,
+          stop: { name: `${signals.region} 在地輕食小店`, emoji: '🥪', stayMin: 20 },
+          insertBefore: null
+        };
+      }
+    }
+
     return template;
   }
 
@@ -7393,6 +7548,71 @@ body.prototype-mode .prototype-id-chip {
     appendAiMessage('ai', welcome.intro, welcome.recommendation);
   }
 
+  // 推薦景點驗證失敗時的備援：用 Google Places 在目的地附近找一個可信景點
+  async function findNearbyFallbackStop(originalStop, region, title) {
+    const service = getPlacesService();
+    if (!service || !region) return null;
+
+    const center = await resolveTripCenterAsync(region, title);
+    if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) return null;
+
+    const norm = (s) => String(s || '').replace(/\s/g, '').toLowerCase();
+    const existing = new Set(replanStops.map(s => norm(s.name)));
+    const visited = new Set(getVisitedPlaces().map(p => norm(p.name)));
+    const blocked = new Set((getBlockedSpotNames(region) || []).map(norm));
+
+    // 從原推薦的 desc/emoji 抓關鍵字作為 fallback 搜尋方向
+    const desc = String(originalStop?.desc || originalStop?.name || '');
+    const hintMap = [
+      ['散步', '景觀'], ['步道', '步道'], ['瀑布', '瀑布'], ['咖啡', '咖啡'],
+      ['美食', '餐廳'], ['夜市', '夜市'], ['海', '海邊'], ['公園', '公園'],
+      ['溫泉', '溫泉'], ['拍照', '景觀'], ['文化', '文化景點']
+    ];
+    const matched = hintMap.find(([kw]) => desc.includes(kw));
+    const queries = matched
+      ? [`${region} ${matched[1]}`, `${region} 熱門景點`]
+      : [`${region} 熱門景點`, `${region} 景點`];
+
+    const okStatus = () => hasGooglePlacesService()
+      ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+
+    for (const q of queries) {
+      const results = await new Promise((resolve) => {
+        service.textSearch({
+          query: q,
+          location: new google.maps.LatLng(center.lat, center.lng),
+          radius: 8000
+        }, (res, status) => {
+          if (status !== okStatus() || !Array.isArray(res)) return resolve([]);
+          resolve(res);
+        });
+      });
+
+      for (const place of results) {
+        const name = place.name || '';
+        if (!name) continue;
+        const key = norm(name);
+        if (existing.has(key) || visited.has(key) || blocked.has(key)) continue;
+        const loc = place.geometry?.location;
+        if (!loc) continue;
+        const pos = { lat: loc.lat(), lng: loc.lng() };
+        if (isCoordinatesOutsideRegion(pos, region, title)) continue;
+
+        return {
+          emoji: originalStop?.emoji || '📍',
+          name,
+          desc: place.formatted_address || '由附近熱門景點推薦',
+          stayMin: originalStop?.stayMin || 30,
+          transitMin: originalStop?.transitMin || null,
+          transitMode: originalStop?.transitMode || null,
+          scenicCoordinates: pos
+        };
+      }
+    }
+
+    return null;
+  }
+
   async function handleAiRecommendationAction(cardData, cardEl) {
     if (!cardData || !cardData.stop) return;
 
@@ -7413,9 +7633,36 @@ body.prototype-mode .prototype-id-chip {
         renderReplanBoard();
         refreshRouteDirections();
         appendAiMessage('ai', `這個推薦我已經先放在你的行程裡了，我幫你定位到「${duplicate.name}」，可以直接微調順序或時間。`);
-      } else {
-        appendAiMessage('ai', `這張推薦目前沒有成功加入，請再點一次或直接告訴我你想怎麼調整。`);
+        return;
       }
+
+      // 原推薦驗證失敗（Google Places 查不到）→ 改推目的地附近的熱門景點
+      const fallback = await findNearbyFallbackStop(cardData.stop, currentTripRegion, currentTripTitle);
+      if (fallback) {
+        const fallbackResult = await applyAiItineraryActions([{
+          type: 'add_stop',
+          stop: fallback,
+          insertBefore: cardData.insertBefore,
+          insertAfter: cardData.insertAfter
+        }]);
+        if (fallbackResult.changed) {
+          isReplanning = true;
+          const insertedFallback = findDuplicateStopByName(fallback.name);
+          if (insertedFallback) activeStopMenuId = insertedFallback.id;
+          updateItineraryStageUI();
+          renderReplanBoard();
+          refreshRouteDirections();
+          appendAiMessage('ai', `「${addedName}」在 Google 地圖上找不到對應的景點座標，我幫你改推附近的「${fallback.name}」，可以直接調整看看。`);
+          logTripEvent('chat_recommendation_fallback_applied', {
+            original: addedName,
+            fallback: fallback.name,
+            itinerary: buildItinerarySnapshot()
+          });
+          return;
+        }
+      }
+
+      appendAiMessage('ai', `「${addedName}」目前沒有成功加入，附近也找不到合適的替代景點，請再點一次或直接告訴我你想怎麼調整。`);
       return;
     }
 
@@ -7463,6 +7710,7 @@ body.prototype-mode .prototype-id-chip {
       '【廁所座標】新增景點時，請同時提供 "廁所座標" 陣列（最多 3 個附近廁所），格式為 [{"name": "廁所正式名稱", "lat": 數字, "lng": 數字, "address": "地址或位置描述", "source": "資料來源", "confidence": "high|medium"}, ...]。',
       '【廁所座標精度】廁所 lat/lng 必須是實際廁所/公廁入口或設施點位的 WGS84 decimal degrees，至少 6 位小數，且距離該景點 500 公尺內；不得用景點座標、停車場、行政區中心、道路中心或概略區域座標替代。',
       '【廁所座標查證】若無法確認廁所名稱與座標互相對應，或資料來源互相矛盾，請保留廁所 name/address 但省略 lat/lng；完全無可信資料時傳空陣列 []。',
+      '【去重指令】推薦景點時，必須先檢查 context 中「已在行程中」的禁止清單，禁止推薦清單上的景點。如使用者要求更換現有景點，請用 "replace_stop" 而非 "add_stop"。',
       'JSON 格式：',
       '{',
       '  "reply": "給使用者看的自然語句",',
@@ -7607,7 +7855,7 @@ body.prototype-mode .prototype-id-chip {
     ].join('\n');
   }
 
-  function buildAiReplanPrompt(wizardData) {
+  function buildAiReplanPrompt(wizardData, livePoiHint = '') {
     const dest = wizardData.dest || wizardData.destCustom || currentTripRegion || '台東';
     const days = wizardData.days || '1天';
     const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
@@ -7653,6 +7901,7 @@ body.prototype-mode .prototype-id-chip {
       startLoc ? `出發車站：${startLoc}` : null,
       endLoc ? `回程車站：${endLoc}` : null,
       desiredSpots ? desiredNote : null,
+      livePoiHint ? livePoiHint : null,
       '',
       '【規劃規則】',
       `1. 必須包含 ${min}–${max} 個主要景點`,
@@ -7681,10 +7930,13 @@ body.prototype-mode .prototype-id-chip {
 
     const planningList = document.getElementById('replanSortableList');
     const totalTimeEl = document.getElementById('replanTotalWindow');
-    if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ AI 正在生成新行程，請稍候…</div>`;
+    if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ 正在從 Google Maps 抓取即時景點…</div>`;
     if (totalTimeEl) totalTimeEl.textContent = '--';
 
     try {
+      const livePoiHint = await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ AI 正在生成新行程，請稍候…</div>`;
+
       const vertex = getVertexConfig();
       let endpoint;
       if (vertex.ready) {
@@ -7699,7 +7951,7 @@ body.prototype-mode .prototype-id-chip {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData) }] }],
+          contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData, livePoiHint) }] }],
           generationConfig: { responseMimeType: 'application/json', temperature: 0.8 }
         })
       });
@@ -7842,7 +8094,7 @@ body.prototype-mode .prototype-id-chip {
     }
   }
 
-  async function requestGeminiTravelPlan(userMessage) {
+  async function requestGeminiTravelPlan(userMessage, livePoiHint = '') {
     const vertex = getVertexConfig();
     let endpoint;
     if (vertex.ready) {
@@ -7853,12 +8105,19 @@ body.prototype-mode .prototype-id-chip {
       endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
     }
 
+    const existingStops = (replanStops || [])
+      .filter(s => s.type !== 'start' && s.type !== 'end')
+      .map(s => s.name);
     const contextBlock = [
       `行程名稱：${currentTripTitle}`,
       `時段：${currentTripWindow.start}-${currentTripWindow.end}`,
       '目前行程：',
-      getReplanSummaryText()
-    ].join('\n');
+      getReplanSummaryText(),
+      existingStops.length
+        ? `\n🚫 以下景點已在行程中，禁止重複推薦（除非使用者明確要求替換）：${existingStops.join('、')}`
+        : '',
+      livePoiHint ? livePoiHint : ''
+    ].filter(Boolean).join('\n');
     const payload = {
       contents: [
         {
@@ -7892,6 +8151,61 @@ body.prototype-mode .prototype-id-chip {
       throw new Error('AI 回傳格式不是有效 JSON。');
     }
     return parsed;
+  }
+
+  async function fetchLiveMapsPoiHintBlock(destination, interests = []) {
+    if (!destination || !hasGooglePlacesService()) return '';
+    const service = getPlacesService();
+    const terms = new Set(['景點', '餐廳']);
+    (interests || []).forEach(interest => {
+      const mapping = {
+        '美食': ['美食', '餐廳', '小吃'],
+        '文化': ['文化', '部落', '工藝'],
+        '自然': ['步道', '自然景觀'],
+        '休閒': ['公園', '景點'],
+        '藝術': ['藝術', '博物館'],
+        '歷史': ['歷史', '古蹟'],
+        '購物': ['市集', '商圈'],
+        '戶外': ['戶外', '山林']
+      };
+      (mapping[interest] || []).forEach(t => terms.add(t));
+    });
+
+    const queries = Array.from(terms).slice(0, 3).map(t => `${destination} ${t}`);
+    const seenNames = new Set();
+    const allPlaces = [];
+
+    for (const query of queries) {
+      const results = await new Promise((resolve) => {
+        service.textSearch({ query, language: 'zh-TW' }, (res, status) => {
+          if (status === google.maps.places.PlacesServiceStatus.OK && res) {
+            resolve(res);
+          } else {
+            resolve([]);
+          }
+        });
+      });
+      for (const place of results.slice(0, 8)) {
+        const name = place.name;
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        allPlaces.push({
+          name,
+          rating: place.rating,
+          address: place.formatted_address || place.vicinity || ''
+        });
+      }
+    }
+    if (allPlaces.length === 0) return '';
+
+    const lines = allPlaces.map(p => {
+      return [
+        `景點名稱：${p.name}`,
+        p.address ? `地址：${p.address}` : '',
+        p.rating ? `評分：${p.rating}` : ''
+      ].filter(Boolean).join('\n');
+    });
+    return `\n【Google Maps 即時景點清單】\n以下景點已直接從 Google Maps 取得，座標均已驗證。你的任務是依照目前的行程狀態，只能從此清單中挑選景點來推薦或安排行程，禁止自行創造清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
   }
 
   async function handleAiSendMessage() {
@@ -7930,7 +8244,7 @@ body.prototype-mode .prototype-id-chip {
       <div class="chat-avatar">🤖</div>
       <div>
         <div class="chat-bubble" style="display: flex; align-items: center; gap: 8px;">
-          <span>🔄 管家思考中</span>
+          <span id="aiChatLoadingText">🔄 管家思考中</span>
           <span style="animation: spin 1s linear infinite;">⏳</span>
         </div>
       </div>
@@ -7942,7 +8256,13 @@ body.prototype-mode .prototype-id-chip {
     }
 
     try {
-      const aiResult = await requestGeminiTravelPlan(userMessage);
+      const loadingTextSpan = document.getElementById('aiChatLoadingText');
+      if (loadingTextSpan) loadingTextSpan.textContent = '🔄 正在從 Google Maps 抓取即時景點…';
+      const dest = currentTripRegion || currentTripTitle || '台灣';
+      const livePoiHint = await fetchLiveMapsPoiHintBlock(dest, currentTripPreferences?.interests || []);
+      if (loadingTextSpan) loadingTextSpan.textContent = '🔄 管家思考中';
+
+      const aiResult = await requestGeminiTravelPlan(userMessage, livePoiHint);
       const applyResult = await applyAiItineraryActions(aiResult.actions || []);
 
       const replyLines = [];
@@ -9819,7 +10139,26 @@ body.prototype-mode .prototype-id-chip {
       micHoursEl.textContent = hoursText;
       micHoursEl.style.display = hoursText ? '' : 'none';
     }
-    
+
+    const matchedStop = Array.isArray(replanStops)
+      ? replanStops.find((s) => s.mapPinId === pinId && s.type !== 'start' && s.type !== 'end')
+      : null;
+    const visitedRow = document.getElementById('micVisitedRow');
+    const visitedBtn = document.getElementById('micVisitedBtn');
+    if (visitedRow && visitedBtn) {
+      if (matchedStop) {
+        const v = isPlaceVisited(matchedStop.name);
+        visitedRow.style.display = '';
+        visitedBtn.dataset.stopId = matchedStop.id;
+        visitedBtn.textContent = v ? '✓ 已去過' : '📌 去過了';
+        visitedBtn.classList.toggle('visited', v);
+        visitedBtn.onclick = (e) => { e.stopPropagation(); handleToggleVisited(matchedStop.id, visitedBtn); };
+      } else {
+        visitedRow.style.display = 'none';
+        visitedBtn.onclick = null;
+      }
+    }
+
     // 顯示卡片
     document.getElementById('mapInfoCard').classList.add('show');
     

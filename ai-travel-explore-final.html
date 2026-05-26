@@ -1679,7 +1679,7 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
     ? (await prefetchFirebasePoiHint(wizardData).catch(() => ''))
     : '';
 
-  const livePoiBlock = (includeFirebase && !firebasePromptBlock && options.livePoiHint !== undefined)
+  const livePoiBlock = (!firebasePromptBlock && options.livePoiHint !== undefined)
     ? (options.livePoiHint || '')
     : '';
 
