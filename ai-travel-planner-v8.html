@@ -3221,7 +3221,7 @@ body.prototype-mode .prototype-id-chip {
   let posterImageUploadPromise = null;
   let importedTravelPinSerial = 0;
   let replanStopSerial = 0;
-  const GEMINI_MODEL = 'gemini-2.5-flash';
+  const GEMINI_MODEL = 'gemini-3-flash';
   const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
   const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
   const VERTEX_API_BASE = 'https://us-central1-aiplatform.googleapis.com/v1';
@@ -5209,7 +5209,7 @@ body.prototype-mode .prototype-id-chip {
 
     const prompt = buildImagePrompt(character);
     console.log('[行程圖 Prompt]', prompt);
-    const imageModel = 'gemini-3.1-flash-image-preview';
+    const imageModel = 'gemini-3.1-flash-image';
     const vertex = getVertexConfig();
     try {
       const endpoint = vertex.ready
