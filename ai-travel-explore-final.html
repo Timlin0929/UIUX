@@ -1389,6 +1389,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     `時間長度：${wizardData.days || '1天'}（${tripStartTime} ～ ${tripEndTime}，請安排景點填滿此時段）`,
     isSolo ? '旅行方式：獨旅' : `同行人數：${wizardData.people || '2人'}`,
     `行程節奏：${wizardData.pace || '平衡'}`,
+    `主要交通工具：${({ taxi: '計程車', scooter: '機車', car: '汽車' }[wizardData.transportMode]) || '汽車'}（各段移動以此工具為主，短程可步行）`,
     `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
     `旅程風格：${wizardData.theme || '經典旅人'}`,
     wizardData.budget ? `預算：${wizardData.budget}` : null,
@@ -2572,30 +2573,20 @@ function applyTripPlanningRules(stops, wizardData = {}) {
   });
 }
 
-function assignTransportModes(stops) {
-  const VALID_MODES = ['walk', 'scooter', 'car', 'public'];
-  const existingModes = stops
-    .map((s) => String(s.transitMode || s.transportMode || '').trim().toLowerCase())
-    .filter((m) => VALID_MODES.includes(m));
-  const modeCounts = existingModes.reduce((acc, m) => { acc[m] = (acc[m] || 0) + 1; return acc; }, {});
-  const dominantMode = Object.entries(modeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'car';
+function assignTransportModes(stops, preferredMode) {
+  // 依使用者選擇的交通工具（計程車/機車/汽車）統一指派；短程（≤500m）改為步行。
+  const VALID_VEHICLES = ['taxi', 'scooter', 'car'];
+  const vehicle = VALID_VEHICLES.includes(String(preferredMode || '').trim().toLowerCase())
+    ? String(preferredMode).trim().toLowerCase()
+    : 'car';
 
   return stops.map((stop, index) => {
     if (index >= stops.length - 1) return stop;
-    const existing = String(stop.transitMode || stop.transportMode || '').trim().toLowerCase();
     const fromCoord = getStopCoordinate(stop);
     const toCoord = getStopCoordinate(stops[index + 1]);
     const dist = (fromCoord && toCoord) ? getDistanceMeters(fromCoord, toCoord) : null;
-    // 若 Gemini 已指定合法模式，先採用，但距離不合理時強制覆蓋
-    if (VALID_MODES.includes(existing)) {
-      if (dist !== null) {
-        if (existing === 'walk' && dist > 500) return { ...stop, transitMode: dist <= 3000 ? 'scooter' : 'car' };
-        if (existing === 'scooter' && dist > 8000) return { ...stop, transitMode: 'car' };
-      }
-      return stop;
-    }
-    if (dist === null) return { ...stop, transitMode: dominantMode };
-    const transitMode = dist <= 500 ? 'walk' : dist <= 3000 ? 'scooter' : 'car';
+    // 有座標且距離很短 → 步行；其餘（含無座標）一律使用所選交通工具
+    const transitMode = (dist !== null && dist <= 500) ? 'walk' : vehicle;
     return { ...stop, transitMode };
   });
 }
@@ -2907,7 +2898,7 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
-  const withTransport = assignTransportModes(ruledStops);
+  const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
   const defaultHub = getDefaultTransitHub(destination);
   const userStartLoc = (wizardData.startLocation || '').trim();
   const userEndLoc = (wizardData.endLocation || '').trim();
@@ -2933,7 +2924,7 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     endCoords: resolvedEndCoords || null,
   };
   const withEndpoints = injectEndpointStops(withTransport, enrichedWizardData);
-  return assignTransportModes(withEndpoints);
+  return assignTransportModes(withEndpoints, enrichedWizardData.transportMode);
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -3511,6 +3502,14 @@ function renderWizard() {
         <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程結束的返回地點；留空則與出發站點相同</p>
       </div>
       <div class="wizard-field" style="margin-top:16px">
+        <label>主要交通工具<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">生成行程時各段移動會以此工具為主，短程則步行</span></label>
+        <div class="wizard-chips">
+          ${[{v:'taxi',t:'🚕 計程車'},{v:'scooter',t:'🛵 機車'},{v:'car',t:'🚗 汽車'}].map(o=>`
+            <button class="wizard-tag${(wizData.transportMode||'car')===o.v?' active':''}" type="button" data-transport="${o.v}" onclick="selectTransport('${o.v}')">${o.t}</button>
+          `).join('')}
+        </div>
+      </div>
+      <div class="wizard-field" style="margin-top:16px">
         <label>興趣方向（可複選 2-4 項）<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重，例：選「美食」會多安排餐廳體驗</span></label>
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;">
           ${(()=>{
@@ -3870,6 +3869,13 @@ function selectTheme(theme) {
   renderWizard();
 }
 
+function selectTransport(mode) {
+  const valid = ['taxi', 'scooter', 'car'];
+  wizData.transportMode = valid.includes(mode) ? mode : 'car';
+  renderFlowPreview();
+  renderWizard();
+}
+
 function autoUpdateReturnDate() {
   if (!wizData.departureDate) return;
   const durationMap = { '0.5小時': 0, '1小時': 0, '2小時': 0, '半天': 0, '1天': 0, '2天': 1 };
@@ -4013,6 +4019,7 @@ async function finishWizard() {
       people: wizData.people || (wizData.tripMode === 'solo' ? '1人' : '2人'),
       pace: wizData.pace || '平衡',
       interests: wizData.interests || [], theme: wizData.theme || '經典旅人',
+      transportMode: wizData.transportMode || 'car',
       startTime: wizData.startTime || '09:00',
       startLocation: wizData.startLocation || '', endLocation: wizData.endLocation || '',
       departureDate: wizData.departureDate || '',

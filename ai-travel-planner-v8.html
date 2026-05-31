@@ -1622,6 +1622,20 @@ body.prototype-mode .prototype-id-chip {
 }
 .transit-mode-select:focus { outline: 2px solid rgba(46, 125, 109, 0.2); border-color: var(--accent); }
 
+.trip-vehicle-wrap { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--ink2); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; }
+.trip-vehicle-select {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 8px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.trip-vehicle-select:focus { outline: 2px solid rgba(46, 125, 109, 0.2); border-color: var(--accent); }
+
 .stay-suggestion-note {
   margin-bottom: 24px;
   color: var(--ink3);
@@ -2775,6 +2789,14 @@ body.prototype-mode .prototype-id-chip {
           <div class="hero-tag">📍 等待匯入目的地</div>
         </div>
         <div class="hero-actions" id="itineraryHeroActions">
+          <label class="trip-vehicle-wrap" id="tripPrimaryVehicleWrap" title="切換全程主要交通工具（走路與大眾交通的路段不受影響）" style="display:none;">
+            🚦 主要交通工具
+            <select id="tripPrimaryVehicleSelect" class="trip-vehicle-select" onchange="setTripPrimaryVehicle(this.value)">
+              <option value="taxi">🚕 計程車</option>
+              <option value="scooter">🛵 機車</option>
+              <option value="car">🚗 汽車</option>
+            </select>
+          </label>
           <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
           <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
           <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
@@ -3262,6 +3284,7 @@ body.prototype-mode .prototype-id-chip {
   let persistTripDebounceTimer = null;
   let persistTripMaxWaitTimer = null;
   const TRANSIT_MODE_OPTIONS = [
+    { value: 'taxi', label: '計程車', icon: '🚕' },
     { value: 'scooter', label: '機車', icon: '🛵' },
     { value: 'car', label: '汽車', icon: '🚗' },
     { value: 'walk', label: '走路', icon: '🚶' },
@@ -5677,6 +5700,12 @@ body.prototype-mode .prototype-id-chip {
     return TRANSIT_MODE_OPTIONS.find((item) => item.value === normalized) || TRANSIT_MODE_OPTIONS[0];
   }
 
+  // 使用者建立行程時所選的主要交通工具（計程車/機車/汽車），預設汽車
+  function getPreferredVehicleMode() {
+    const pref = String(currentTripPreferences?.transportMode || '').trim().toLowerCase();
+    return ['taxi', 'scooter', 'car'].includes(pref) ? pref : 'car';
+  }
+
   function hasTransitMinutesValue(value) {
     return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
   }
@@ -5722,6 +5751,7 @@ body.prototype-mode .prototype-id-chip {
     if (normalized === 'scooter') {
       return google.maps.TravelMode.TWO_WHEELER || google.maps.TravelMode.DRIVING;
     }
+    // taxi 與 car 皆走一般汽車路線
     return google.maps.TravelMode.DRIVING;
   }
 
@@ -6355,11 +6385,19 @@ body.prototype-mode .prototype-id-chip {
       businessHours: stop.businessHours || null
     }));
 
+    // 全程主要交通工具偏好（計程車/機車/汽車）一併保存，重新載入後仍生效
+    const vehiclePref = String(currentTripPreferences?.transportMode || '').toLowerCase();
+    const hasVehiclePref = ['taxi', 'scooter', 'car'].includes(vehiclePref);
+
     try {
       const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
       const tripIndex = myTrips.findIndex((t) => t.id === currentItineraryId);
       if (tripIndex >= 0) {
-        myTrips[tripIndex] = { ...myTrips[tripIndex], stops: stopsSnapshot };
+        const patch = { ...myTrips[tripIndex], stops: stopsSnapshot };
+        if (hasVehiclePref) {
+          patch.wizardData = { ...(myTrips[tripIndex].wizardData || {}), transportMode: vehiclePref };
+        }
+        myTrips[tripIndex] = patch;
         localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
       }
     } catch (e) {
@@ -6368,10 +6406,12 @@ body.prototype-mode .prototype-id-chip {
 
     if (firebaseEnabled && firebaseDb) {
       try {
-        await firebaseDb.collection('micro_trips').doc(currentItineraryId).update({
+        const fbPatch = {
           stops: stopsSnapshot,
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        };
+        if (hasVehiclePref) fbPatch['wizardData.transportMode'] = vehiclePref;
+        await firebaseDb.collection('micro_trips').doc(currentItineraryId).update(fbPatch);
       } catch (e) {
         console.warn('Failed to persist trip stops to Firebase:', e);
       }
@@ -6408,6 +6448,43 @@ body.prototype-mode .prototype-id-chip {
       routeStageCache[stopIndex].distance = '';
       routeStageCache[stopIndex].duration = '';
       routeStageCache[stopIndex].timeRange = '';
+    }
+    renderItineraryDisplay();
+    if (isReplanning) renderReplanBoard();
+    refreshRouteDirections();
+    schedulePersistTrip();
+  }
+
+  // 同步「全程主要交通工具」下拉的顯示值與可見性
+  function syncTripPrimaryVehicleSelect() {
+    const wrap = document.getElementById('tripPrimaryVehicleWrap');
+    const sel = document.getElementById('tripPrimaryVehicleSelect');
+    if (!wrap || !sel) return;
+    const hasStops = Array.isArray(replanStops) && replanStops.length > 0;
+    wrap.style.display = hasStops ? '' : 'none';
+    sel.value = getPreferredVehicleMode();
+  }
+
+  // 一次切換全程主要交通工具：所有「車輛類」路段改用新工具，保留走路與大眾交通
+  function setTripPrimaryVehicle(modeValue) {
+    const valid = ['taxi', 'scooter', 'car'];
+    const vehicle = valid.includes(String(modeValue || '').toLowerCase()) ? String(modeValue).toLowerCase() : 'car';
+    currentTripPreferences = currentTripPreferences || {};
+    currentTripPreferences.transportMode = vehicle;
+    if (Array.isArray(replanStops)) {
+      replanStops.forEach((stop, index) => {
+        const cur = normalizeTransitMode(stop.transitMode);
+        if (cur === 'taxi' || cur === 'scooter' || cur === 'car') {
+          stop.transitMode = vehicle;
+          stop.transitMin = null;
+          if (routeStageCache[index]) {
+            routeStageCache[index].mode = vehicle;
+            routeStageCache[index].distance = '';
+            routeStageCache[index].duration = '';
+            routeStageCache[index].timeRange = '';
+          }
+        }
+      });
     }
     renderItineraryDisplay();
     if (isReplanning) renderReplanBoard();
@@ -6487,7 +6564,7 @@ body.prototype-mode .prototype-id-chip {
         <div class="replan-spot">
           <div>
             <div class="replan-spot-name">${stop.name}</div>
-            <div class="replan-spot-meta">停留 <select class="replan-duration-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${getSuggestedStayDurations(stop).map(m => `<option value="${m}" ${(stop.stayMin ?? stop.computedStayMin) === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>${stop.transit ? ` · 後續 <select class="replan-transit-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); setSegmentTransitMode('${stop.id}', this.value)">${TRANSIT_MODE_OPTIONS.map(mo => `<option value="${mo.value}" ${normalizeTransitMode(stop.transitMode) === mo.value ? 'selected' : ''}>${mo.icon} ${mo.label}</option>`).join('')}</select> ${getTransitDurationText(stop.transit)}` : ''}</div>
+            <div class="replan-spot-meta">停留 <select class="replan-duration-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${getSuggestedStayDurations(stop).map(m => `<option value="${m}" ${(stop.stayMin ?? stop.computedStayMin) === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>${stop.transit ? ` · 後續 <select class="replan-transit-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); setSegmentTransitMode('${stop.id}', this.value)">${(() => { const cur = normalizeTransitMode(stop.transitMode); const allowed = new Set(['walk', 'public', getPreferredVehicleMode(), cur]); return TRANSIT_MODE_OPTIONS.filter(mo => allowed.has(mo.value)).map(mo => `<option value="${mo.value}" ${cur === mo.value ? 'selected' : ''}>${mo.icon} ${mo.label}</option>`).join(''); })()}</select> ${getTransitDurationText(stop.transit)}` : ''}</div>
             ${(() => { const w = getBusinessHoursWarning(stop); return w ? `<div class="replan-hours-warn">${w}</div>` : ''; })()}
           </div>
           <div class="replan-emoji">${stop.emoji}</div>
@@ -6623,6 +6700,8 @@ body.prototype-mode .prototype-id-chip {
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     if (!plannedBlock) return;
 
+    syncTripPrimaryVehicleSelect();
+
     const schedule = buildReplanSchedule();
     if (!schedule || schedule.length === 0) {
       plannedBlock.innerHTML = `
@@ -6728,11 +6807,14 @@ body.prototype-mode .prototype-id-chip {
         if (routeInfo && getRouteStageTimeText(routeInfo)) {
           transitText += ` · ${getRouteStageTimeText(routeInfo)}`;
         }
+        // 下拉只提供：所選交通工具 + 走路 + 大眾交通（並保留目前值以相容舊行程）
+        const allowedModes = new Set(['walk', 'public', getPreferredVehicleMode(), transitMode]);
+        const segmentModeOptions = TRANSIT_MODE_OPTIONS.filter((modeOption) => allowedModes.has(modeOption.value));
         html += `<div class="transit-block">
           <div class="transit-block-main">${transitText}</div>
           <label class="transit-mode-wrap">交通工具
             <select class="transit-mode-select" onchange="setSegmentTransitMode('${stop.id}', this.value)" onclick="event.stopPropagation()">
-              ${TRANSIT_MODE_OPTIONS.map((modeOption) => `<option value="${modeOption.value}" ${transitMode === modeOption.value ? 'selected' : ''}>${modeOption.icon} ${modeOption.label}</option>`).join('')}
+              ${segmentModeOptions.map((modeOption) => `<option value="${modeOption.value}" ${transitMode === modeOption.value ? 'selected' : ''}>${modeOption.icon} ${modeOption.label}</option>`).join('')}
             </select>
           </label>
         </div>`;
@@ -7947,7 +8029,7 @@ body.prototype-mode .prototype-id-chip {
         const template = {
           name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
           stayMin: Math.max(10, Math.min(180, s.duration || 30)),
-          transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+          transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
           businessHours: s.businessHours || null, toiletLocations: []
         };
         const aiHint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -7958,7 +8040,7 @@ body.prototype-mode .prototype-id-chip {
           validated = { ...template, scenicCoordinates: aiHint };
         }
         if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); rejectedNames.push(s.name); continue; }
-        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null });
+        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null });
         newStops.push(stop);
       }
 
@@ -7988,7 +8070,7 @@ body.prototype-mode .prototype-id-chip {
               const tmpl = {
                 name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
                 stayMin: Math.max(10, Math.min(180, s.duration || 30)),
-                transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+                transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
                 businessHours: s.businessHours || null, toiletLocations: []
               };
               const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -7998,7 +8080,7 @@ body.prototype-mode .prototype-id-chip {
                 val = { ...tmpl, scenicCoordinates: hint };
               }
               if (!val) { saveBlockedSpotNames([s.name], region); continue; }
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null }));
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
               allUsedNorm.add(normalizeText(s.name));
             }
           }
@@ -8029,7 +8111,7 @@ body.prototype-mode .prototype-id-chip {
               const tmpl = {
                 name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
                 stayMin: Math.max(10, Math.min(180, s.duration || 30)),
-                transitMode: 'car', transitMin: null, baseId: 'replan-ai',
+                transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
                 businessHours: s.businessHours || null, toiletLocations: []
               };
               const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -8040,7 +8122,7 @@ body.prototype-mode .prototype-id-chip {
                 val = { ...tmpl, scenicCoordinates: hint };
               }
               if (!val) continue;
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: 'car', transitMin: null }));
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
               nearbyUsedNorm.add(normalizeText(s.name));
               if (newStops.length >= MIN_REPLAN_STOPS) break;
             }
