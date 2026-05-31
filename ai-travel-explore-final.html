@@ -3679,20 +3679,25 @@ function getDefaultSlotMinutes(pace) {
 }
 
 function timeStringToMinutes(value) {
-  const source = String(value || '09:00');
-  const match = source.match(/^(\d{1,2}):(\d{2})$/);
+  const source = String(value || '09:00').trim();
+  let offset = 0;
+  let text = source;
+  if (text.startsWith('次日 ')) { offset = 24 * 60; text = text.slice(3); }
+  const match = text.match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return 9 * 60;
   const hour = Number(match[1]);
   const minute = Number(match[2]);
   if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 9 * 60;
-  return Math.max(0, Math.min(23 * 60 + 59, hour * 60 + minute));
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return 9 * 60;
+  return Math.max(0, offset + hour * 60 + minute);
 }
 
 function minutesToTimeString(totalMinutes) {
-  const safe = ((Number(totalMinutes) % (24 * 60)) + (24 * 60)) % (24 * 60);
-  const hour = Math.floor(safe / 60).toString().padStart(2, '0');
-  const minute = (safe % 60).toString().padStart(2, '0');
-  return `${hour}:${minute}`;
+  const safe = Math.max(0, Number(totalMinutes));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  if (h >= 24) return `次日 ${String(h - 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
 function normalizeClockInput(value, fallback = '09:00') {

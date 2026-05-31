@@ -4779,12 +4779,12 @@ body.prototype-mode .prototype-id-chip {
             currentTripWindow.start = resolvedStartTime;
             const startTotalMin = clockToMinutes(resolvedStartTime) || (9 * 60);
             const endMTotal = startTotalMin + durationSum;
-            currentTripWindow.end = `${Math.floor(endMTotal / 60).toString().padStart(2, '0')}:${(endMTotal % 60).toString().padStart(2, '0')}`;
-            
+            currentTripWindow.end = minutesToClock(endMTotal);
+
             if (heroTags.length >= 1) {
                heroTags[0].textContent = `⏱️ ${currentTripWindow.start} – ${currentTripWindow.end}`;
             }
-            updateMapTimeBanner(currentTripWindow.start, currentTripWindow.end);
+            updateMapTimeBanner(currentTripWindow.start, currentTripWindow.end, endMTotal);
           }
 
           if (map) {
@@ -5606,10 +5606,11 @@ body.prototype-mode .prototype-id-chip {
     const safe = Math.max(0, totalMinutes);
     const h = Math.floor(safe / 60);
     const m = safe % 60;
+    if (h >= 24) return `次日 ${String(h - 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   }
 
-  function updateMapTimeBanner(startStr, endStr) {
+  function updateMapTimeBanner(startStr, endStr, rawEndMin) {
     const banner = document.getElementById('mapTimeBanner');
     const rangeEl = document.getElementById('mapTimeBannerRange');
     const durEl = document.getElementById('mapTimeBannerDuration');
@@ -5617,7 +5618,8 @@ body.prototype-mode .prototype-id-chip {
     if (!banner || !rangeEl || !durEl) return;
     if (!startStr || !endStr) { banner.style.display = 'none'; return; }
     const startMin = clockToMinutes(startStr);
-    const endMin = clockToMinutes(endStr);
+    // 優先使用傳入的原始分鐘數（不受 23:59 截斷影響），才能正確偵測溢出
+    const endMin = (rawEndMin != null && Number.isFinite(rawEndMin)) ? rawEndMin : clockToMinutes(endStr);
     const diffMin = (Number.isFinite(startMin) && Number.isFinite(endMin)) ? endMin - startMin : null;
     rangeEl.textContent = `⏱ ${startStr} – ${endStr}`;
     if (diffMin && diffMin > 0) {
@@ -5633,27 +5635,36 @@ body.prototype-mode .prototype-id-chip {
       const planDays = prefs.days;
       const planEndStr = planDays ? calcReplanEndTime(planStart, planDays) : null;
       const planEndMin = planEndStr ? clockToMinutes(planEndStr) : null;
-      const overrun = planEndMin != null && Number.isFinite(endMin) && endMin > planEndMin + 1;
+      const midnightOverrun = Number.isFinite(endMin) && endMin >= 24 * 60;
+      const planOverrun = planEndMin != null && Number.isFinite(endMin) && endMin > planEndMin + 1;
+      const overrun = planOverrun || midnightOverrun;
       warnEl.style.display = overrun ? 'block' : 'none';
       if (overrun) {
-        const overMin = endMin - planEndMin;
+        const baseline = planEndMin != null ? planEndMin : (23 * 60 + 59);
+        const overMin = Math.max(1, endMin - baseline);
         const oh = Math.floor(overMin / 60);
         const om = overMin % 60;
         const overStr = oh > 0 ? (om > 0 ? `${oh}小時${om}分` : `${oh}小時`) : `${om}分`;
-        warnEl.textContent = `⚠ 超出規劃時間 ${overStr}（預計 ${planEndStr} 結束）`;
+        warnEl.textContent = planEndStr
+          ? `⚠ 超出規劃時間 ${overStr}（預計 ${planEndStr} 結束）`
+          : `⚠ 行程超出今日範圍 ${overStr}`;
       }
     }
     banner.style.display = 'flex';
   }
 
   function clockToMinutes(clockText) {
-    if (!clockText || typeof clockText !== 'string' || !clockText.includes(':')) return null;
-    const [hText, mText] = clockText.split(':');
+    if (!clockText || typeof clockText !== 'string') return null;
+    let text = clockText.trim();
+    let offset = 0;
+    if (text.startsWith('次日 ')) { offset = 24 * 60; text = text.slice(3); }
+    if (!text.includes(':')) return null;
+    const [hText, mText] = text.split(':');
     const h = parseInt(hText, 10);
     const m = parseInt(mText, 10);
     if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
     if (h < 0 || h > 23 || m < 0 || m > 59) return null;
-    return h * 60 + m;
+    return offset + h * 60 + m;
   }
 
   function normalizeTransitMode(mode) {
@@ -6440,7 +6451,8 @@ body.prototype-mode .prototype-id-chip {
     }
     updateMapTimeBanner(
       schedule.length ? minutesToClock(schedule[0].start) : '',
-      schedule.length ? minutesToClock(schedule[schedule.length - 1].end) : ''
+      schedule.length ? minutesToClock(schedule[schedule.length - 1].end) : '',
+      schedule.length ? schedule[schedule.length - 1].end : null
     );
     if (schedule.length) {
       const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
@@ -6633,7 +6645,7 @@ body.prototype-mode .prototype-id-chip {
     const durationMin = endTime - startTime;
     const durationHours = Math.floor(durationMin / 60);
     const durationMins = durationMin % 60;
-    updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime));
+    updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime), endTime);
     const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
     if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
 
@@ -7700,7 +7712,7 @@ body.prototype-mode .prototype-id-chip {
     const duration = durationMap[days] || 480;
     const parts = String(startTime || '09:00').split(':').map(Number);
     const total = (parts[0] * 60 + (parts[1] || 0)) + duration;
-    return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+    return minutesToClock(total);
   }
 
   const BLOCKED_SPOTS_KEY = 'wai_blocked_spots';
