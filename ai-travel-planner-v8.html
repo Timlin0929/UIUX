@@ -1590,6 +1590,21 @@ body.prototype-mode .prototype-id-chip {
 .stay-opt-btn{padding:10px 0;border-radius:12px;border:1.5px solid var(--border);background:var(--surface2);color:var(--ink2);font-size:13px;font-weight:600;cursor:pointer;text-align:center;}
 .stay-opt-btn.active{border-color:var(--accent);background:var(--accent-light);color:var(--accent-dark);}
 .stay-opt-btn:hover:not(.active){background:var(--surface);border-color:var(--accent);}
+#replanGenOverlay{position:fixed;top:auto;left:auto;bottom:24px;right:24px;z-index:9999;display:none;flex-direction:column;}
+.replan-gen-container{width:360px;max-width:calc(100vw - 48px);background:rgba(13,17,23,.96);border:1px solid rgba(255,255,255,.1);border-radius:20px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5),0 0 0 1px rgba(88,166,255,.1);animation:replanSlideIn .3s ease;}
+@keyframes replanSlideIn{from{opacity:0;transform:translateX(20px) translateY(10px);}to{opacity:1;transform:translateX(0) translateY(0);}}
+.replan-gen-header{text-align:center;padding:14px 16px 10px;}
+.replan-gen-title{font-size:15px;font-weight:800;color:#e8f4f1;margin-bottom:3px;}
+.replan-gen-phase{font-size:12px;color:#7db4ab;}
+.replan-gen-terminal{background:#0d1117;overflow:hidden;}
+.replan-gen-bar{background:#1c2128;padding:8px 14px;display:flex;align-items:center;gap:6px;}
+.replan-gen-dot{width:10px;height:10px;border-radius:50%;}
+.replan-gen-dot-r{background:#ff5f57;}.replan-gen-dot-y{background:#ffbd2e;}.replan-gen-dot-g{background:#28ca41;}
+.replan-gen-label{font-size:11px;color:#8b949e;margin-left:6px;font-family:monospace;}
+.replan-gen-output{padding:10px 14px;overflow-y:auto;max-height:120px;min-height:40px;display:flex;flex-direction:column;gap:2px;scroll-behavior:smooth;}
+.replan-gen-cursor{padding:2px 14px 10px;color:#58a6ff;font-size:13px;font-family:monospace;animation:genBlink 1s infinite;}
+.replan-gen-line{font-size:12px;font-family:"Courier New",monospace;padding:2px 0;display:flex;align-items:center;gap:6px;}
+.replan-gen-info{color:#8b949e;}.replan-gen-spot{color:#7ee787;}.replan-gen-warn{color:#f0883e;}.replan-gen-done{color:#58a6ff;}
 .stay-modal-cancel{width:100%;padding:12px;border-radius:14px;border:none;background:var(--surface2);color:var(--ink2);font-size:14px;font-weight:600;cursor:pointer;}
 .transit-block { margin: 12px 0 12px 64px; padding: 12px 16px; background: var(--surface); border-radius: 14px; border: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--ink2); flex-wrap: wrap; }
 .transit-block-main { min-width: 180px; flex: 1; }
@@ -7862,12 +7877,28 @@ body.prototype-mode .prototype-id-chip {
 
     const planningList = document.getElementById('replanSortableList');
     const totalTimeEl = document.getElementById('replanTotalWindow');
-    if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ 正在從 Google Maps 抓取即時景點…</div>`;
+    if (planningList) planningList.innerHTML = '';
     if (totalTimeEl) totalTimeEl.textContent = '--';
+    const _rgOverlay = document.getElementById('replanGenOverlay');
+    const _rgPhase = document.getElementById('replanGenPhase');
+    const _rgOutput = document.getElementById('replanGenOutput');
+    function _addRgLine(text, type) {
+      if (!_rgOutput) return;
+      const d = document.createElement('div');
+      d.className = 'replan-gen-line replan-gen-' + (type || 'info');
+      d.textContent = text;
+      _rgOutput.appendChild(d);
+      _rgOutput.scrollTop = _rgOutput.scrollHeight;
+    }
+    if (_rgOutput) _rgOutput.innerHTML = '';
+    if (_rgOverlay) _rgOverlay.style.display = 'flex';
+    if (_rgPhase) _rgPhase.textContent = '查詢景點中…';
+    _addRgLine('$ WanderAI --replan --dest ' + dest, 'info');
 
     try {
       const livePoiHint = await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
-      if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⏳ AI 正在生成新行程，請稍候…</div>`;
+      if (_rgPhase) _rgPhase.textContent = 'AI 生成行程中…';
+      _addRgLine('> AI 正在生成新行程，請稍候…', 'info');
 
       const vertex = getVertexConfig();
       let endpoint;
@@ -7894,7 +7925,8 @@ body.prototype-mode .prototype-id-chip {
       const parsed = safeParseJson(text);
       if (!parsed?.stops?.length) throw new Error('AI 未回傳有效景點清單');
 
-      if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">🔍 驗證景點真實性（共 ${parsed.stops.length} 個）…</div>`;
+      if (_rgPhase) _rgPhase.textContent = `驗證景點中（共 ${parsed.stops.length} 個）…`;
+      _addRgLine(`> 驗證景點真實性，共 ${parsed.stops.length} 個…`, 'info');
 
       const region = currentTripRegion || dest;
       const newStops = [];
@@ -7924,7 +7956,8 @@ body.prototype-mode .prototype-id-chip {
       if (newStops.length < MIN_REPLAN_STOPS && rejectedNames.length > 0) {
         const needed = MIN_REPLAN_STOPS - newStops.length + 1;
         const allUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
-        if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">⚠️ 已排除 ${rejectedNames.length} 個無法驗證的景點，正在補充新景點…</div>`;
+        if (_rgPhase) _rgPhase.textContent = '補充替代景點中…';
+        _addRgLine(`> ⚠️ 已排除 ${rejectedNames.length} 個無法驗證景點，補充新景點…`, 'warn');
         const replenishRes = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -7964,7 +7997,8 @@ body.prototype-mode .prototype-id-chip {
       if (newStops.length < MIN_REPLAN_STOPS) {
         const nearbyNeeded = MIN_REPLAN_STOPS - newStops.length + 1;
         const nearbyUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
-        if (planningList) planningList.innerHTML = `<div style="text-align:center;padding:40px 16px;color:var(--ink2);font-size:15px;">🗺️ 正在搜尋 ${dest} 周邊替代景點…</div>`;
+        if (_rgPhase) _rgPhase.textContent = `搜尋 ${dest} 周邊替代景點…`;
+        _addRgLine(`> 🗺️ 搜尋 ${dest} 周邊替代景點…`, 'warn');
         const nearbyRes = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -8015,12 +8049,14 @@ body.prototype-mode .prototype-id-chip {
       replanStops = filteredNewStops;
       if (preservedStartStop) replanStops.unshift({ ...preservedStartStop, transitMin: null });
       if (preservedEndStop) replanStops.push(preservedEndStop);
+      if (_rgOverlay) _rgOverlay.style.display = 'none';
       renderReplanBoard();
       refreshRouteDirections();
       schedulePersistTrip();
 
     } catch (e) {
       console.error('[replanWithAI]', e);
+      if (_rgOverlay) _rgOverlay.style.display = 'none';
       cancelReplan();
       window.alert(`AI 重新規劃失敗：${e.message}\n\n請確認 API Key 正確，並再試一次。`);
     }
@@ -10196,6 +10232,24 @@ body.prototype-mode .prototype-id-chip {
     <div class="stay-modal-sub" id="stayModalSub"></div>
     <div class="stay-modal-grid" id="stayModalGrid"></div>
     <button class="stay-modal-cancel" onclick="closeStayModal()">取消</button>
+  </div>
+</div>
+<div id="replanGenOverlay" style="display:none">
+  <div class="replan-gen-container">
+    <div class="replan-gen-header">
+      <div class="replan-gen-title">🤖 AI 重新規劃行程</div>
+      <div class="replan-gen-phase" id="replanGenPhase">連接中…</div>
+    </div>
+    <div class="replan-gen-terminal">
+      <div class="replan-gen-bar">
+        <span class="replan-gen-dot replan-gen-dot-r"></span>
+        <span class="replan-gen-dot replan-gen-dot-y"></span>
+        <span class="replan-gen-dot replan-gen-dot-g"></span>
+        <span class="replan-gen-label">WanderAI · 重新規劃</span>
+      </div>
+      <div class="replan-gen-output" id="replanGenOutput"></div>
+      <div class="replan-gen-cursor" id="replanGenCursor">◌</div>
+    </div>
   </div>
 </div>
 </body>

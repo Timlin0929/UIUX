@@ -290,24 +290,25 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-title{font-family:'DM Serif Display',serif;font-size:28px;line-height:1.2;margin:0 0 8px;color:#173648;}
 .wizard-sub{font-size:14px;color:#3d4b56;margin:0;}
 .wizard-badge{background:rgba(255,255,255,.76);border:1px solid rgba(255,255,255,.7);box-shadow:0 8px 22px rgba(25,32,45,.08);border-radius:999px;padding:8px 14px;font-weight:700;color:#1d5f5b;font-size:14px;backdrop-filter:blur(8px);white-space:nowrap;}
-#genOverlay{position:fixed;inset:0;background:rgba(18,24,32,.97);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;}
-.gen-container{width:100%;max-width:620px;display:flex;flex-direction:column;gap:20px;}
-.gen-header{text-align:center;}
+#genOverlay{position:fixed;top:auto;left:auto;bottom:24px;right:24px;background:transparent;z-index:9999;display:flex;align-items:flex-end;justify-content:flex-end;padding:0;}
+.gen-container{width:360px;max-width:calc(100vw - 48px);background:rgba(13,17,23,.96);border:1px solid rgba(255,255,255,.1);border-radius:20px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5),0 0 0 1px rgba(88,166,255,.1);display:flex;flex-direction:column;gap:0;animation:slideInRight .3s ease;}
+@keyframes slideInRight{from{opacity:0;transform:translateX(20px) translateY(10px);}to{opacity:1;transform:translateX(0) translateY(0);}}
+.gen-header{text-align:center;padding:16px 16px 12px;}
 .gen-title{font-size:22px;font-weight:800;color:#e8f4f1;margin-bottom:6px;}
 .gen-phase{font-size:13px;color:#7db4ab;}
-.gen-terminal{background:#0d1117;border-radius:16px;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.55);display:flex;flex-direction:column;}
+.gen-terminal{background:#0d1117;border-radius:0;overflow:hidden;box-shadow:none;display:flex;flex-direction:column;}
 .gen-terminal-bar{background:#1c2128;padding:10px 16px;display:flex;align-items:center;gap:6px;flex-shrink:0;}
 .gen-dot{width:11px;height:11px;border-radius:50%;flex-shrink:0;}
 .gen-dot-r{background:#ff5f57;}.gen-dot-y{background:#ffbd2e;}.gen-dot-g{background:#28ca41;}
 .gen-terminal-label{font-size:12px;color:#8b949e;margin-left:8px;font-family:monospace;}
-.gen-output{padding:16px 20px;overflow-y:auto;max-height:42vh;min-height:120px;display:flex;flex-direction:column;gap:2px;scroll-behavior:smooth;}
+.gen-output{padding:12px 16px;overflow-y:auto;max-height:160px;min-height:60px;display:flex;flex-direction:column;gap:2px;scroll-behavior:smooth;}
 .gen-cursor-row{padding:2px 20px 14px;color:#58a6ff;font-size:14px;font-family:monospace;animation:genBlink 1s infinite;}
 @keyframes genBlink{0%,49%{opacity:1}50%,100%{opacity:0}}
 .gen-line{font-size:13px;font-family:"Courier New",monospace;padding:2px 0;display:flex;align-items:center;gap:8px;animation:genTypeIn .18s ease;}
 .gen-line-info{color:#8b949e;}.gen-line-spot{color:#7ee787;}.gen-line-warn{color:#f0883e;}.gen-line-done{color:#58a6ff;}.gen-line-sys{color:#e6edf3;}
 @keyframes genTypeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
-.gen-footer{display:flex;flex-direction:column;align-items:center;gap:10px;min-height:48px;}
-.gen-edit-btn{background:linear-gradient(135deg,#0f7c6b 0%,#1f8efa 100%);color:#fff;border:none;border-radius:16px;padding:14px 44px;font-size:16px;font-weight:700;cursor:pointer;animation:riseIn .4s ease;box-shadow:0 8px 28px rgba(31,142,250,.35);letter-spacing:.3px;}
+.gen-footer{display:flex;flex-direction:column;align-items:center;gap:10px;min-height:48px;padding:12px 16px;}
+.gen-edit-btn{background:linear-gradient(135deg,#0f7c6b 0%,#1f8efa 100%);color:#fff;border:none;border-radius:12px;padding:11px 24px;font-size:14px;font-weight:700;cursor:pointer;animation:riseIn .4s ease;box-shadow:0 8px 28px rgba(31,142,250,.35);letter-spacing:.3px;width:100%;}
 .gen-edit-btn:hover{transform:translateY(-2px);box-shadow:0 12px 36px rgba(31,142,250,.45);}
 .gen-skip-link{background:none;border:none;color:#7db4ab;font-size:13px;cursor:pointer;text-decoration:underline;}
 
@@ -1132,6 +1133,20 @@ let wizardPreviewDebounceTimer = null;
   renderGrid();
   renderSideMyTrips();
   renderMyTrips();
+
+  // 恢復因切換頁面而中斷的行程生成
+  const _pendingGen = JSON.parse(localStorage.getItem('wai_pending_gen') || 'null');
+  if (_pendingGen && _pendingGen.tripId && _pendingGen.wData) {
+    const _pendingTrip = myTrips.find(t => t.id === _pendingGen.tripId);
+    if (_pendingTrip && (!_pendingTrip.stops || _pendingTrip.stops.length === 0)) {
+      setTimeout(() => {
+        showToast('偵測到未完成的行程，自動重新生成中…', 'blue');
+        _doGeneration(_pendingTrip, _pendingGen.wData);
+      }, 600);
+    } else {
+      localStorage.removeItem('wai_pending_gen');
+    }
+  }
 })();
 
 // ══════════════════════════════════════════════════
@@ -3970,7 +3985,6 @@ function showGenDoneButton(tripId) {
 
 async function finishWizard() {
   if (isGeneratingTrip) return;
-  isGeneratingTrip = true;
 
   const dest = wizData.dest || wizData.destCustom || '台東';
   const days = wizData.days || '1天';
@@ -4005,19 +4019,32 @@ async function finishWizard() {
     stops: []
   };
 
+  // 立即存入 localStorage，切換頁面後資料不消失
+  myTrips.unshift(newTrip);
+  saveState(); renderSideMyTrips(); renderMyTrips();
+
+  // 記錄待完成的生成任務，供頁面重新載入後恢復
+  localStorage.setItem('wai_pending_gen', JSON.stringify({ tripId: newTrip.id, wData: { ...wizData } }));
+
   closeWizard();
   if (inviteCode) {
     document.getElementById('collabCodeDisplay').textContent = inviteCode;
     document.getElementById('collabCodeOverlay').classList.add('open');
   }
-  showGenPanel(newTrip.title);
 
+  await _doGeneration(newTrip, wizData);
+}
+
+async function _doGeneration(trip, wData) {
+  if (isGeneratingTrip) return;
+  isGeneratingTrip = true;
+  showGenPanel(trip.title);
   try {
     addGenLine('> 正在從 Google Maps 查詢可用景點清單…', 'info');
     setGenPhase('查詢景點中…');
-    const _liveDest = wizData.dest || wizData.destCustom || '';
+    const _liveDest = wData.dest || wData.destCustom || '';
     const _liveCenter = getDestinationCenter(_liveDest);
-    const livePlaces = await fetchGoogleMapsPoiList(_liveDest, wizData.interests || [], _liveCenter).catch(() => []);
+    const livePlaces = await fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
     const livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
     if (livePlaces.length > 0) {
       addGenLine(`> 已從 Google Maps 取得 ${livePlaces.length} 個景點，交由 AI 安排行程…`, 'info');
@@ -4027,7 +4054,7 @@ async function finishWizard() {
     setGenPhase('AI 規劃行程中…');
 
     let lastNames = [];
-    const finalPlan = await requestGeminiMicroTravelPlan(wizData, {
+    const finalPlan = await requestGeminiMicroTravelPlan(wData, {
       mode: 'final',
       includeFirebase: livePlaces.length === 0,
       livePoiHint,
@@ -4035,9 +4062,7 @@ async function finishWizard() {
       onChunk: (_chunk, fullText) => {
         const names = extractNamesFromStream(fullText);
         if (names.length > lastNames.length) {
-          for (let i = lastNames.length; i < names.length; i++) {
-            addGenLine('  ❆ ' + names[i], 'spot');
-          }
+          for (let i = lastNames.length; i < names.length; i++) addGenLine('  ❆ ' + names[i], 'spot');
           lastNames = names;
           setGenPhase('已識別 ' + names.length + ' 個景點，持續接收中…');
         }
@@ -4048,31 +4073,29 @@ async function finishWizard() {
     setGenPhase('對應地圖資訊中…');
 
     if (finalPlan && finalPlan.stops) {
-      newTrip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wizData, livePlaces);
-      newTrip.aiTitle = finalPlan.title || newTrip.title;
-      newTrip.aiReply = finalPlan.reply || '';
+      trip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wData, livePlaces);
+      trip.aiTitle = finalPlan.title || trip.title;
+      trip.aiReply = finalPlan.reply || '';
     }
 
-    myTrips.unshift(newTrip);
+    const _idx = myTrips.findIndex(t => t.id === trip.id);
+    if (_idx !== -1) myTrips[_idx] = trip;
     saveState(); renderSideMyTrips(); renderMyTrips();
 
+    localStorage.removeItem('wai_pending_gen');
     addGenLine('> 已儲存到本機裝置 ✓', 'done');
     setGenPhase('行程就緒！');
-    showGenDoneButton(newTrip.id);
+    showGenDoneButton(trip.id);
 
-    // Firebase 背景同步，不阻擋編輯按鈕
-    if (firebaseEnabled) {
-      persistMicroTripInBackground(newTrip);
-    }
+    if (firebaseEnabled) persistMicroTripInBackground(trip);
 
   } catch (error) {
+    localStorage.removeItem('wai_pending_gen');
     isGeneratingTrip = false;
     addGenLine('> 錯誤：' + error.message, 'warn');
     setGenPhase('生成失敗，請嘗試重新發起');
     setTimeout(() => { hideGenPanel(); showToast('生成行程失敗：' + error.message, 'red'); }, 1500);
-    console.error('finishWizard error:', error);
-    myTrips.unshift(newTrip);
-    saveState(); renderSideMyTrips(); renderMyTrips();
+    console.error('_doGeneration error:', error);
     return;
   }
   isGeneratingTrip = false;
