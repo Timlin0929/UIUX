@@ -1310,28 +1310,44 @@ async function fetchAndBuildLiveMapsHint(wizardData) {
   return buildLiveMapsPoiHintBlock(places);
 }
 
+// 將「天數字串」統一轉成分鐘（支援 N小時 / 兩天一夜，並相容舊字串）
+function parseDurationMinutes(days) {
+  const s = String(days || '').trim();
+  if (s === '2天' || s === '兩天一夜') return 960;          // 多日（過夜）以兩日活動估算
+  const h = s.match(/^(\d+(?:\.\d+)?)\s*小時$/);
+  if (h) return Math.round(parseFloat(h[1]) * 60);          // N小時 / N.5小時
+  if (s === '半天') return 240;                              // 舊資料相容
+  if (s === '1天')  return 480;                              // 舊資料相容
+  return 480;                                                // fallback
+}
+
 function isLongTrip(days) {
   return String(days || '') === '2天';
 }
 
 function getDurationStopRange(days) {
-  if (days === '0.5小時') return { min: 1, max: 2 };
-  if (days === '1小時')  return { min: 2, max: 3 };
-  if (days === '2小時')  return { min: 3, max: 4 };
-  if (days === '半天')   return { min: 4, max: 6 };
-  if (days === '1天')   return { min: 8, max: 12 };
-  if (days === '2天')   return { min: 12, max: 18 };
-  return { min: 8, max: 12 }; // fallback
+  if (isLongTrip(days)) return { min: 12, max: 18 };
+  const m = parseDurationMinutes(days);
+  const mid = Math.max(1, Math.round(m / 55));
+  return { min: Math.max(1, mid - 1), max: mid + 2 };
 }
 
 function calcTripEndTime(startTime, days) {
-  const durationMap = {
-    '0.5小時': 30, '1小時': 60, '2小時': 120,
-    '半天': 240, '1天': 480, '2天': 960
-  };
-  const duration = durationMap[days] || 480;
+  const duration = parseDurationMinutes(days);
   const startMin = timeStringToMinutes(normalizeClockInput(startTime, '09:00'));
   return minutesToTimeString(startMin + duration);
+}
+
+// 計算行程每日時間窗口（單日：start–end；兩天一夜：第一天時數 + 第二天結束時間）
+function getTripDayWindows(wizardData) {
+  const start = normalizeClockInput(wizardData.startTime, '09:00');
+  if (!isLongTrip(wizardData.days)) {
+    return { multi: false, start, end: calcTripEndTime(start, wizardData.days) };
+  }
+  const d1h = Math.min(12, Math.max(1, Math.round(Number(wizardData.day1Hours) || 8)));
+  const day1End = minutesToTimeString(timeStringToMinutes(start) + d1h * 60);
+  const day2End = normalizeClockInput(wizardData.day2EndTime, '12:00');
+  return { multi: true, start, day1Start: start, day1End, day1Hours: d1h, day2Start: start, day2End };
 }
 
 function getPromptRuleLines(wizardData, mode) {
@@ -1342,9 +1358,12 @@ function getPromptRuleLines(wizardData, mode) {
   const interests = (wizardData.interests || []).join('、') || '多元';
   const detailed = mode !== 'preview';
   const startTime = normalizeClockInput(wizardData.startTime, '09:00');
-  const endTime = calcTripEndTime(startTime, days);
+  const win = getTripDayWindows(wizardData);
+  const endTime = win.multi ? win.day2End : win.end;
   const lines = [
-    `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
+    win.multi
+      ? `1. 這是「兩天一夜」行程：第一天 ${win.start}–${win.day1End}（約 ${win.day1Hours} 小時），第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程。請依兩天分配景點，第二天行程明顯較短`
+      : `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
     isSolo
       ? '2. 獨旅行程：重視個人節奏與安靜體驗，景點不須考慮大型團體容納量，可含較私密或需排隊的場所'
       : `2. 適合 ${people} 人同行，優先選擇可接待 ${people} 的景點、餐廳與活動場所`,
@@ -1360,9 +1379,9 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('8. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35');
     lines.push('9. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
     if (isLongTrip(days)) {
-      lines.push('13. 行程規劃應避開塞車路段，優先交通順暢、少折返路線');
-      lines.push('14. 若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
-      lines.push('15. 需安排 12:00-13:30 的彈性午餐停留時段');
+      lines.push(`13. 兩天一夜分配：第一天 ${win.start}–${win.day1End} 安排主要景點與過夜；第二天約 ${win.day2Start} 開始、最後一站需在 ${win.day2End} 前後 15 分鐘結束並返程，第二天景點數量明顯少於第一天`);
+      lines.push('14. 行程規劃應避開塞車路段，優先交通順暢、少折返路線；若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
+      lines.push(`15. 第一天安排 12:00-13:30 彈性午餐；第二天若於 ${win.day2End} 前結束，午餐視結束時間彈性安排`);
     }
     const dest = wizardData.dest || wizardData.destCustom || '台東';
     const defaultHub = getDefaultTransitHub(dest);
@@ -1378,15 +1397,17 @@ function getPromptRuleLines(wizardData, mode) {
 
 function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const destination = wizardData.dest || wizardData.destCustom || '台東';
-  const tripStartTime = normalizeClockInput(wizardData.startTime, '09:00');
-  const tripEndTime = calcTripEndTime(tripStartTime, wizardData.days || '1天');
+  const win = getTripDayWindows(wizardData);
+  const tripStartTime = win.start;
   const isSolo = (wizardData.people || '2人') === '1人';
 
   const contextBlock = [
     `目的地：${destination}`,
     wizardData.departureDate ? `出發日期：${wizardData.departureDate}` : null,
     wizardData.returnDate ? `回程日期：${wizardData.returnDate}` : null,
-    `時間長度：${wizardData.days || '1天'}（${tripStartTime} ～ ${tripEndTime}，請安排景點填滿此時段）`,
+    win.multi
+      ? `時間長度：兩天一夜（第一天 ${win.start}–${win.day1End} 約 ${win.day1Hours} 小時並過夜；第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程）`
+      : `時間長度：${wizardData.days || '1天'}（${win.start} ～ ${win.end}，請安排景點填滿此時段）`,
     isSolo ? '旅行方式：獨旅' : `同行人數：${wizardData.people || '2人'}`,
     `行程節奏：${wizardData.pace || '平衡'}`,
     `主要交通工具：${({ taxi: '計程車', scooter: '機車', car: '汽車' }[wizardData.transportMode]) || '汽車'}（各段移動以此工具為主，短程可步行）`,
@@ -1991,12 +2012,8 @@ function getDestinationMaxDistanceMeters(destinationText) {
 }
 
 function getDurationMaxLegDistanceMeters(days) {
-  if (days === '0.5小時') return 6000;
-  if (days === '1小時') return 10000;
-  if (days === '2小時') return 16000;
-  if (days === '半天') return 30000;
-  if (days === '2天') return 90000;
-  return 50000;
+  if (isLongTrip(days)) return 90000;
+  return Math.min(60000, Math.max(6000, Math.round(parseDurationMinutes(days) / 480 * 50000)));
 }
 
 function getPoiCacheCenter(poiCache) {
@@ -3433,7 +3450,7 @@ function closeModeChoice() {
 function selectTripMode(mode) {
   closeModeChoice();
   wizStep = 0;
-  wizData = { days: '1天', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
+  wizData = { days: '8小時', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
@@ -3479,9 +3496,49 @@ function renderWizard() {
       </div>
       <div class="wizard-field">
         <label>整體旅行時間</label>
-        <select id="wizDays" onchange="updateWizardDays(this.value)">
-          ${['0.5小時','1小時','2小時','半天','1天','2天'].map(d=>`<option value="${d}" ${wizData.days==d?'selected':''}>${d}</option>`).join('')}
-        </select>
+        ${(() => {
+          const isMulti = isLongTrip(wizData.days);
+          const hours = Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
+          const startT = wizData.startTime || '09:00';
+          const endT = calcTripEndTime(startT, wizData.days);
+          const day1Hours = Math.min(12, Math.max(1, Math.round(Number(wizData.day1Hours) || 8)));
+          const day1End = minutesToTimeString(timeStringToMinutes(startT) + day1Hours * 60);
+          const day2End = normalizeClockInput(wizData.day2EndTime, '12:00');
+          const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:22px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+          return `
+            <div class="wizard-chips" style="margin-bottom:12px">
+              <button class="wizard-tag${!isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('single')">☀️ 單日</button>
+              <button class="wizard-tag${isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('multi')">🌙 兩天一夜</button>
+            </div>
+            ${isMulti ? `
+              <div style="display:flex;flex-direction:column;gap:14px;">
+                <div>
+                  <div style="font-size:13px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第一天遊玩時數</div>
+                  <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+                    ${stepBtn('−', 'adjustDay1Hours(-1)', day1Hours <= 1)}
+                    <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">${day1Hours} 小時</div>
+                    ${stepBtn('＋', 'adjustDay1Hours(1)', day1Hours >= 12)}
+                  </div>
+                </div>
+                <div>
+                  <div style="font-size:13px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
+                  <input type="time" value="${day2End}" onchange="setDay2EndTime(this.value)" style="width:100%;padding:10px 12px;border:1px solid #d8e2ef;border-radius:12px;font-size:15px;color:#1f3a52;background:#f7fbff;">
+                </div>
+              </div>
+              <p style="margin-top:10px;font-size:12px;color:#5f6876;text-align:center;">🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）</p>
+            ` : `
+              <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+                ${stepBtn('−', 'adjustTripHours(-1)', hours <= 1)}
+                <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">${hours} 小時</div>
+                ${stepBtn('＋', 'adjustTripHours(1)', hours >= 12)}
+              </div>
+              <div class="wizard-chips" style="justify-content:center;margin-top:10px">
+                ${[2,4,6,8,10].map(n => `<button class="wizard-tag${hours === n ? ' active' : ''}" type="button" onclick="setTripHours(${n})">${n}h</button>`).join('')}
+              </div>
+              <p style="margin-top:10px;font-size:12px;color:#5f6876;text-align:center;">🕘 預計 ${startT} – ${endT}・約 ${hours} 小時<span style="color:#8fa4b8;">（出發時間可於下一步調整）</span></p>
+            `}
+          `;
+        })()}
       </div>`;
 
   } else if (wizStep===1) {
@@ -3602,24 +3659,12 @@ function renderWizard() {
 }
 
 function clampPreviewStopsByDuration(days) {
-  if (days === '0.5小時') return 2;
-  if (days === '1小時') return 3;
-  if (days === '2小時') return 4;
-  if (days === '半天') return 5;
-  if (days === '2天') return 6;
-  return 5;
+  const r = getDurationStopRange(days);
+  return Math.min(8, Math.round((r.min + r.max) / 2));
 }
 
 function getPreviewDurationMinutes(days) {
-  switch (days) {
-    case '0.5小時': return 30;
-    case '1小時': return 60;
-    case '2小時': return 120;
-    case '半天': return 240;
-    case '1天': return 480;
-    case '2天': return 960;
-    default: return 480;
-  }
+  return parseDurationMinutes(days);
 }
 
 function getMaxSlotMinutes(days, stopCount) {
@@ -3647,6 +3692,52 @@ function updateWizardDays(value) {
   wizData.days = value;
   wizData.slotMinutes = getSafeSlotMinutes(value, wizData.pace || '平衡');
   scheduleWizardPreviewRequest('step2-days');
+  renderWizard();
+}
+
+// 切換「單日 / 兩天一夜」
+function setTripDurationMode(mode) {
+  if (mode === 'multi') {
+    if (!wizData.day1Hours) wizData.day1Hours = 8;        // 第一天預設 8 小時
+    if (!wizData.day2EndTime) wizData.day2EndTime = '12:00'; // 第二天預設玩到中午
+    updateWizardDays('2天');
+  } else {
+    // 由多日切回單日預設 8 小時；本來就是單日則沿用目前時數
+    const h = isLongTrip(wizData.days)
+      ? 8
+      : Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
+    updateWizardDays(`${h}小時`);
+  }
+  autoUpdateReturnDate();
+}
+
+// 單日：直接設定小時數（1–12）
+function setTripHours(h) {
+  const hours = Math.min(12, Math.max(1, Math.round(h)));
+  updateWizardDays(`${hours}小時`);
+  autoUpdateReturnDate();
+}
+
+// 單日：步進調整小時數
+function adjustTripHours(delta) {
+  setTripHours(Math.round(parseDurationMinutes(wizData.days) / 60) + delta);
+}
+
+// 兩天一夜：第一天遊玩時數（1–12）
+function setDay1Hours(h) {
+  wizData.day1Hours = Math.min(12, Math.max(1, Math.round(h)));
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days, wizData.pace || '平衡');
+  scheduleWizardPreviewRequest('step0-day1');
+  renderWizard();
+}
+function adjustDay1Hours(delta) {
+  setDay1Hours((Number(wizData.day1Hours) || 8) + delta);
+}
+
+// 兩天一夜：第二天結束時間（玩到幾點）
+function setDay2EndTime(value) {
+  wizData.day2EndTime = normalizeClockInput(value, '12:00');
+  scheduleWizardPreviewRequest('step0-day2');
   renderWizard();
 }
 
@@ -3878,9 +3969,7 @@ function selectTransport(mode) {
 
 function autoUpdateReturnDate() {
   if (!wizData.departureDate) return;
-  const durationMap = { '0.5小時': 0, '1小時': 0, '2小時': 0, '半天': 0, '1天': 0, '2天': 1 };
-  const addDays = Object.prototype.hasOwnProperty.call(durationMap, wizData.days || '1天')
-    ? durationMap[wizData.days || '1天'] : 0;
+  const addDays = isLongTrip(wizData.days) ? 1 : 0;
   const d = new Date(wizData.departureDate);
   d.setDate(d.getDate() + addDays);
   wizData.returnDate = d.toISOString().split('T')[0];
@@ -3998,8 +4087,9 @@ async function finishWizard() {
   if (isGeneratingTrip) return;
 
   const dest = wizData.dest || wizData.destCustom || '台東';
-  const days = wizData.days || '1天';
-  const budgetMap = {'0.5小時':'$200','1小時':'$300','2小時':'$500','半天':'$800','1天':'$1,500','2天':'$3,000'};
+  const days = wizData.days || '8小時';
+  const _durM = parseDurationMinutes(days);
+  const defaultBudget = _durM <= 120 ? '$300' : _durM <= 240 ? '$800' : _durM <= 480 ? '$1,500' : '$3,000';
   const tripMode = wizData.tripMode || 'solo';
   const inviteCode = tripMode === 'collab'
     ? 'WNDR-' + Math.random().toString(36).substring(2, 6).toUpperCase()
@@ -4009,7 +4099,7 @@ async function finishWizard() {
     id: 'my_' + Date.now(), title: `${dest} ${days}微旅行`,
     emoji: emojiMap[dest] || '✈️',
     cc: ['c0','c1','c2','c3'][Math.floor(Math.random()*4)],
-    days, region: dest, budget: wizData.budget || budgetMap[days] || '$1,500',
+    days, region: dest, budget: wizData.budget || defaultBudget,
     people: wizData.people || (wizData.tripMode === 'solo' ? '1人' : '2人'), status: 'planning',
     createdAt: new Date().toLocaleDateString('zh-TW'),
     tripMode,
@@ -4026,6 +4116,7 @@ async function finishWizard() {
       returnDate: wizData.returnDate || '',
       budget: wizData.budget || '',
       accommodation: isLongTrip(days) ? (wizData.accommodation || '飯店') : '',
+      ...(isLongTrip(days) ? { day1Hours: wizData.day1Hours || 8, day2EndTime: wizData.day2EndTime || '12:00' } : {}),
       desiredSpots: (wizData.desiredSpots || '').trim()
     },
     stops: []

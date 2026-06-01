@@ -7789,9 +7789,19 @@ body.prototype-mode .prototype-id-chip {
 
   // ── AI 重新規劃 ──────────────────────────────────────────────
 
+  // 將「天數字串」統一轉成分鐘（支援 N小時 / 兩天一夜，並相容舊字串）
+  function parseDurationMinutes(days) {
+    const s = String(days || '').trim();
+    if (s === '2天' || s === '兩天一夜') return 960;
+    const h = s.match(/^(\d+(?:\.\d+)?)\s*小時$/);
+    if (h) return Math.round(parseFloat(h[1]) * 60);
+    if (s === '半天') return 240;
+    if (s === '1天')  return 480;
+    return 480;
+  }
+
   function calcReplanEndTime(startTime, days) {
-    const durationMap = { '0.5小時': 30, '1小時': 60, '2小時': 120, '半天': 240, '1天': 480, '2天': 960 };
-    const duration = durationMap[days] || 480;
+    const duration = parseDurationMinutes(days);
     const parts = String(startTime || '09:00').split(':').map(Number);
     const total = (parts[0] * 60 + (parts[1] || 0)) + duration;
     return minutesToClock(total);
@@ -7911,8 +7921,9 @@ body.prototype-mode .prototype-id-chip {
     const budget = (wizardData.budget || '').trim();
     const accommodation = (wizardData.accommodation || '').trim();
     const desiredSpots = (wizardData.desiredSpots || '').trim();
-    const stopRanges = { '0.5小時': [1, 2], '1小時': [2, 3], '2小時': [2, 4], '半天': [3, 5], '1天': [5, 8], '2天': [8, 14] };
-    const [min, max] = stopRanges[days] || [4, 7];
+    const _durMin = parseDurationMinutes(days);
+    const _mid = Math.max(1, Math.round(_durMin / 60));
+    const [min, max] = (String(days) === '2天' || String(days) === '兩天一夜') ? [8, 14] : [Math.max(1, _mid - 1), _mid + 2];
     const blockedSpots = getBlockedSpotNames(dest).slice(-25);
     const blockedHint = blockedSpots.length
       ? `7. 以下景點驗證失敗或不真實，絕對禁止使用：${blockedSpots.join('、')}`
