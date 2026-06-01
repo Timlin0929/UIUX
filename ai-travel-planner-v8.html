@@ -7800,6 +7800,28 @@ body.prototype-mode .prototype-id-chip {
     return 480;
   }
 
+  // 人數 → 整數（容錯舊字串：「6人」→6、「3-4人」→3、「5-8人」→5、「1人」→1）
+  function getPeopleCount(people) {
+    const n = parseInt(String(people || ''), 10);
+    return Number.isFinite(n) && n > 0 ? Math.min(20, n) : 2;
+  }
+  // 人數分級：影響站數（stopDelta）與 prompt 的景點/用餐指示
+  function getPeopleProfile(people) {
+    const count = getPeopleCount(people);
+    if (count <= 1) return { count, tier: 'solo', stopDelta: 0,
+      planRule: '獨旅行程：重視個人節奏與安靜體驗，景點不須考慮大型團體容納量，可含較私密、需排隊或單人友善的場所',
+      introSentence: '生成一份適合獨旅者的完整可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往的地點' };
+    if (count <= 3) return { count, tier: 'small', stopDelta: 0,
+      planRule: `${count} 人小型同行：安排彈性高，可含精緻小店、咖啡廳或需短暫排隊的人氣店；用餐選擇不受大團體限制`,
+      introSentence: `生成一份適合 ${count} 人小型同行的完整可執行行程，安排靈活、可兼顧個別喜好` };
+    if (count <= 6) return { count, tier: 'medium', stopDelta: -1,
+      planRule: `${count} 人中型同行：優先安排可容納 ${count} 人的餐廳並預留訂位時段，避免座位極少或排隊過久的店；景點適合多人共同停留，站與站之間預留集合與移動緩衝`,
+      introSentence: `生成一份適合 ${count} 人中型團體的完整可執行行程，考慮團體動態與共同用餐安排` };
+    return { count, tier: 'large', stopDelta: -2,
+      planRule: `${count} 人大型團體：景點與餐廳必須能容納大團體、強烈建議事先訂位並安排共同用餐；避免狹小空間、長時間排隊或單人體驗型場所；集合、上下車與移動需預留更多緩衝，站點精簡、每站停留拉長`,
+      introSentence: `生成一份適合 ${count} 人大型團體的完整可執行行程，全程選擇可接待大團體的場所、預留訂位與共同用餐時段，並安排充足的集合緩衝` };
+  }
+
   function calcReplanEndTime(startTime, days) {
     const duration = parseDurationMinutes(days);
     const parts = String(startTime || '09:00').split(':').map(Number);
@@ -7869,6 +7891,7 @@ body.prototype-mode .prototype-id-chip {
       '【重要限制】',
       `以下景點已使用或驗證失敗，絕對禁止重複：${excluded}`,
       isSolo ? `旅行方式：獨旅，風格：${theme}，興趣：${interests}` : `同行人數：${people}，風格：${theme}，興趣：${interests}`,
+      `👥 人數考量：${getPeopleProfile(people).planRule}`,
       '【要求】',
       `1. 景點必須是 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '2. 禁止模糊描述（如「部落巷弄深度探索」「當地文化體驗」），必須是具體場所名稱',
@@ -7893,6 +7916,7 @@ body.prototype-mode .prototype-id-chip {
       '【行程限制（必須符合）】',
       `時間窗口：${startTime} ～ ${endTime}，行程長度：${days}`,
       isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `旅伴：${people}，節奏：${pace}，風格：${theme}`,
+      `👥 人數考量：${getPeopleProfile(people).planRule}`,
       `興趣方向：${interests}`,
       '【排除清單（絕對禁止重複）】',
       excluded || '（無）',
@@ -7923,7 +7947,10 @@ body.prototype-mode .prototype-id-chip {
     const desiredSpots = (wizardData.desiredSpots || '').trim();
     const _durMin = parseDurationMinutes(days);
     const _mid = Math.max(1, Math.round(_durMin / 60));
-    const [min, max] = (String(days) === '2天' || String(days) === '兩天一夜') ? [8, 14] : [Math.max(1, _mid - 1), _mid + 2];
+    const _base = (String(days) === '2天' || String(days) === '兩天一夜') ? [8, 14] : [Math.max(1, _mid - 1), _mid + 2];
+    const _peopleProfile = getPeopleProfile(people);
+    const min = Math.max(1, _base[0] + _peopleProfile.stopDelta);
+    const max = Math.max(min, _base[1] + _peopleProfile.stopDelta);
     const blockedSpots = getBlockedSpotNames(dest).slice(-25);
     const blockedHint = blockedSpots.length
       ? `7. 以下景點驗證失敗或不真實，絕對禁止使用：${blockedSpots.join('、')}`
@@ -7939,9 +7966,7 @@ body.prototype-mode .prototype-id-chip {
       ? `\n⚠️ 用戶特別希望前往：${desiredSpots}。請優先安排這些景點，並圍繞它們規劃行程。`
       : '';
     return [
-      isSolo
-        ? '你是台灣微旅行規劃 AI。根據以下條件，生成一份適合獨旅者的完整可執行行程，重視個人節奏與自我探索，使用 JSON 格式回覆。'
-        : `你是台灣微旅行規劃 AI。根據以下條件，生成一份適合 ${people} 同行的完整可執行行程，考慮團體動態與共同用餐安排，使用 JSON 格式回覆。`,
+      `你是台灣微旅行規劃 AI。根據以下條件，${_peopleProfile.introSentence}，使用 JSON 格式回覆。`,
       '',
       '【行程條件】',
       `目的地：${dest}`,
@@ -7962,6 +7987,7 @@ body.prototype-mode .prototype-id-chip {
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
+      `👥 人數考量：${_peopleProfile.planRule}`,
       blockedHint,
       visitedHint,
       '',

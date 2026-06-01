@@ -1325,11 +1325,35 @@ function isLongTrip(days) {
   return String(days || '') === '2天';
 }
 
-function getDurationStopRange(days) {
-  if (isLongTrip(days)) return { min: 12, max: 18 };
-  const m = parseDurationMinutes(days);
-  const mid = Math.max(1, Math.round(m / 55));
-  return { min: Math.max(1, mid - 1), max: mid + 2 };
+// 人數 → 整數（容錯舊字串：「6人」→6、「3-4人」→3、「5-8人」→5、「1人」→1）
+function getPeopleCount(people) {
+  const n = parseInt(String(people || ''), 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(20, n) : 2;
+}
+// 人數分級：影響站數（stopDelta）與 prompt 的景點/用餐指示
+function getPeopleProfile(people) {
+  const count = getPeopleCount(people);
+  if (count <= 1) return { count, tier: 'solo', stopDelta: 0,
+    planRule: '獨旅行程：重視個人節奏與安靜體驗，景點不須考慮大型團體容納量，可含較私密、需排隊或單人友善的場所',
+    introSentence: '根據用戶需求生成一份適合獨旅者的可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往且不須等候大型團體的地點。' };
+  if (count <= 3) return { count, tier: 'small', stopDelta: 0,
+    planRule: `${count} 人小型同行：安排彈性高，可含精緻小店、咖啡廳或需短暫排隊的人氣店；用餐選擇不受大團體限制`,
+    introSentence: `根據用戶需求生成一份適合 ${count} 人小型同行的可執行行程，安排靈活、可兼顧個別喜好，景點與餐廳選擇彈性。` };
+  if (count <= 6) return { count, tier: 'medium', stopDelta: -1,
+    planRule: `${count} 人中型同行：優先安排可容納 ${count} 人的餐廳並預留訂位時段，避免座位極少或排隊過久的店；景點適合多人共同停留，站與站之間預留集合與移動緩衝`,
+    introSentence: `根據用戶需求生成一份適合 ${count} 人中型團體的可執行行程，考慮團體動態、優先可容納多人的餐廳並安排共同用餐時段。` };
+  return { count, tier: 'large', stopDelta: -2,
+    planRule: `${count} 人大型團體：景點與餐廳必須能容納大團體、強烈建議事先訂位並安排共同用餐；避免狹小空間、長時間排隊或單人體驗型場所；集合、上下車與移動需預留更多緩衝，站點精簡、每站停留拉長`,
+    introSentence: `根據用戶需求生成一份適合 ${count} 人大型團體的可執行行程，全程選擇可接待大團體的場所、預留訂位與共同用餐時段，並安排充足的集合與移動緩衝。` };
+}
+
+function getDurationStopRange(days, people) {
+  const base = isLongTrip(days)
+    ? { min: 12, max: 18 }
+    : (() => { const m = parseDurationMinutes(days); const mid = Math.max(1, Math.round(m / 55)); return { min: Math.max(1, mid - 1), max: mid + 2 }; })();
+  const d = getPeopleProfile(people).stopDelta;
+  const min = Math.max(1, base.min + d);
+  return { min, max: Math.max(min, base.max + d) };
 }
 
 function calcTripEndTime(startTime, days) {
@@ -1364,15 +1388,13 @@ function getPromptRuleLines(wizardData, mode) {
     win.multi
       ? `1. 這是「兩天一夜」行程：第一天 ${win.start}–${win.day1End}（約 ${win.day1Hours} 小時），第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程。請依兩天分配景點，第二天行程明顯較短`
       : `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
-    isSolo
-      ? '2. 獨旅行程：重視個人節奏與安靜體驗，景點不須考慮大型團體容納量，可含較私密或需排隊的場所'
-      : `2. 適合 ${people} 人同行，優先選擇可接待 ${people} 的景點、餐廳與活動場所`,
+    `2. ${getPeopleProfile(people).planRule}`,
     `3. 符合 ${pace} 的節奏`,
     `4. 強調 ${interests} 面向`
   ];
 
   if (detailed) {
-    const { min, max } = getDurationStopRange(days);
+    const { min, max } = getDurationStopRange(days, people);
     lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、行程最後一站的結束時間必須在 ${endTime} 前後 15 分鐘內，嚴禁行程在 ${endTime} 的 15 分鐘前完全結束；若景點不足請加入具體名稱的餐廳、咖啡廳、市場、公園等補充體驗（禁止使用「在地午餐」等模糊名稱）`);
     lines.push('6. 每站包含時間、景點名稱、推薦理由、營業時間；請勿在 JSON 中輸出 lat/lng 座標或廁所資料，座標與廁所由系統自動查詢');
     lines.push('7. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
@@ -1435,9 +1457,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     ? `所有景點必須真實位於「${destination}」範圍內（中心座標 lat ${destCenter.lat}, lng ${destCenter.lng}，有效半徑約 ${destRadiusKm} 公里），嚴禁規劃其他地區的景點。`
     : `所有景點必須真實位於「${destination}」指定地區，嚴禁規劃目的地以外的景點。`;
 
-  const intro = isSolo
-    ? `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}根據用戶需求生成一份適合獨旅者的可執行行程，重視個人節奏、自我探索與彈性安排，景點偏向可獨自前往且不須等候大型團體的地點。`
-    : `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}根據用戶需求生成一份適合 ${wizardData.people || '多人'} 同行的可執行行程，考慮團體動態，優先選擇可接待多人的景點、餐廳與活動場所，並安排共同用餐時段。`;
+  const intro = `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}${getPeopleProfile(wizardData.people).introSentence}`;
 
   const desiredNote = wizardData.desiredSpots
     ? `\n\n⚠️ 用戶特別希望前往：${wizardData.desiredSpots}。請優先安排這些景點（時間不足時選最重要的），並圍繞它們規劃行程。`
@@ -3475,7 +3495,7 @@ function renderWizard() {
 
   if (wizStep===0) {
     // Step 0：目的地
-    wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '1天', wizData.pace || '平衡');
+    wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '1天', wizData.pace || '平衡', wizData.people);
     body.innerHTML = `<h3 class="wizard-block-title">✈️ 想去哪裡探險？</h3>
       <p class="wizard-block-help">選擇熱門景點，或自由輸入任何地點</p>
       <div class="wizard-field">
@@ -3490,9 +3510,20 @@ function renderWizard() {
       </div>
       <div class="wizard-field">
         <label>旅行人數</label>
-        <select id="wizPeople" onchange="wizData.people=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step0-people')">
-          ${['1人','2人','3-4人','5-8人'].map(p=>`<option ${wizData.people===p?'selected':''}>${p}</option>`).join('')}
-        </select>
+        ${(() => {
+          const people = Math.min(20, Math.max(1, parseInt(wizData.people, 10) || 2));
+          const pBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:22px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+          return `
+            <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+              ${pBtn('−', 'adjustTripPeople(-1)', people <= 1)}
+              <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">👥 ${people} 人</div>
+              ${pBtn('＋', 'adjustTripPeople(1)', people >= 20)}
+            </div>
+            <div class="wizard-chips" style="justify-content:center;margin-top:10px">
+              ${[1,2,4,6].map(n => `<button class="wizard-tag${people === n ? ' active' : ''}" type="button" onclick="setTripPeople(${n})">${n}人</button>`).join('')}
+            </div>
+          `;
+        })()}
       </div>
       <div class="wizard-field">
         <label>整體旅行時間</label>
@@ -3658,8 +3689,8 @@ function renderWizard() {
   syncWizardTimeOptionAvailability();
 }
 
-function clampPreviewStopsByDuration(days) {
-  const r = getDurationStopRange(days);
+function clampPreviewStopsByDuration(days, people) {
+  const r = getDurationStopRange(days, people);
   return Math.min(8, Math.round((r.min + r.max) / 2));
 }
 
@@ -3681,8 +3712,8 @@ function doesScheduleFitDuration(days, slotMinutes) {
   return requiredMinutes <= durationMinutes;
 }
 
-function getSafeSlotMinutes(days, pace) {
-  const stopCount = clampPreviewStopsByDuration(days || '1天');
+function getSafeSlotMinutes(days, pace, people) {
+  const stopCount = clampPreviewStopsByDuration(days || '1天', people);
   const maxSlotMinutes = getMaxSlotMinutes(days || '1天', stopCount);
   const defaultSlot = getDefaultSlotMinutes(pace || '平衡');
   return Math.min(defaultSlot, maxSlotMinutes);
@@ -3690,7 +3721,7 @@ function getSafeSlotMinutes(days, pace) {
 
 function updateWizardDays(value) {
   wizData.days = value;
-  wizData.slotMinutes = getSafeSlotMinutes(value, wizData.pace || '平衡');
+  wizData.slotMinutes = getSafeSlotMinutes(value, wizData.pace || '平衡', wizData.people);
   scheduleWizardPreviewRequest('step2-days');
   renderWizard();
 }
@@ -3723,10 +3754,24 @@ function adjustTripHours(delta) {
   setTripHours(Math.round(parseDurationMinutes(wizData.days) / 60) + delta);
 }
 
+// 旅行人數：直接設定（1–20，存成「N人」字串）
+function setTripPeople(n) {
+  const people = Math.min(20, Math.max(1, Math.round(n)));
+  wizData.people = `${people}人`;
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days, wizData.pace || '平衡', wizData.people);
+  renderFlowPreview();
+  scheduleWizardPreviewRequest('step0-people');
+  renderWizard();
+}
+// 旅行人數：步進調整
+function adjustTripPeople(delta) {
+  setTripPeople((parseInt(wizData.people, 10) || 2) + delta);
+}
+
 // 兩天一夜：第一天遊玩時數（1–12）
 function setDay1Hours(h) {
   wizData.day1Hours = Math.min(12, Math.max(1, Math.round(h)));
-  wizData.slotMinutes = getSafeSlotMinutes(wizData.days, wizData.pace || '平衡');
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days, wizData.pace || '平衡', wizData.people);
   scheduleWizardPreviewRequest('step0-day1');
   renderWizard();
 }
@@ -3743,7 +3788,7 @@ function setDay2EndTime(value) {
 
 function updateWizardPace(value) {
   wizData.pace = value;
-  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', value);
+  wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', value, wizData.people);
   scheduleWizardPreviewRequest('step2-pace');
   renderWizard();
 }
@@ -3877,7 +3922,7 @@ function renderFlowPreview() {
 
   const defaultHub = getDefaultTransitHub(dest);
   const allStops = buildInterestDrivenStops(dest, interests, pace, wizData.startLocation || defaultHub, wizData.endLocation || defaultHub);
-  const stopCount = clampPreviewStopsByDuration(days);
+  const stopCount = clampPreviewStopsByDuration(days, wizData.people);
   const durationMinutes = getPreviewDurationMinutes(days);
   const previewStops = allStops.slice(0, Math.max(2, stopCount));
 
