@@ -5785,6 +5785,15 @@ body.prototype-mode .prototype-id-chip {
       };
     }
 
+    // 對汽車/機車/腳踏車模式請求替代路線，讓後面可以自動選距離最短的那條
+    if (
+      request.travelMode === google.maps.TravelMode.DRIVING ||
+      request.travelMode === google.maps.TravelMode.TWO_WHEELER ||
+      request.travelMode === google.maps.TravelMode.BICYCLING
+    ) {
+      request.provideRouteAlternatives = true;
+    }
+
     return request;
   }
 
@@ -9036,6 +9045,7 @@ body.prototype-mode .prototype-id-chip {
   let routeRenderToken = 0;
   let mapRebuildToken = 0;
   let routeViewportAnimationToken = 0;
+  let toiletRenderToken = 0;
   let routeMidLabels = [];
 
   const mapPinLocations = {};
@@ -9574,40 +9584,45 @@ body.prototype-mode .prototype-id-chip {
 
   async function renderToiletMarkersForActiveRouteStage() {
     if (!map || !window.google || !google.maps) return;
+    // Token guard: if a newer call arrives, abandon this one mid-async to prevent race conditions
+    const myToken = ++toiletRenderToken;
     clearToiletMarkers();
 
     let stopsToRender = [];
-    
+
     // 優先顯示點選的行程階段的廁所
     if (activeItineraryStopId) {
       stopsToRender = getStopsForActiveItineraryToilets();
     } else if (activeRouteStage !== null) {
       stopsToRender = getStopsForActiveRouteStageToilets();
     } else {
-      // 如果沒有選擇特定階段，則顯示所有行程的廁所
-      stopsToRender = getAllToiletsFromStops();
+      // 未選擇任何階段時，不顯示廁所標記
+      stopsToRender = [];
     }
 
     if (stopsToRender.length === 0) {
-      layoutMapMarkers();
+      if (myToken === toiletRenderToken) layoutMapMarkers();
       return;
     }
 
     const service = getPlacesService();
 
     for (const { stop, stopIndex } of stopsToRender) {
+      if (myToken !== toiletRenderToken) return; // 已被新呼叫取代，中止
       const rawToilets = getStopToiletLocations(stop).slice(0, 3);
       let toilets = [];
 
       for (const toilet of rawToilets) {
+        if (myToken !== toiletRenderToken) return;
         const resolvedToilet = await resolveToiletCoordinatesNearStop(stop, toilet, service);
         if (resolvedToilet) toilets.push(resolvedToilet);
       }
-      
+
       // 若無可信座標，則使用 Google Places API 動態搜尋附近廁所。
+      if (myToken !== toiletRenderToken) return;
       if (toilets.length === 0) {
         toilets = await fetchFallbackToiletsNearStop(stop, service);
-        // 將動態搜尋到的廁所存回 stop；避免在 marker 渲染途中重跑整個列表造成競態清除。
+        if (myToken !== toiletRenderToken) return;
         if (toilets.length > 0) {
           stop.nearbyToiletLocations = toilets;
         }
@@ -9644,6 +9659,7 @@ body.prototype-mode .prototype-id-chip {
       });
     }
 
+    if (myToken !== toiletRenderToken) return;
     layoutMapMarkers();
     updateToiletSectionsInDOM();
   }
@@ -9710,9 +9726,29 @@ body.prototype-mode .prototype-id-chip {
   function layoutMapMarkers() {
     if (!map) return;
 
+    // 選取階段時，只顯示該階段的起點與終點景點 pin（廁所 pin 由 renderToiletMarkersForActiveRouteStage 管理）
+    let visibleAttractionPinIds = null; // null = 全部顯示
+    if (activeRouteStage !== null) {
+      const stage = routeStageCache.find((item) => item && item.index === activeRouteStage);
+      if (stage) {
+        visibleAttractionPinIds = new Set();
+        const originStop = Number.isInteger(stage.sourceStopIndex) ? replanStops[stage.sourceStopIndex] : null;
+        const destStop = Number.isInteger(stage.destinationStopIndex) ? replanStops[stage.destinationStopIndex] : null;
+        if (originStop && originStop.mapPinId) visibleAttractionPinIds.add(originStop.mapPinId);
+        if (destStop && destStop.mapPinId) visibleAttractionPinIds.add(destStop.mapPinId);
+      }
+    }
+
     const markerGroups = new Map();
     Object.entries(markers).forEach(([markerId, marker]) => {
       if (!marker) return;
+
+      if (!isToiletMarkerId(markerId)) {
+        const shouldShow = visibleAttractionPinIds === null || visibleAttractionPinIds.has(markerId);
+        marker.setVisible(shouldShow);
+        if (!shouldShow) return;
+      }
+
       const basePosition = getMarkerBasePosition(marker);
       if (!basePosition) return;
       const groupKey = buildMarkerGroupKey(basePosition);
@@ -9784,39 +9820,43 @@ body.prototype-mode .prototype-id-chip {
     const animationToken = ++routeViewportAnimationToken;
     const center = bounds.getCenter && bounds.getCenter();
 
-    if (center && typeof map.panTo === 'function') {
-      map.panTo(center);
-    }
+    if (Number.isFinite(maxZoom)) {
+      // Stage selection mode: compute upfront whether the two points are close or far
+      const ne = bounds.getNorthEast();
+      const sw = bounds.getSouthWest();
+      const latSpan = Math.max(Math.abs(ne.lat() - sw.lat()), 1e-7);
+      const lngSpan = Math.max(Math.abs(ne.lng() - sw.lng()), 1e-7);
+      const mapDiv = map.getDiv ? map.getDiv() : null;
+      const mapH = (mapDiv && mapDiv.offsetHeight) || 400;
+      const mapW = (mapDiv && mapDiv.offsetWidth) || 300;
+      const pxPerDeg = (256 * Math.pow(2, maxZoom)) / 360;
+      const wouldExceedMaxZoom = latSpan < mapH / pxPerDeg || lngSpan < mapW / pxPerDeg;
 
-    window.setTimeout(() => {
-      if (animationToken !== routeViewportAnimationToken) return;
-
-      if (Number.isFinite(maxZoom)) {
-        // Check if fitBounds would zoom beyond maxZoom (happens when two stops are close together).
-        // If so, skip fitBounds entirely to avoid the zoom-in-then-zoom-out double animation.
-        const ne = bounds.getNorthEast();
-        const sw = bounds.getSouthWest();
-        const latSpan = Math.max(Math.abs(ne.lat() - sw.lat()), 1e-7);
-        const lngSpan = Math.max(Math.abs(ne.lng() - sw.lng()), 1e-7);
-        const mapDiv = map.getDiv ? map.getDiv() : null;
-        const mapH = (mapDiv && mapDiv.offsetHeight) || 400;
-        const mapW = (mapDiv && mapDiv.offsetWidth) || 300;
-        const pxPerDeg = (256 * Math.pow(2, maxZoom)) / 360;
-        const wouldExceedMaxZoom = latSpan < mapH / pxPerDeg || lngSpan < mapW / pxPerDeg;
-        if (wouldExceedMaxZoom) {
+      if (wouldExceedMaxZoom) {
+        // Close points: pan to midpoint, then zoom in
+        if (center) map.panTo(center);
+        window.setTimeout(() => {
+          if (animationToken !== routeViewportAnimationToken) return;
           map.setZoom(maxZoom);
-          return;
-        }
-      }
-
-      map.fitBounds(bounds);
-
-      if (Number.isFinite(maxZoom)) {
+        }, center ? 260 : 0);
+      } else {
+        // Far points: fitBounds immediately so the map never stalls at the midpoint
+        map.fitBounds(bounds, { padding: 60 });
         google.maps.event.addListenerOnce(map, 'idle', () => {
           if (animationToken !== routeViewportAnimationToken) return;
           if (map.getZoom() > maxZoom) map.setZoom(maxZoom);
         });
       }
+      return;
+    }
+
+    // Full-route mode (no maxZoom): two-step pan-then-fit animation
+    if (center && typeof map.panTo === 'function') {
+      map.panTo(center);
+    }
+    window.setTimeout(() => {
+      if (animationToken !== routeViewportAnimationToken) return;
+      map.fitBounds(bounds);
     }, center ? 260 : 0);
   }
 
@@ -9843,6 +9883,12 @@ body.prototype-mode .prototype-id-chip {
     directionsRenderers.forEach((renderer, idx) => {
       if (renderer) {
         renderer.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null);
+      }
+    });
+
+    routeMidLabels.forEach((label, idx) => {
+      if (label) {
+        label.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null);
       }
     });
 
@@ -10053,12 +10099,23 @@ body.prototype-mode .prototype-id-chip {
           if (status === 'OK') {
             if (renderToken !== routeRenderToken) return;
 
-            const leg = response.routes[0].legs[0];
+            // 從所有替代路線中選距離最短的，避免 API 預設給繞遠路的路線
+            let bestRouteIndex = 0;
+            if (response.routes.length > 1) {
+              let minDist = Infinity;
+              response.routes.forEach((route, idx) => {
+                const dist = route.legs.reduce((sum, leg) => sum + (leg.distance ? leg.distance.value : 0), 0);
+                if (dist < minDist) { minDist = dist; bestRouteIndex = idx; }
+              });
+            }
+
+            const leg = response.routes[bestRouteIndex].legs[0];
             const segColor = ROUTE_MODE_COLORS[stageMode] || '#EA580C';
             const renderer = new google.maps.DirectionsRenderer({
               map: map,
               suppressMarkers: true,
               preserveViewport: true,
+              routeIndex: bestRouteIndex,
               polylineOptions: {
                 strokeColor: segColor,
                 strokeWeight: 6,
@@ -10095,7 +10152,7 @@ body.prototype-mode .prototype-id-chip {
             directionsRenderers[i] = renderer;
 
             // 在路線中間加入方向標籤，讓使用者清楚知道往哪個景點移動
-            const overviewPath = response.routes[0].overview_path;
+            const overviewPath = response.routes[bestRouteIndex].overview_path;
             if (overviewPath && overviewPath.length > 0) {
               const midPoint = overviewPath[Math.floor(overviewPath.length / 2)];
               const destLabel = destination.name || destination.title || '';
