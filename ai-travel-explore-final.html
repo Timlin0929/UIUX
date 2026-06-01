@@ -1411,6 +1411,13 @@ function getPromptRuleLines(wizardData, mode) {
     const endLoc = (wizardData.endLocation || '').trim() || defaultHub;
     lines.push(`${lines.length + 1}. 行程第一站必須從「${startLoc}」出發，這是旅客的集合起始點，需計算從此處到第一景點的移動時間`);
     lines.push(`${lines.length + 1}. 行程最後一站必須返回「${endLoc}」，這是旅客的結束點，需計算從最後景點返回此處的移動時間`);
+    const _rawStartLoc = (wizardData.startLocation || '').trim();
+    const _rawEndLoc   = (wizardData.endLocation   || '').trim();
+    if (_rawStartLoc || _rawEndLoc) {
+      const _from = _rawStartLoc || dest;
+      const _to   = _rawEndLoc   || dest;
+      lines.push(`${lines.length + 1}. 景點請沿「${_from}」→「${dest}」→「${_to}」路線廊道分布（各景點距此路線盡量在 5 公里內，景點不足時可擴展至 10 公里），行程方向由起點往目的地核心再往終點收尾，不要安排需要大幅折返的景點，避免景點全部集中在${dest}核心而忽略沿途地點`);
+    }
   } else {
     lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
   }
@@ -1453,9 +1460,13 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
 
   const destCenter = getDestinationCenter(destination);
   const destRadiusKm = Math.round(getDestinationMaxDistanceMeters(destination) / 1000);
-  const geoConstraint = destCenter
-    ? `所有景點必須真實位於「${destination}」範圍內（中心座標 lat ${destCenter.lat}, lng ${destCenter.lng}，有效半徑約 ${destRadiusKm} 公里），嚴禁規劃其他地區的景點。`
-    : `所有景點必須真實位於「${destination}」指定地區，嚴禁規劃目的地以外的景點。`;
+  const _startLocRaw = (wizardData.startLocation || '').trim();
+  const _endLocRaw   = (wizardData.endLocation   || '').trim();
+  const geoConstraint = (_startLocRaw || _endLocRaw)
+    ? `景點請沿「${_startLocRaw || destination}」→「${destination}」→「${_endLocRaw || destination}」的路線廊道分布，各景點距此路線盡量在 5 公里內（景點不足時可擴展至 10 公里）；行程方向由起點方向出發、途經${destination}核心、往終點方向收尾，嚴禁安排需大幅折返的景點，也不要把景點全部集中在${destination}核心附近而忽略沿途地點。`
+    : destCenter
+      ? `所有景點必須真實位於「${destination}」範圍內（中心座標 lat ${destCenter.lat}, lng ${destCenter.lng}，有效半徑約 ${destRadiusKm} 公里），嚴禁規劃其他地區的景點。`
+      : `所有景點必須真實位於「${destination}」指定地區，嚴禁規劃目的地以外的景點。`;
 
   const intro = `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}${getPeopleProfile(wizardData.people).introSentence}`;
 
@@ -1894,6 +1905,22 @@ function getDistanceMeters(a, b) {
   const h = Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
+function distancePointToSegmentMeters(point, segA, segB) {
+  const dx = segB.lng - segA.lng;
+  const dy = segB.lat - segA.lat;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-12) return getDistanceMeters(point, segA);
+  const t = Math.max(0, Math.min(1,
+    ((point.lng - segA.lng) * dx + (point.lat - segA.lat) * dy) / lenSq));
+  return getDistanceMeters(point, { lat: segA.lat + t * dy, lng: segA.lng + t * dx });
+}
+
+function isWithinCorridorKm(coord, startCoord, destCoord, endCoord, corridorKm) {
+  const limit = corridorKm * 1000;
+  return distancePointToSegmentMeters(coord, startCoord, destCoord) <= limit ||
+         distancePointToSegmentMeters(coord, destCoord, endCoord) <= limit;
 }
 
 const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
@@ -2930,35 +2957,53 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     : sourceStops;
   const destination = wizardData.dest || wizardData.destCustom || wizardData.region || '';
   const poiCache = await fetchDestinationPoiCache(destination);
+
+  // Fetch start/end coords early so they are available for corridor filtering below
+  const _defaultHub   = getDefaultTransitHub(destination);
+  const _userStartLoc = (wizardData.startLocation || '').trim();
+  const _userEndLoc   = (wizardData.endLocation   || '').trim();
+  const _startLocCalc = _userStartLoc || _defaultHub;
+  const _endLocCalc   = _userEndLoc   || _defaultHub;
+  const [_startCoords, _rawEndCoords] = await Promise.all([
+    fetchCoordinateFromGooglePlaces(_startLocCalc, destination).catch(() => null),
+    _startLocCalc === _endLocCalc
+      ? Promise.resolve(null)
+      : fetchCoordinateFromGooglePlaces(_endLocCalc, destination).catch(() => null),
+  ]);
+  const _endCoords = _startLocCalc === _endLocCalc ? _startCoords : _rawEndCoords;
+
   const sanitizedStops = sanitizeStopCoordinates(preMatchedStops, wizardData, poiCache);
   const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
-  const verifiedStops = await verifyAndFilterStopsWithPlaces(enrichedStops, destination, wizardData);
+
+  // Corridor filter: try 5km first; if too few stops, expand to 10km
+  let stopsForVerify = enrichedStops;
+  if (_startCoords && _endCoords) {
+    const _destCoord = getDestinationCenter(destination) || _startCoords;
+    const _minStops = getDurationStopRange(wizardData.days || '1天', wizardData.people || '2人').min;
+    const _corridorFilter = (km) => enrichedStops.filter(s => {
+      const c = getStopCoordinate(s);
+      return !c || isWithinCorridorKm(c, _startCoords, _destCoord, _endCoords, km);
+    });
+    const _narrow = _corridorFilter(5);
+    if (_narrow.length >= _minStops) {
+      stopsForVerify = _narrow;
+    } else {
+      const _wide = _corridorFilter(10);
+      if (_wide.length >= 2) stopsForVerify = _wide;
+    }
+  }
+
+  const verifiedStops = await verifyAndFilterStopsWithPlaces(stopsForVerify, destination, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
-  const defaultHub = getDefaultTransitHub(destination);
-  const userStartLoc = (wizardData.startLocation || '').trim();
-  const userEndLoc = (wizardData.endLocation || '').trim();
-  const startLocForCalc = userStartLoc || defaultHub;
-  const endLocForCalc = userEndLoc || defaultHub;
 
-  // Geocode for transport-mode distance estimation (always uses defaultHub as fallback)
-  const [startCoords, endCoords] = await Promise.all([
-    fetchCoordinateFromGooglePlaces(startLocForCalc, destination).catch(() => null),
-    startLocForCalc === endLocForCalc
-      ? Promise.resolve(null)
-      : fetchCoordinateFromGooglePlaces(endLocForCalc, destination).catch(() => null),
-  ]);
-  const resolvedEndCoords = startLocForCalc === endLocForCalc ? startCoords : endCoords;
-
-  const effectiveStartLoc = userStartLoc || defaultHub;
-  const effectiveEndLoc = userEndLoc || defaultHub;
   const enrichedWizardData = {
     ...wizardData,
-    startLocation: effectiveStartLoc,
-    endLocation: effectiveEndLoc,
-    startCoords: startCoords || null,
-    endCoords: resolvedEndCoords || null,
+    startLocation: _userStartLoc || _defaultHub,
+    endLocation:   _userEndLoc   || _defaultHub,
+    startCoords:   _startCoords  || null,
+    endCoords:     _endCoords    || null,
   };
   const withEndpoints = injectEndpointStops(withTransport, enrichedWizardData);
   return assignTransportModes(withEndpoints, enrichedWizardData.transportMode);

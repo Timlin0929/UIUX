@@ -7988,6 +7988,7 @@ body.prototype-mode .prototype-id-chip {
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
       `👥 人數考量：${_peopleProfile.planRule}`,
+      (startLoc || endLoc) ? `🗺️ 廊道分布：景點請沿「${startLoc || dest}」→「${dest}」→「${endLoc || dest}」路線廊道分布（盡量在距路線 5 公里內，景點不足時可擴展至 10 公里），行程方向由起點往目的地核心再往終點收尾，不要安排需大幅折返的景點` : null,
       blockedHint,
       visitedHint,
       '',
