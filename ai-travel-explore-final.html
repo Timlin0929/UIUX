@@ -1098,10 +1098,10 @@ let wizStep = 0;
 let wizData = {};
 
 // ── GEMINI & FIREBASE CONFIG ──
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3-flash-preview';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
-const VERTEX_API_BASE = 'https://us-central1-aiplatform.googleapis.com/v1';
+const VERTEX_API_BASE = 'https://aiplatform.googleapis.com/v1';
 const VERTEX_LOCAL_KEY = 'TRAVEL_VERTEX_API_KEY';
 const VERTEX_LOCAL_PROJECT = 'TRAVEL_VERTEX_PROJECT_ID';
 let firebaseDb = null;
@@ -1400,6 +1400,7 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('7. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
     lines.push('8. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35');
     lines.push('9. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
+    lines.push('10. 大型景區（如三仙台、伯朗大道、鯉魚潭）請拆成該景區內 2–4 個具體子景點／觀景點（例：三仙台觀景台、三仙台跨海拱橋、比西里岸部落、礫石灘），用正式可定位名稱，不要只填一個籠統的景區名；系統會自動把鄰近子景點合併成一站並標示範圍');
     if (isLongTrip(days)) {
       lines.push(`13. 兩天一夜分配：第一天 ${win.start}–${win.day1End} 安排主要景點與過夜；第二天約 ${win.day2Start} 開始、最後一站需在 ${win.day2End} 前後 15 分鐘結束並返程，第二天景點數量明顯少於第一天`);
       lines.push('14. 行程規劃應避開塞車路段，優先交通順暢、少折返路線；若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
@@ -1512,32 +1513,30 @@ function parsePlanJsonFromText(text) {
 
 async function fetchGeminiJson({ apiKey, model, payload }) {
   const vertex = getVertexConfig();
-  const endpoint = vertex.ready
-    ? `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
-    : `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
+  const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    throw new Error(`Gemini API 失敗（${response.status}）`);
+    throw new Error(`Vertex API 失敗（${response.status}）`);
   }
   return response.json();
 }
 
 async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
   const vertex = getVertexConfig();
-  const endpoint = vertex.ready
-    ? `${VERTEX_API_BASE}/projects/${encodeURIComponent(vertex.projectId)}/locations/us-central1/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`
-    : `${GEMINI_API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
+  const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
   if (!response.ok || !response.body) {
-    throw new Error(`Gemini stream 失敗（${response.status}）`);
+    throw new Error(`Vertex stream 失敗（${response.status}）`);
   }
 
   const reader = response.body.getReader();
@@ -1733,12 +1732,12 @@ function getCachedWizardPreviewPlan() {
 }
 
 async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
+  // 一律走 Vertex AI（不再退回 Gemini API key）
   const vertex = getVertexConfig();
-  const shouldPromptForKey = options.promptForKey !== false;
-  const apiKey = vertex.ready ? '' : (shouldPromptForKey ? ensureGeminiApiKey() : getGeminiApiKey());
-  if (!vertex.ready && !apiKey) {
-    throw new Error('尚未設定 Gemini API Key。');
+  if (!vertex.ready) {
+    throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
   }
+  const apiKey = '';
 
   const mode = options.mode === 'preview' ? 'preview' : 'final';
   const includeFirebase = options.includeFirebase !== false && mode === 'final';
@@ -3021,6 +3020,7 @@ function buildMergedAttraction(members) {
     .map(n => (n.startsWith(mergedName) ? n.slice(mergedName.length) : n))
     .map(n => n.replace(/^[\s·、,，\-]+/, '').trim())
     .filter(Boolean);
+  // 合併後停留時間 = 取最長子景點停留 + 緩衝（上限 90 分，不灌水）；縮掉的時間由「補景點」補回
   const maxStay = members.reduce((mx, m) => Math.max(mx, Number(m.duration) || Number(m.stayMin) || 0), 0);
   const mergedStay = Math.min(90, (maxStay || 30) + 30 * (members.length - 1));
   // 入口/代表座標：優先名稱等於合併名者（大景點本體），否則用所有成員座標的質心
@@ -3049,7 +3049,8 @@ function buildMergedAttraction(members) {
     businessHours: members.map(m => m.businessHours).find(Boolean) || null,
     isMergedAttraction: true,
     mergedSubSpots: names.filter(n => n !== mergedName),
-    mergedRadiusMeters
+    mergedRadiusMeters,
+    mergedMemberCoords: memberCoords
   };
   if (coord) { merged.lat = coord.lat; merged.lng = coord.lng; }
   return merged;
@@ -3075,6 +3076,95 @@ function mergeNearbySubAttractions(stops) {
     result.push(members.length === 1 ? base : buildMergedAttraction(members));
   }
   return result;
+}
+
+// === 合併後時間預算回填工具 ===
+// 單段交通估算（距離為主）：≤800m 走路 10 分；否則車程 ≈ 距離km/40*60，最低 5 分；缺座標退回 15 分
+function estimateLegMinutes(a, b) {
+  const ca = getStopCoordinate(a), cb = getStopCoordinate(b);
+  if (!ca || !cb) return 15;
+  const m = getDistanceMeters(ca, cb);
+  if (m <= 800) return 10;
+  return Math.max(5, Math.round((m / 1000) / 40 * 60));
+}
+// 完整站序（含起點…中段…終點）預估總分鐘 = Σ停留 + Σ路段交通（含最後一站→終點回程）
+function estimateTripMinutes(stops) {
+  if (!Array.isArray(stops) || !stops.length) return 0;
+  let total = 0;
+  for (let i = 0; i < stops.length; i++) {
+    const s = stops[i];
+    const isEndpoint = s && (s.type === 'start' || s.type === 'end');
+    if (!isEndpoint) total += Math.max(0, Number(s.duration) || Number(s.stayMin) || 0);
+    if (i < stops.length - 1) total += estimateLegMinutes(s, stops[i + 1]);
+  }
+  return total;
+}
+
+// 合併後時間偏短時：沿路線補景點填滿剩餘時段（不要集中同一點）
+function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardData = {}) {
+  const interests = (wizardData.interests || []).join('、') || '多元體驗';
+  const theme = wizardData.theme || '經典旅人';
+  const startLoc = (wizardData.startLocation || '').trim();
+  const endLoc = (wizardData.endLocation || '').trim();
+  const excluded = (excludedNames || []).slice(0, 40).join('、');
+  return [
+    `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 1} 個景點（多補 1 個備用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
+    `已使用景點（絕對禁止重複）：${excluded || '（無）'}`,
+    (startLoc || endLoc)
+      ? `景點請沿「${startLoc || dest}」→「${dest}」→「${endLoc || dest}」路線廊道分散（距路線 10 公里內），不要全部集中在同一點`
+      : '景點沿行程路線分散，不要集中在同一點',
+    `景點須為 ${dest} 周邊真實存在、能在 Google Maps 搜尋到的正式名稱；duration 為停留分鐘（15–90）；風格 ${theme}、興趣 ${interests}`,
+    '請勿輸出 lat/lng（座標由系統查詢）。只回傳 JSON：{"stops":[{"name":"景點正式名稱","emoji":"📍","duration":45,"desc":"推薦理由","businessHours":"週一至週日 09:00-17:00"}]}'
+  ].join('\n');
+}
+
+// 合併後若行程縮水超過 45 分，沿路線補景點填回目標時段（含回終點交通、不超時）。傳入/回傳「中段站」。
+async function fillTripTimeBudget(middleStops, wizardData, destination, startCoords, endCoords) {
+  const targetMin = parseDurationMinutes(wizardData.days || '1天');
+  const startStub = startCoords ? { type: 'start', lat: startCoords.lat, lng: startCoords.lng } : null;
+  const endStub = endCoords ? { type: 'end', lat: endCoords.lat, lng: endCoords.lng } : null;
+  const fullSeq = (arr) => [startStub, ...arr, endStub].filter(Boolean);
+  let stops = [...middleStops];
+  const usedNorm = new Set(stops.map(s => normalizeLookupText(s.name)));
+  for (let iter = 0; iter < 3; iter++) {
+    const shortfall = targetMin - estimateTripMinutes(fullSeq(stops));
+    if (shortfall <= 45) break;
+    const need = Math.max(1, Math.min(4, Math.ceil(shortfall / 50)));
+    let text;
+    try {
+      const payload = {
+        contents: [{ role: 'user', parts: [{ text: buildTimeFillPrompt(destination, need, shortfall, stops.map(s => s.name), wizardData) }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.9 }
+      };
+      text = extractGeminiResponseText(await fetchGeminiJson({ apiKey: '', model: GEMINI_MODEL, payload }));
+    } catch (e) { break; }
+    let parsed; try { parsed = parsePlanJsonFromText(text); } catch (e) { break; }
+    let cands = (parsed && Array.isArray(parsed.stops))
+      ? parsed.stops.filter(s => s && s.name && !usedNorm.has(normalizeLookupText(s.name)))
+        .map(s => ({ name: s.name, emoji: s.emoji || '📍', desc: s.desc || '', duration: Math.max(15, Math.min(90, Number(s.duration) || 45)), businessHours: s.businessHours || null }))
+      : [];
+    if (!cands.length) break;
+    cands = await enrichMissingCoordinates(cands, destination);
+    cands = await verifyAndFilterStopsWithPlaces(cands, destination, wizardData);
+    let addedAny = false;
+    for (const c of cands) {
+      const nrm = normalizeLookupText(c.name);
+      if (usedNorm.has(nrm)) continue;
+      stops.push(c);
+      usedNorm.add(nrm);
+      let after = estimateTripMinutes(fullSeq(stops));
+      if (after > targetMin) {
+        const over = after - (targetMin);
+        if ((Number(c.duration) || 45) - over >= 15) { c.duration = (Number(c.duration) || 45) - over; after = estimateTripMinutes(fullSeq(stops)); }
+        if (after > targetMin) { stops.pop(); continue; }
+      }
+      addedAny = true;
+      if (estimateTripMinutes(fullSeq(stops)) >= targetMin - 15) break;
+    }
+    stops = mergeNearbySubAttractions(stops);
+    if (!addedAny) break;
+  }
+  return stops;
 }
 
 async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = []) {
@@ -3127,7 +3217,9 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   // 合併同一大景區內密集子景點（如三仙台觀景台／跨海步橋 → 單一「三仙台」站）
   const mergedNearby = mergeNearbySubAttractions(geographicallySorted);
-  const ruledStops = applyTripPlanningRules(mergedNearby, wizardData);
+  // 合併後若時間縮水，沿路線補景點填回目標時段（含回終點交通、不超時）
+  const filledStops = await fillTripTimeBudget(mergedNearby, wizardData, destination, _startCoords, _endCoords).catch(() => mergedNearby);
+  const ruledStops = applyTripPlanningRules(filledStops, wizardData);
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
 
   const enrichedWizardData = {
