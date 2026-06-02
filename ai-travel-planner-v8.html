@@ -4646,6 +4646,8 @@ body.prototype-mode .prototype-id-chip {
             const dedupedStops = mergeNearbySubAttractions(deduplicateAdjacentTripStops(trip.stops));
             const islandConfig = getIslandFerryConfig(trip.region);
             const normalizedStops = islandConfig ? normalizeIslandHarborStops(dedupedStops, islandConfig) : dedupedStops;
+            // 大景區以單站存檔時，重開即用 Places 附近搜尋補出子景點並標記合併（就地貼標籤，欄位於下方 map 帶入）
+            await enrichBigAttractionSubSpots(normalizedStops, trip.region).catch(() => {});
 
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
@@ -5083,6 +5085,166 @@ body.prototype-mode .prototype-id-chip {
       }
       result.push(members.length === 1 ? base : buildMergedAttraction(members));
     }
+    return result;
+  }
+
+  // === 單站大景區補子景點：合併不到鄰近站時，用 Google Places 附近搜尋補出子景點並標記為合併站 ===
+  const BIG_AREA_KEYWORDS = ['台', '潭', '步道', '大道', '園區', '國家風景區', '瀑布', '山', '岬', '灣', '古道', '部落', '濕地', '牧場'];
+  const _nearbySubSpotCache = new Map();
+
+  // 用 Google Maps JS PlacesService「附近搜尋」取回某座標周邊的景點類 POI
+  function fetchNearbySubSpots(coord, radius) {
+    return new Promise((resolve) => {
+      const service = getPlacesService();
+      if (!service || !coord) { resolve([]); return; }
+      const cacheKey = `${coord.lat.toFixed(4)},${coord.lng.toFixed(4)}@${radius}`;
+      if (_nearbySubSpotCache.has(cacheKey)) { resolve(_nearbySubSpotCache.get(cacheKey)); return; }
+      let done = false;
+      const finish = (arr) => { if (done) return; done = true; _nearbySubSpotCache.set(cacheKey, arr); resolve(arr); };
+      try {
+        service.nearbySearch({
+          location: new google.maps.LatLng(coord.lat, coord.lng),
+          radius,
+          type: 'tourist_attraction'
+        }, (res, status) => {
+          const ok = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+          if (status !== ok || !Array.isArray(res) || !res.length) { finish([]); return; }
+          const out = res.map(p => {
+            const loc = p && p.geometry && p.geometry.location;
+            if (!loc) return null;
+            return { name: String(p.name || '').trim(), lat: loc.lat(), lng: loc.lng() };
+          }).filter(p => p && p.name);
+          finish(out);
+        });
+      } catch (e) { finish([]); }
+      setTimeout(() => finish([]), 6000); // 安全逾時，避免 callback 永不回呼卡住流程
+    });
+  }
+
+  // 從成員名＋附近POI名找「主導分支共同前綴」當大景點名（如三仙台）：
+  // 長度≥3、被≥2名稱共享、其後一字在這些名稱間有差異（真分支點）或前綴本身即一個POI，且來源至少有一個附近POI。
+  function deriveBigAreaName(memberNames, nearbyNames) {
+    const members = (memberNames || []).map(n => String(n || '').trim()).filter(Boolean);
+    const nears = (nearbyNames || []).map(n => String(n || '').trim()).filter(Boolean);
+    const all = [...members, ...nears];
+    if (all.length < 2) return '';
+    const prefixGroups = new Map(); // 前綴 -> 共享的名稱集合
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const p = commonNamePrefix([all[i], all[j]]);
+        if (p.length < 3) continue;
+        if (!prefixGroups.has(p)) prefixGroups.set(p, new Set());
+        prefixGroups.get(p).add(all[i]); prefixGroups.get(p).add(all[j]);
+      }
+    }
+    let best = '', bestCount = 0;
+    for (const [p, set] of prefixGroups) {
+      const names = [...set];
+      if (names.length < 2) continue;
+      const exactIsPlace = all.some(n => n === p);
+      const nextChars = new Set(names.map(n => n.slice(p.length, p.length + 1)).filter(Boolean));
+      if (!exactIsPlace && nextChars.size < 2) continue;          // 非真分支點且前綴本身不是POI → 跳過
+      if (!names.some(n => nears.includes(n))) continue;           // 需有附近POI佐證
+      if (names.length > bestCount || (names.length === bestCount && (best === '' || p.length < best.length))) {
+        best = p; bestCount = names.length;
+      }
+    }
+    return best;
+  }
+
+  // 補子景點 + 大景點名解析：對每個非端點站（含已合併站），用 Places 附近搜尋補子景點並把顯示名換成大景點名
+  async function enrichBigAttractionSubSpots(stops, region) {
+    if (!Array.isArray(stops) || !stops.length || !hasGooglePlacesService()) return stops;
+    const otherNorms = new Set(stops.map(s => normalizeText(s && s.name)).filter(Boolean));
+    for (const stop of stops) {
+      if (!stop || stop.type === 'start' || stop.type === 'end') continue;
+      const coord = readStopCoordinates(stop);
+      if (!coord) continue;
+      const parentName = String(stop.name || '');
+      const parentNorm = normalizeText(parentName);
+      let nearby = [];
+      try { nearby = await fetchNearbySubSpots(coord, SUB_SPOT_MERGE_RADIUS_M); } catch (e) { continue; }
+      if (!nearby.length) continue;
+      const nearbyNames = nearby.map(n => n.name);
+      let subs = Array.isArray(stop.mergedSubSpots) ? stop.mergedSubSpots.slice() : [];
+
+      // (A) 未合併單站 → 嘗試以附近 POI 補子景點（沿用閘門避免誤標餐廳/漁港）
+      if (!stop.isMergedAttraction) {
+        const cands = [];
+        for (const p of nearby) {
+          const pn = normalizeText(p.name);
+          if (!pn || pn === parentNorm) continue;
+          if (otherNorms.has(pn)) continue;
+          const dist = approxDistanceMeters(coord.lat, coord.lng, p.lat, p.lng);
+          if (dist < 60 || dist > SUB_SPOT_MERGE_RADIUS_M) continue;
+          cands.push({ name: p.name, lat: p.lat, lng: p.lng, dist });
+        }
+        cands.sort((a, b) => a.dist - b.dist);
+        const picked = cands.slice(0, 4);
+        const hasPrefixChild = picked.some(c => commonNamePrefix([parentNorm, normalizeText(c.name)]).length >= 3);
+        const isBigKeyword = BIG_AREA_KEYWORDS.some(k => parentName.includes(k));
+        if (picked.length >= 2 && (hasPrefixChild || isBigKeyword)) {
+          const maxDist = picked.reduce((mx, c) => Math.max(mx, c.dist), 0);
+          stop.isMergedAttraction = true;
+          subs = picked.map(c => c.name);
+          stop.mergedSubSpots = subs;
+          stop.mergedMemberCoords = [coord, ...picked.map(c => ({ lat: c.lat, lng: c.lng }))];
+          stop.mergedRadiusMeters = Math.min(2500, Math.max(150, Math.round(maxDist + 80)));
+          picked.forEach(c => otherNorms.add(normalizeText(c.name)));
+        }
+      }
+
+      // (B) 大景點名解析：把顯示名換成大景區名（如礫石灘＋比西里岸 → 三仙台），舊名收進子景點
+      const bigName = deriveBigAreaName([parentName, ...subs], nearbyNames);
+      const bigNorm = normalizeText(bigName);
+      const usedByOthers = stops.some(x => x !== stop && normalizeText(x.name) === bigNorm);
+      if (bigName && bigNorm !== parentNorm && !usedByOthers) {
+        const newSubs = [];
+        const seen = new Set();
+        for (const n of [parentName, ...subs]) {
+          const nn = normalizeText(n);
+          if (!nn || nn === bigNorm || seen.has(nn)) continue;
+          seen.add(nn); newSubs.push(n);
+        }
+        stop.name = bigName;
+        stop.mergedSubSpots = newSubs;
+        stop.isMergedAttraction = true;
+        const hit = nearby.find(n => normalizeText(n.name) === bigNorm);
+        if (hit) { stop.lat = hit.lat; stop.lng = hit.lng; stop.scenicCoordinates = { lat: hit.lat, lng: hit.lng }; }
+        otherNorms.add(bigNorm);
+      }
+    }
+    return stops;
+  }
+
+  // 最後輸出前重排中段站，避免來回跑：保留 start 開頭/end 結尾，中段從起點座標貪婪最近鄰；離島跳過保護港口順序
+  function reorderStopsAlongRoute(stops, region) {
+    if (!Array.isArray(stops) || stops.length < 4) return stops;
+    try { if (typeof getIslandFerryConfig === 'function' && getIslandFerryConfig(region)) return stops; } catch (e) {}
+    const startStop = stops.find(s => s && s.type === 'start');
+    const endStop = stops.find(s => s && s.type === 'end');
+    const middles = stops.filter(s => s && s.type !== 'start' && s.type !== 'end');
+    const coordMiddles = middles.filter(s => readStopCoordinates(s));
+    const noCoord = middles.filter(s => !readStopCoordinates(s));
+    if (coordMiddles.length < 3) return stops;
+    let cur = readStopCoordinates(startStop) || readStopCoordinates(coordMiddles[0]);
+    if (!cur) return stops;
+    const remaining = coordMiddles.slice();
+    const ordered = [];
+    while (remaining.length) {
+      let bi = 0, bd = Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const c = readStopCoordinates(remaining[i]);
+        const d = approxDistanceMeters(cur.lat, cur.lng, c.lat, c.lng);
+        if (d < bd) { bd = d; bi = i; }
+      }
+      const nx = remaining.splice(bi, 1)[0];
+      ordered.push(nx); cur = readStopCoordinates(nx);
+    }
+    const result = [];
+    if (startStop) result.push(startStop);
+    result.push(...ordered, ...noCoord);
+    if (endStop) result.push(endStop);
     return result;
   }
 
@@ -8461,6 +8623,13 @@ body.prototype-mode .prototype-id-chip {
           if (!addedAny) break;
         }
       } catch (fillErr) { console.warn('[replanWithAI] 時間回填略過：', fillErr); }
+
+      // 大景區以單站進來、合併不到鄰近站時，用 Places 附近搜尋補出子景點並標記合併（只貼標籤，不加站）
+      try { replanStops = await enrichBigAttractionSubSpots(replanStops, region); }
+      catch (enrichErr) { console.warn('[replanWithAI] 補子景點略過：', enrichErr); }
+      // 最後輸出前重排一次，避免合併/補景點後路線南北來回跑
+      try { replanStops = reorderStopsAlongRoute(replanStops, region); }
+      catch (orderErr) { console.warn('[replanWithAI] 路線重排略過：', orderErr); }
 
       if (_rgOverlay) _rgOverlay.style.display = 'none';
       renderReplanBoard();
