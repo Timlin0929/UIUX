@@ -4643,7 +4643,7 @@ body.prototype-mode .prototype-id-chip {
                delete mapPinLocations[key];
             }
 
-            const dedupedStops = deduplicateAdjacentTripStops(trip.stops);
+            const dedupedStops = mergeNearbySubAttractions(deduplicateAdjacentTripStops(trip.stops));
             const islandConfig = getIslandFerryConfig(trip.region);
             const normalizedStops = islandConfig ? normalizeIslandHarborStops(dedupedStops, islandConfig) : dedupedStops;
 
@@ -4675,6 +4675,9 @@ body.prototype-mode .prototype-id-chip {
                     scenicCoordinates: lockedPos, _lockedCoordinates: lockedPos,
                     placeId: s.placeId || null,
                     businessHours: s.businessHours || null,
+                    isMergedAttraction: s.isMergedAttraction || false,
+                    mergedSubSpots: s.mergedSubSpots || null,
+                    mergedRadiusMeters: s.mergedRadiusMeters || null,
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: []
                   };
                 }
@@ -4748,6 +4751,9 @@ body.prototype-mode .prototype-id-chip {
                 scenicCoordinates: resolvedPosition,
                 placeId: s.placeId || scenicRecord?.placeId || null,
                 businessHours: s.businessHours || scenicRecord?.businessHours || null,
+                isMergedAttraction: s.isMergedAttraction || false,
+                mergedSubSpots: s.mergedSubSpots || null,
+                mergedRadiusMeters: s.mergedRadiusMeters || null,
                 lat: _pos.lat,
                 lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || []
@@ -4919,6 +4925,159 @@ body.prototype-mode .prototype-id-chip {
         result.push(curr);
         i++;
       }
+    }
+    return result;
+  }
+
+  // === 同一大景區內密集子景點合併 ===
+  // 例：三仙台周邊「看見三仙台e比西里岸／三仙台觀景海堤／礫石灘／三仙台」距離 300m～1.1km，
+  // 即使不同名也屬同一大景區 → 合併成單一「三仙台」站，避免景點密集擠在目的地端。
+  // 以「距離為主」：同區 1.2km 內即合併；同名再放寬到 2km；缺座標才退回名稱判定。
+  const SUB_SPOT_MERGE_RADIUS_M = 1200;
+  const SUB_SPOT_NAME_MERGE_RADIUS_M = 2000;
+
+  function readStopCoordinates(stop) {
+    if (!stop) return null;
+    if (Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))) {
+      return { lat: Number(stop.lat), lng: Number(stop.lng) };
+    }
+    return readCoordinateObject(stop.scenicCoordinates || stop['景點座標'] || stop.coordinates) || null;
+  }
+
+  // 計算一組名稱的最長共同前綴（以原始字串逐字比較，作為「大景點」顯示名）
+  function commonNamePrefix(names) {
+    const list = (names || []).map(n => String(n || '')).filter(Boolean);
+    if (!list.length) return '';
+    let prefix = list[0];
+    for (let i = 1; i < list.length; i++) {
+      const cur = list[i];
+      let j = 0;
+      while (j < prefix.length && j < cur.length && prefix[j] === cur[j]) j++;
+      prefix = prefix.slice(0, j);
+      if (!prefix) break;
+    }
+    return prefix.trim();
+  }
+
+  // 是否為同一大景區的兄弟子景點（名稱共享主體）
+  function isSameAttractionFamily(a, b) {
+    const aN = normalizeText((a && a.name) || '');
+    const bN = normalizeText((b && b.name) || '');
+    if (!aN || !bN) return false;
+    // 名稱互為子字串（較短者 ≥3 字）
+    const shorter = aN.length <= bN.length ? aN : bN;
+    if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
+    // 正規化後共同前綴 ≥ 3 字（涵蓋「三仙台」案例，避免「台東」這類兩字地名誤判）
+    if (commonNamePrefix([aN, bN]).length >= 3) return true;
+    return false;
+  }
+
+  // 是否該歸入同一大景區（以距離為主）
+  function shouldClusterStops(a, b) {
+    const ca = readStopCoordinates(a);
+    const cb = readStopCoordinates(b);
+    if (ca && cb) {
+      const d = approxDistanceMeters(ca.lat, ca.lng, cb.lat, cb.lng);
+      if (d <= SUB_SPOT_MERGE_RADIUS_M) return true;            // 距離為主：1.2km 內即同區
+      if (d <= SUB_SPOT_NAME_MERGE_RADIUS_M && isSameAttractionFamily(a, b)) return true; // 同名再放寬
+      return false;
+    }
+    // 缺座標：退回名稱判定（保守）
+    return isSameAttractionFamily(a, b);
+  }
+
+  // 從一組名稱挑出「大景點名」：有共同前綴就用前綴（如三仙台觀景台/跨海步橋→三仙台），
+  // 否則取「被最多其他成員名稱包含」者（如『三仙台』被多個子景點名包含），同分取最短。
+  function pickClusterName(names) {
+    const prefix = commonNamePrefix(names);
+    if (prefix && prefix.length >= 2) return prefix;
+    let best = '', bestScore = -1;
+    for (const cand of names) {
+      const cn = normalizeText(cand);
+      if (!cn) continue;
+      const score = names.reduce((acc, other) => acc + (normalizeText(other).includes(cn) ? 1 : 0), 0);
+      if (score > bestScore || (score === bestScore && (best === '' || cand.length < best.length))) {
+        best = cand; bestScore = score;
+      }
+    }
+    return best || names[0] || '景點';
+  }
+
+  // 將多個兄弟子景點合併成一個大景點站
+  function buildMergedAttraction(members) {
+    const names = members.map(m => String(m.name || '')).filter(Boolean);
+    const mergedName = pickClusterName(names);
+    // 母景點：優先名稱等於大景點名者，否則名稱最短者（承接 id/交通等基底欄位）
+    const parent = members.find(m => String(m.name || '') === mergedName)
+      || [...members].sort((a, b) => String(a.name || '').length - String(b.name || '').length)[0];
+    // 子景點列舉（去掉前綴後的差異部分），保留資訊於描述
+    const subLabels = names
+      .filter(n => n !== mergedName)
+      .map(n => (n.startsWith(mergedName) ? n.slice(mergedName.length) : n))
+      .map(n => n.replace(/^[\s·、,，\-]+/, '').trim())
+      .filter(Boolean);
+    const maxStay = members.reduce((mx, m) => Math.max(mx, Number(m.duration) || Number(m.stayMin) || 0), 0);
+    const mergedStay = Math.min(90, (maxStay || 30) + 30 * (members.length - 1));
+    // 入口/代表座標：優先名稱等於合併名者（大景點本體），否則用所有成員座標的質心
+    const memberCoords = members.map(readStopCoordinates).filter(Boolean);
+    const namedCoord = readStopCoordinates(members.find(m => String(m.name || '') === mergedName && readStopCoordinates(m)));
+    let coord = namedCoord;
+    if (!coord && memberCoords.length) {
+      coord = {
+        lat: memberCoords.reduce((s, c) => s + c.lat, 0) / memberCoords.length,
+        lng: memberCoords.reduce((s, c) => s + c.lng, 0) / memberCoords.length
+      };
+    }
+    // 範圍圈半徑：代表座標到各成員的最大距離 + 緩衝，clamp [150, 2500]
+    let mergedRadiusMeters = 0;
+    if (coord && memberCoords.length) {
+      const maxDist = memberCoords.reduce((mx, c) =>
+        Math.max(mx, approxDistanceMeters(coord.lat, coord.lng, c.lat, c.lng)), 0);
+      mergedRadiusMeters = Math.min(2500, Math.max(150, Math.round(maxDist + 80)));
+    }
+    const baseDesc = String(parent.desc || (members.find(m => m.desc) || {}).desc || '').trim();
+    const subNote = subLabels.length ? `（含 ${subLabels.join('、')}）` : '';
+    const mergedDesc = (baseDesc + (subNote ? (baseDesc ? ' ' : '') + subNote : '')).trim();
+    const toilets = members.reduce((acc, m) =>
+      acc.concat(Array.isArray(m.nearbyToiletLocations) ? m.nearbyToiletLocations : []), []);
+    const merged = Object.assign({}, parent, {
+      name: mergedName,
+      emoji: members.map(m => m.emoji).find(Boolean) || '📍',
+      desc: mergedDesc,
+      stayMin: mergedStay,
+      duration: mergedStay,
+      nearbyToiletLocations: toilets,
+      businessHours: members.map(m => m.businessHours).find(Boolean) || null,
+      isMergedAttraction: true,
+      mergedSubSpots: names.filter(n => n !== mergedName),
+      mergedRadiusMeters
+    });
+    if (coord) {
+      merged.lat = coord.lat;
+      merged.lng = coord.lng;
+      merged.scenicCoordinates = { lat: coord.lat, lng: coord.lng };
+    }
+    return merged;
+  }
+
+  // 對站點做貪婪群集（單一連結）：同一大景區（距離為主）者併成一個大景點；跳過 start/end 錨點站
+  function mergeNearbySubAttractions(stops) {
+    if (!Array.isArray(stops) || stops.length < 2) return stops;
+    const assigned = new Array(stops.length).fill(false);
+    const result = [];
+    for (let i = 0; i < stops.length; i++) {
+      if (assigned[i]) continue;
+      const base = stops[i];
+      assigned[i] = true;
+      if (base && (base.type === 'start' || base.type === 'end')) { result.push(base); continue; }
+      const members = [base];
+      for (let j = i + 1; j < stops.length; j++) {
+        if (assigned[j]) continue;
+        const cand = stops[j];
+        if (cand && (cand.type === 'start' || cand.type === 'end')) continue;
+        if (members.some(m => shouldClusterStops(m, cand))) { members.push(cand); assigned[j] = true; }
+      }
+      result.push(members.length === 1 ? base : buildMergedAttraction(members));
     }
     return result;
   }
@@ -6573,6 +6732,7 @@ body.prototype-mode .prototype-id-chip {
         <div class="replan-spot">
           <div>
             <div class="replan-spot-name">${stop.name}</div>
+            ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:11px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
             <div class="replan-spot-meta">停留 <select class="replan-duration-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${getSuggestedStayDurations(stop).map(m => `<option value="${m}" ${(stop.stayMin ?? stop.computedStayMin) === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>${stop.transit ? ` · 後續 <select class="replan-transit-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); setSegmentTransitMode('${stop.id}', this.value)">${(() => { const cur = normalizeTransitMode(stop.transitMode); const allowed = new Set(['walk', 'public', getPreferredVehicleMode(), cur]); return TRANSIT_MODE_OPTIONS.filter(mo => allowed.has(mo.value)).map(mo => `<option value="${mo.value}" ${cur === mo.value ? 'selected' : ''}>${mo.icon} ${mo.label}</option>`).join(''); })()}</select> ${getTransitDurationText(stop.transit)}` : ''}</div>
             ${(() => { const w = getBusinessHoursWarning(stop); return w ? `<div class="replan-hours-warn">${w}</div>` : ''; })()}
           </div>
@@ -6781,6 +6941,7 @@ body.prototype-mode .prototype-id-chip {
               <div class="spot-emoji-box">${stop.emoji}</div>
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
+                ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:12px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
                 <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button><button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
@@ -7996,6 +8157,7 @@ body.prototype-mode .prototype-id-chip {
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
+      '🏞️ 同一大景區（如三仙台、伯朗大道、鯉魚潭）請視為「單一站點」，不要拆成內部觀景台／步道／步橋／碼頭等多個子站；duration 設定為涵蓋整個景區的合理停留（可達 90 分）',
       `👥 人數考量：${_peopleProfile.planRule}`,
       (startLoc || endLoc) ? `🗺️ 廊道分布：景點請沿「${startLoc || dest}」→「${dest}」→「${endLoc || dest}」路線廊道分布（盡量在距路線 5 公里內，景點不足時可擴展至 10 公里），行程方向由起點往目的地核心再往終點收尾，不要安排需大幅折返的景點` : null,
       blockedHint,
@@ -8070,7 +8232,7 @@ body.prototype-mode .prototype-id-chip {
       _addRgLine(`> 驗證景點真實性，共 ${parsed.stops.length} 個…`, 'info');
 
       const region = currentTripRegion || dest;
-      const newStops = [];
+      let newStops = [];
       const rejectedNames = [];
       for (const s of parsed.stops) {
         const template = {
@@ -8178,6 +8340,9 @@ body.prototype-mode .prototype-id-chip {
       }
 
       if (newStops.length < 2) throw new Error(`驗證後只剩 ${newStops.length} 個有效景點，無法建立行程`);
+
+      // 合併同一大景區內密集子景點（如三仙台觀景台／跨海步橋 → 單一「三仙台」站）
+      newStops = mergeNearbySubAttractions(newStops);
 
       // 若沒有 type='start' 的注入起點，改以第一站作為錨點保留
       const preservedStartStop = replanStops.find(s => s.type === 'start') || replanStops[0];
@@ -9033,6 +9198,7 @@ body.prototype-mode .prototype-id-chip {
   // ── Google Maps API 整合 ──
   let map;
   let markers = {};
+  let radiusCircles = {}; // 合併大景點的範圍圈（pinId -> google.maps.Circle）
   let currentOpenPin = null; // 紀錄目前打開資訊卡的圖釘
   let directionsService;
   let directionsRenderers = []; // 存放每個階段的 Renderer
@@ -9196,6 +9362,10 @@ body.prototype-mode .prototype-id-chip {
       }
     });
     markers = {};
+    Object.values(radiusCircles).forEach((circle) => {
+      if (circle && typeof circle.setMap === 'function') circle.setMap(null);
+    });
+    radiusCircles = {};
   }
 
   function getStopToiletLocations(stop) {
@@ -9382,6 +9552,10 @@ body.prototype-mode .prototype-id-chip {
       }
     });
     markers = {};
+    Object.values(radiusCircles).forEach((circle) => {
+      if (circle && typeof circle.setMap === 'function') circle.setMap(null);
+    });
+    radiusCircles = {};
   }
 
   function isToiletMarkerId(markerId) {
@@ -9669,8 +9843,9 @@ body.prototype-mode .prototype-id-chip {
     clearRenderedMapMarkers();
 
     const stopOrderByPin = {};
+    const stopByPin = {};
     replanStops.forEach((stop, index) => {
-      if (stop.mapPinId) stopOrderByPin[stop.mapPinId] = index + 1;
+      if (stop.mapPinId) { stopOrderByPin[stop.mapPinId] = index + 1; stopByPin[stop.mapPinId] = stop; }
     });
 
     for (const id in mapPinLocations) {
@@ -9689,6 +9864,22 @@ body.prototype-mode .prototype-id-chip {
       rememberMarkerBasePosition(marker, position);
 
       markers[id] = marker;
+      // 合併大景點：畫一個範圍圈，視覺標示「這一圈是同一個點」
+      const stopForPin = stopByPin[id];
+      if (stopForPin && stopForPin.isMergedAttraction && Number(stopForPin.mergedRadiusMeters) > 0) {
+        radiusCircles[id] = new google.maps.Circle({
+          map: map,
+          center: position,
+          radius: Number(stopForPin.mergedRadiusMeters),
+          strokeColor: '#2e7d6d',
+          strokeOpacity: 0.6,
+          strokeWeight: 1.5,
+          fillColor: '#2e7d6d',
+          fillOpacity: 0.10,
+          clickable: false,
+          zIndex: 1
+        });
+      }
       if (pinData[id]) {
         pinData[id].lat = position.lat;
         pinData[id].lng = position.lng;
@@ -10403,7 +10594,25 @@ body.prototype-mode .prototype-id-chip {
     }
   });
 </script>
-<script src="https://maps.googleapis.com/maps/api/js?key=<REDACTED>&libraries=places&language=zh-TW&region=TW" async defer></script>
+<script>
+  // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
+  // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。
+  (function loadGoogleMaps() {
+    var cfg = window.TRAVEL_APP_CONFIG || {};
+    var key = cfg.GOOGLE_MAPS_API_KEY || '';
+    if (!key) {
+      console.error('[Maps] 未設定 GOOGLE_MAPS_API_KEY，請檢查 weather.env.js');
+      return;
+    }
+    var s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) +
+      '&libraries=places&language=zh-TW&region=TW';
+    s.async = true;
+    s.defer = true;
+    s.onerror = function () { console.error('[Maps] Google Maps 載入失敗，請確認金鑰有效且已啟用 Maps JavaScript API'); };
+    document.head.appendChild(s);
+  })();
+</script>
 
 <div id="imgLightbox" class="img-lightbox" onclick="closeImageLightbox(event)">
   <div class="img-lightbox-inner" onclick="event.stopPropagation()">

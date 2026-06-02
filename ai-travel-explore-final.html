@@ -2947,6 +2947,136 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
   return mainStops.length >= 2 ? verified : stops;
 }
 
+// === 同一大景區內密集子景點合併（與 ai-travel-planner-v8.html 行為一致）===
+// 以「距離為主」：同一大景區 1.2km 內的景點（即使不同名，如三仙台周邊的礫石灘）即合併成
+// 單一「三仙台」站；同名再放寬到 2km；缺座標才退回名稱判定。避免景點密集擠在目的地端。
+const SUB_SPOT_MERGE_RADIUS_M = 1200;
+const SUB_SPOT_NAME_MERGE_RADIUS_M = 2000;
+
+// 計算一組名稱的最長共同前綴（作為「大景點」顯示名）
+function subSpotCommonPrefix(names) {
+  const list = (names || []).map(n => String(n || '')).filter(Boolean);
+  if (!list.length) return '';
+  let prefix = list[0];
+  for (let i = 1; i < list.length; i++) {
+    const cur = list[i];
+    let j = 0;
+    while (j < prefix.length && j < cur.length && prefix[j] === cur[j]) j++;
+    prefix = prefix.slice(0, j);
+    if (!prefix) break;
+  }
+  return prefix.trim();
+}
+
+// 是否為同一大景區的兄弟子景點（名稱共享主體）
+function isSameAttractionFamily(a, b) {
+  const aN = normalizeLookupText((a && a.name) || '');
+  const bN = normalizeLookupText((b && b.name) || '');
+  if (!aN || !bN) return false;
+  const shorter = aN.length <= bN.length ? aN : bN;
+  if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
+  // 正規化後共同前綴 ≥ 3 字（涵蓋「三仙台」案例，避免「台東」這類兩字地名誤判）
+  if (subSpotCommonPrefix([aN, bN]).length >= 3) return true;
+  return false;
+}
+
+// 是否該歸入同一大景區（以距離為主）
+function shouldClusterStops(a, b) {
+  const ca = getStopCoordinate(a);
+  const cb = getStopCoordinate(b);
+  if (ca && cb) {
+    const d = getDistanceMeters(ca, cb);
+    if (d <= SUB_SPOT_MERGE_RADIUS_M) return true;            // 距離為主：1.2km 內即同區
+    if (d <= SUB_SPOT_NAME_MERGE_RADIUS_M && isSameAttractionFamily(a, b)) return true; // 同名再放寬
+    return false;
+  }
+  return isSameAttractionFamily(a, b); // 缺座標退回名稱判定
+}
+
+// 將多個兄弟子景點合併成一個大景點站
+// 從一組名稱挑出「大景點名」：有共同前綴就用前綴，否則取「被最多其他成員名稱包含」者，同分取最短。
+function pickClusterName(names) {
+  const prefix = subSpotCommonPrefix(names);
+  if (prefix && prefix.length >= 2) return prefix;
+  let best = '', bestScore = -1;
+  for (const cand of names) {
+    const cn = normalizeLookupText(cand);
+    if (!cn) continue;
+    const score = names.reduce((acc, other) => acc + (normalizeLookupText(other).includes(cn) ? 1 : 0), 0);
+    if (score > bestScore || (score === bestScore && (best === '' || cand.length < best.length))) {
+      best = cand; bestScore = score;
+    }
+  }
+  return best || names[0] || '景點';
+}
+
+function buildMergedAttraction(members) {
+  const names = members.map(m => String(m.name || '')).filter(Boolean);
+  const mergedName = pickClusterName(names);
+  // 母景點：優先名稱等於大景點名者，否則名稱最短者（承接基底欄位）
+  const parent = members.find(m => String(m.name || '') === mergedName)
+    || [...members].sort((a, b) => String(a.name || '').length - String(b.name || '').length)[0];
+  const subLabels = names
+    .filter(n => n !== mergedName)
+    .map(n => (n.startsWith(mergedName) ? n.slice(mergedName.length) : n))
+    .map(n => n.replace(/^[\s·、,，\-]+/, '').trim())
+    .filter(Boolean);
+  const maxStay = members.reduce((mx, m) => Math.max(mx, Number(m.duration) || Number(m.stayMin) || 0), 0);
+  const mergedStay = Math.min(90, (maxStay || 30) + 30 * (members.length - 1));
+  // 入口/代表座標：優先名稱等於合併名者（大景點本體），否則用所有成員座標的質心
+  const memberCoords = members.map(getStopCoordinate).filter(Boolean);
+  const namedCoord = getStopCoordinate(members.find(m => String(m.name || '') === mergedName && getStopCoordinate(m)));
+  let coord = namedCoord;
+  if (!coord && memberCoords.length) {
+    coord = {
+      lat: memberCoords.reduce((s, c) => s + c.lat, 0) / memberCoords.length,
+      lng: memberCoords.reduce((s, c) => s + c.lng, 0) / memberCoords.length
+    };
+  }
+  let mergedRadiusMeters = 0;
+  if (coord && memberCoords.length) {
+    const maxDist = memberCoords.reduce((mx, c) => Math.max(mx, getDistanceMeters(coord, c)), 0);
+    mergedRadiusMeters = Math.min(2500, Math.max(150, Math.round(maxDist + 80)));
+  }
+  const baseDesc = String(parent.desc || (members.find(m => m.desc) || {}).desc || '').trim();
+  const subNote = subLabels.length ? `（含 ${subLabels.join('、')}）` : '';
+  const merged = {
+    ...parent,
+    name: mergedName,
+    emoji: members.map(m => m.emoji).find(Boolean) || '📍',
+    desc: (baseDesc + (subNote ? (baseDesc ? ' ' : '') + subNote : '')).trim(),
+    duration: mergedStay,
+    businessHours: members.map(m => m.businessHours).find(Boolean) || null,
+    isMergedAttraction: true,
+    mergedSubSpots: names.filter(n => n !== mergedName),
+    mergedRadiusMeters
+  };
+  if (coord) { merged.lat = coord.lat; merged.lng = coord.lng; }
+  return merged;
+}
+
+// 對站點做貪婪群集（單一連結）：同一大景區（距離為主）者併成一個大景點；跳過 start/end 錨點站
+function mergeNearbySubAttractions(stops) {
+  if (!Array.isArray(stops) || stops.length < 2) return stops;
+  const assigned = new Array(stops.length).fill(false);
+  const result = [];
+  for (let i = 0; i < stops.length; i++) {
+    if (assigned[i]) continue;
+    const base = stops[i];
+    assigned[i] = true;
+    if (base && (base.type === 'start' || base.type === 'end')) { result.push(base); continue; }
+    const members = [base];
+    for (let j = i + 1; j < stops.length; j++) {
+      if (assigned[j]) continue;
+      const cand = stops[j];
+      if (cand && (cand.type === 'start' || cand.type === 'end')) continue;
+      if (members.some(m => shouldClusterStops(m, cand))) { members.push(cand); assigned[j] = true; }
+    }
+    result.push(members.length === 1 ? base : buildMergedAttraction(members));
+  }
+  return result;
+}
+
 async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = []) {
   const sourceStops = Array.isArray(stops) ? stops.filter(Boolean) : [];
   if (!sourceStops.length) return [];
@@ -2995,7 +3125,9 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
 
   const verifiedStops = await verifyAndFilterStopsWithPlaces(stopsForVerify, destination, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
-  const ruledStops = applyTripPlanningRules(geographicallySorted, wizardData);
+  // 合併同一大景區內密集子景點（如三仙台觀景台／跨海步橋 → 單一「三仙台」站）
+  const mergedNearby = mergeNearbySubAttractions(geographicallySorted);
+  const ruledStops = applyTripPlanningRules(mergedNearby, wizardData);
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
 
   const enrichedWizardData = {
