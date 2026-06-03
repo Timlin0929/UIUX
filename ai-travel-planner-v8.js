@@ -1888,7 +1888,9 @@
   // 否則取「被最多其他成員名稱包含」者（如『三仙台』被多個子景點名包含），同分取最短。
   function pickClusterName(names) {
     const prefix = commonNamePrefix(names);
-    if (prefix && prefix.length >= 2) return prefix;
+    // 前綴 ≥ 3 字、且去掉行政區後綴（市/縣/鄉…）後仍 ≥ 3 字才採用，
+    // 避免「台東」「花蓮市」等城市名變成合併站名（應落在具體地標如「台東海濱公園」）
+    if (prefix && prefix.length >= 3 && prefix.replace(/[市縣鄉鎮區村里]$/, '').length >= 3) return prefix;
     let best = '', bestScore = -1;
     for (const cand of names) {
       const cn = normalizeText(cand);
@@ -2074,6 +2076,7 @@
       for (let j = i + 1; j < all.length; j++) {
         const p = commonNamePrefix([all[i], all[j]]);
         if (p.length < 3) continue;
+        if (p.replace(/[市縣鄉鎮區村里]$/, '').length < 3) continue; // 過濾「台東市」「花蓮縣」等行政區名
         if (!prefixGroups.has(p)) prefixGroups.set(p, new Set());
         prefixGroups.get(p).add(all[i]); prefixGroups.get(p).add(all[j]);
       }
