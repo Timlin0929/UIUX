@@ -413,6 +413,58 @@ function describeBudget(value, people) {
   return { tier, count, perPersonLabel, groupLabel, promptText };
 }
 
+// === 交通費估算（讀 window.WAI_COST_CONFIG；缺檔時各 helper 回退為 0／null）===
+function getCostConfig() {
+  return (typeof window !== 'undefined' && window.WAI_COST_CONFIG && typeof window.WAI_COST_CONFIG === 'object') ? window.WAI_COST_CONFIG : null;
+}
+// 目的地 → 離島每人往返船票（非離島回 0）。正規化沿用 getLocalPoiList：臺→台、去縣市、寬鬆比對。
+function getFerryRoundTrip(destination) {
+  const cfg = getCostConfig();
+  if (!cfg || !cfg.ferryRoundTrip) return 0;
+  const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
+  const dest = norm(destination);
+  if (!dest) return 0;
+  const stripped = dest.replace(/[縣市]$/u, '').trim();
+  for (const key of Object.keys(cfg.ferryRoundTrip)) {
+    const k = norm(key);
+    if (k === dest || (stripped && k === stripped) || dest.includes(k) || k.includes(dest) || (stripped && (stripped.includes(k) || k.includes(stripped)))) {
+      const v = Number(cfg.ferryRoundTrip[key]);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+  }
+  return 0;
+}
+// days 字串 → 天數（'2天'→2；'5小時'→1）
+function getTripDayCount(days) {
+  const m = String(days || '').match(/(\d+)\s*天/);
+  if (m) return Math.max(1, parseInt(m[1], 10));
+  return 1;
+}
+// 生成前（尚無站點）的每人交通粗估：每日站間移動額度 × 天數 + 離島船票
+function estimateTransportRough(destination, mode, people, days) {
+  const cfg = getCostConfig();
+  const count = getPeopleCount(people);
+  const m = (mode && cfg && cfg.modeRates && cfg.modeRates[mode]) ? mode : 'car';
+  const dayCount = getTripDayCount(days);
+  const allowance = cfg && cfg.dailyMoveAllowance && Number.isFinite(Number(cfg.dailyMoveAllowance[m])) ? Number(cfg.dailyMoveAllowance[m]) : 0;
+  const movePerPerson = Math.round(allowance * dayCount);
+  const ferryPerPerson = getFerryRoundTrip(destination);
+  return { ferryPerPerson, movePerPerson, totalPerPerson: ferryPerPerson + movePerPerson, count };
+}
+// 由人均級距範圍扣掉交通 → 可動用（餐飲/活動）。回 { label, min, max, open } 供 prompt/卡片共用；無 budget 回 null。
+function buildBudgetBreakdown(budget, people, transportPerPerson) {
+  const tier = getBudgetTier(budget);
+  if (!tier) return null;
+  const t = Math.max(0, Math.round(Number(transportPerPerson) || 0));
+  const open = tier.perMax == null;
+  const dMin = Math.max(0, tier.perMin - t);
+  const dMax = open ? null : Math.max(0, tier.perMax - t);
+  const label = open
+    ? `${formatMoney(dMin)}+`
+    : (tier.perMin > 0 ? `${formatMoney(dMin)}–${formatMoney(dMax)}` : `${formatMoney(dMax)} 內`);
+  return { tier, transport: t, min: dMin, max: dMax, open, label };
+}
+
 function getDurationStopRange(days, people) {
   const base = isLongTrip(days)
     ? { min: 12, max: 18 }
@@ -510,6 +562,13 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
     `旅程風格：${wizardData.theme || '經典旅人'}`,
     wizardData.budget ? `預算：${(describeBudget(wizardData.budget, wizardData.people) || {}).promptText || wizardData.budget}` : null,
+    wizardData.budget ? (() => {
+      const tr = estimateTransportRough(destination, wizardData.transportMode, wizardData.people, wizardData.days);
+      const bd = buildBudgetBreakdown(wizardData.budget, wizardData.people, tr.totalPerPerson);
+      if (!bd || tr.totalPerPerson <= 0) return null;
+      const ferryPart = tr.ferryPerPerson > 0 ? `離島船票 $${tr.ferryPerPerson}、` : '';
+      return `交通預估：每人約 $${tr.totalPerPerson}（${ferryPart}站間移動約 $${tr.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點`;
+    })() : null,
     wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
     wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
     `出發站點：${(wizardData.startLocation || '').trim() || getDefaultTransitHub(destination)}`,

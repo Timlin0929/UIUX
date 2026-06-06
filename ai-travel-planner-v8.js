@@ -4372,6 +4372,7 @@
     document.getElementById('view-' + viewId).classList.add('active');
 
     if (viewId === 'travellog') renderTravelLog();
+    if (viewId === 'budget') renderBudgetTracker();
 
     // 手機上的視圖模式邏輯
     if (isMobileLayout()) {
@@ -4381,6 +4382,99 @@
         setMobileMode(currentUserRole === 'driver' ? 'map' : 'functions');
       }
     }
+  }
+
+  // 花費追蹤卡片：把人均預算拆成「交通（離島船票＋站間移動）」與「可動用餐飲/活動」並顯示。
+  // 資料來自目前載入的行程站點（replanStops）＋偏好（currentTripPreferences）；缺費率/無行程時顯示友善提示。
+  function renderBudgetTracker() {
+    const host = document.getElementById('view-budget');
+    if (!host) return;
+    const prefs = currentTripPreferences || {};
+    const budget = prefs.budget || '';
+    const people = prefs.people || '';
+    const mode = prefs.transportMode || '';
+    const destination = prefs.dest || prefs.destCustom || currentTripRegion || '';
+    const days = prefs.days || '';
+    const count = getPeopleCount(people);
+    const stops = Array.isArray(replanStops) ? replanStops : [];
+
+    const money = n => '$' + Math.round(Math.max(0, Number(n) || 0)).toLocaleString('en-US');
+    const cfg = getCostConfig();
+    const modeKey = (cfg && cfg.modeRates && cfg.modeRates[mode]) ? mode : 'car';
+    const modeLabel = (cfg && cfg.modeRates && cfg.modeRates[modeKey] && cfg.modeRates[modeKey].label) || '交通';
+    const modeEmoji = ({ scooter: '🛵', car: '🚗', taxi: '🚕', public: '🚌', walk: '🚶' })[modeKey] || '🚗';
+
+    const hasTrip = stops.length > 0 || !!budget;
+    if (!hasTrip) {
+      host.innerHTML = `
+        <div class="hero-section" style="padding-bottom: 24px;">
+          <div class="hero-title">微旅行花費追蹤</div>
+          <div class="hero-meta"><div class="hero-tag">💰 尚無可估算的行程</div></div>
+        </div>
+        <div class="budget-water-level">
+          <div class="budget-label" style="text-align:center;">載入或生成一份行程後，這裡會依交通方式與離島船票，估算交通費與「可動用餐飲/活動」預算。</div>
+        </div>`;
+      return;
+    }
+
+    const tr = (stops.length >= 2)
+      ? estimateTripTransport(stops, { mode, people, destination })
+      : estimateTransportRough(destination, mode, people, days);
+    const bd = buildBudgetBreakdown(budget, people, tr.totalPerPerson);
+
+    // 交通占人均預算比例（無 budget 時不顯示比例）
+    let pct = 0, denom = 0;
+    if (bd) { denom = bd.tier.perMax || bd.tier.perMin || tr.totalPerPerson; pct = denom > 0 ? Math.min(100, Math.round(tr.totalPerPerson / denom * 100)) : 0; }
+
+    const discMain = bd
+      ? `<div class="budget-amount">每人 ${bd.label}</div><div class="budget-label">可動用餐飲 / 活動預算（${count} 人）</div>`
+      : `<div class="budget-amount">${money(tr.totalPerPerson)}</div><div class="budget-label">每人交通預估（尚未選預算，無法算可動用額度）</div>`;
+
+    const progressBlock = bd ? `
+        <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+        <div style="display: flex; justify-content: space-between; margin-top: 12px; font-size: 13px; color: var(--ink2); font-weight: 500;">
+          <span>交通每人 ${money(tr.totalPerPerson)}</span>
+          <span>占人均預算 ${pct}%</span>
+        </div>` : '';
+
+    const items = [];
+    if (tr.ferryPerPerson > 0) items.push({ emoji: '⚓', name: '離島往返船票', val: tr.ferryPerPerson });
+    items.push({ emoji: modeEmoji, name: `站間移動（${modeLabel}）`, val: tr.movePerPerson });
+    const receiptRows = items.map(it => `
+          <div class="receipt-item">
+            <div class="receipt-item-name"><span>${it.emoji}</span> ${it.name}</div>
+            <div>每人 ${money(it.val)}</div>
+          </div>`).join('');
+
+    const perPersonBudgetText = bd
+      ? (bd.tier.perMax == null ? `每人 ${money(bd.tier.perMin)} 以上` : (bd.tier.perMin > 0 ? `每人 ${money(bd.tier.perMin)}–${money(bd.tier.perMax)}` : `每人 ${money(bd.tier.perMax)} 內`))
+      : '（未選預算）';
+
+    host.innerHTML = `
+      <div class="hero-section" style="padding-bottom: 24px;">
+        <div class="hero-title">微旅行花費追蹤</div>
+        <div class="hero-meta"><div class="hero-tag">${modeEmoji} 交通預估 每人 ${money(tr.totalPerPerson)}（${count} 人共 ${money(tr.totalPerPerson * count)}）</div></div>
+      </div>
+      <div class="budget-water-level">
+        ${discMain}
+        ${progressBlock}
+      </div>
+      <div class="receipt-container">
+        <div class="receipt-card">
+          <div class="receipt-header">
+            <div class="receipt-day">交通費拆解（每人）</div>
+            <div class="receipt-total">${money(tr.totalPerPerson)}</div>
+          </div>
+          ${receiptRows}
+          <div class="receipt-item">
+            <div class="receipt-item-name"><span>💰</span> 每人預算</div>
+            <div>${perPersonBudgetText}</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--ink3);margin-top:10px;line-height:1.7;">
+          交通費為估算值（離島船票＋依交通方式的站間移動），可在 cost-config.js 調整費率。可動用＝每人預算 −  交通。
+        </div>
+      </div>`;
   }
 
   function isMobileLayout() {
@@ -5338,6 +5432,107 @@
     return `每人 ${per}（${count} 人共約 ${group}）`;
   }
 
+  // === 交通費估算（讀 window.WAI_COST_CONFIG；缺檔時回退 0/null，不影響既有功能）===
+  function getCostConfig() {
+    return (typeof window !== 'undefined' && window.WAI_COST_CONFIG && typeof window.WAI_COST_CONFIG === 'object') ? window.WAI_COST_CONFIG : null;
+  }
+  // 目的地 → 離島每人往返船票（非離島回 0）。正規化沿用 getLocalPoiList：臺→台、去縣市、寬鬆比對。
+  function getFerryRoundTrip(destination) {
+    const cfg = getCostConfig();
+    if (!cfg || !cfg.ferryRoundTrip) return 0;
+    const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
+    const dest = norm(destination);
+    if (!dest) return 0;
+    const stripped = dest.replace(/[縣市]$/u, '').trim();
+    for (const key of Object.keys(cfg.ferryRoundTrip)) {
+      const k = norm(key);
+      if (k === dest || (stripped && k === stripped) || dest.includes(k) || k.includes(dest) || (stripped && (stripped.includes(k) || k.includes(stripped)))) {
+        const v = Number(cfg.ferryRoundTrip[key]);
+        if (Number.isFinite(v) && v > 0) return v;
+      }
+    }
+    return 0;
+  }
+  function getTripDayCount(days) {
+    const m = String(days || '').match(/(\d+)\s*天/);
+    if (m) return Math.max(1, parseInt(m[1], 10));
+    return 1;
+  }
+  function readCostStopCoord(s) {
+    if (!s) return null;
+    const lat = Number(s.lat), lng = Number(s.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+    const c = s.scenicCoordinates || s.coordinates || s['景點座標'];
+    if (c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) return { lat: Number(c.lat), lng: Number(c.lng) };
+    return null;
+  }
+  function estimateLegCost(distMeters, mode) {
+    const cfg = getCostConfig();
+    const r = cfg && cfg.modeRates && cfg.modeRates[mode] ? cfg.modeRates[mode] : (cfg && cfg.modeRates ? cfg.modeRates.car : null);
+    if (!r) return 0;
+    const km = Math.max(0, Number(distMeters) || 0) / 1000;
+    return (Number(r.base) || 0) + (Number(r.perKm) || 0) * km;
+  }
+  // 精算（卡片/重新規劃用）：逐段距離×費率；非 perPerson 模式按乘載折算每人。回每人金額。
+  function estimateTripTransport(stops, opts) {
+    const o = opts || {};
+    const cfg = getCostConfig();
+    const count = getPeopleCount(o.people);
+    const modeKey = (cfg && cfg.modeRates && cfg.modeRates[o.mode]) ? o.mode : 'car';
+    const r = cfg && cfg.modeRates ? cfg.modeRates[modeKey] : null;
+    const ferryPerPerson = getFerryRoundTrip(o.destination);
+    let movePerPerson = 0;
+    const list = Array.isArray(stops) ? stops.filter(readCostStopCoord) : [];
+    if (r && list.length >= 2) {
+      let legSum = 0;
+      for (let i = 1; i < list.length; i++) {
+        const a = readCostStopCoord(list[i - 1]), b = readCostStopCoord(list[i]);
+        legSum += estimateLegCost(approxDistanceMeters(a.lat, a.lng, b.lat, b.lng), modeKey);
+      }
+      if (r.perPerson) {
+        movePerPerson = Math.round(legSum); // 大眾：每人每趟
+      } else {
+        const vehicles = Math.max(1, Math.ceil(count / (Number(r.capacity) || 1)));
+        movePerPerson = Math.round((legSum * vehicles) / count);
+      }
+    }
+    return { ferryPerPerson, movePerPerson, totalPerPerson: ferryPerPerson + movePerPerson, count, modeKey };
+  }
+  // 粗估（生成前/無站點 prompt 用）：每日站間移動額度 × 天數 + 離島船票
+  function estimateTransportRough(destination, mode, people, days) {
+    const cfg = getCostConfig();
+    const count = getPeopleCount(people);
+    const m = (mode && cfg && cfg.modeRates && cfg.modeRates[mode]) ? mode : 'car';
+    const dayCount = getTripDayCount(days);
+    const allowance = cfg && cfg.dailyMoveAllowance && Number.isFinite(Number(cfg.dailyMoveAllowance[m])) ? Number(cfg.dailyMoveAllowance[m]) : 0;
+    const movePerPerson = Math.round(allowance * dayCount);
+    const ferryPerPerson = getFerryRoundTrip(destination);
+    return { ferryPerPerson, movePerPerson, totalPerPerson: ferryPerPerson + movePerPerson, count };
+  }
+  // 由人均級距範圍扣掉交通 → 可動用（餐飲/活動）。回 { tier, transport, min, max, open, label, money }；無 budget 回 null。
+  function buildBudgetBreakdown(budget, people, transportPerPerson) {
+    const tiers = [
+      { key: '節省', perMin: 0,    perMax: 500 },
+      { key: '適中', perMin: 500,  perMax: 1500 },
+      { key: '舒適', perMin: 1500, perMax: 3000 },
+      { key: '豪華', perMin: 3000, perMax: null }
+    ];
+    const str = String(budget || '').trim();
+    let tier = tiers.find(t => str.includes(t.key));
+    if (!tier) {
+      const nums = (str.match(/\d[\d,]*/g) || []).map(n => parseInt(n.replace(/,/g, ''), 10)).filter(Number.isFinite);
+      if (nums.length) { const amount = Math.max(...nums); tier = tiers.find(t => t.perMax == null ? amount >= t.perMin : amount <= t.perMax) || tiers[tiers.length - 1]; }
+    }
+    if (!tier) return null;
+    const money = n => '$' + Math.round(n).toLocaleString('en-US');
+    const t = Math.max(0, Math.round(Number(transportPerPerson) || 0));
+    const open = tier.perMax == null;
+    const dMin = Math.max(0, tier.perMin - t);
+    const dMax = open ? null : Math.max(0, tier.perMax - t);
+    const label = open ? `${money(dMin)}+` : (tier.perMin > 0 ? `${money(dMin)}–${money(dMax)}` : `${money(dMax)} 內`);
+    return { tier, transport: t, min: dMin, max: dMax, open, label, money };
+  }
+
   function calcReplanEndTime(startTime, days) {
     const duration = parseDurationMinutes(days);
     const parts = String(startTime || '09:00').split(':').map(Number);
@@ -5516,6 +5711,15 @@
       isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `同行人數：${people}，節奏：${pace}，風格：${theme}`,
       `興趣：${interests}`,
       budget ? `預算：${describeBudgetForPrompt(budget, people)}` : null,
+      budget ? (() => {
+        const live = (Array.isArray(replanStops) && replanStops.length >= 2)
+          ? estimateTripTransport(replanStops, { mode: wizardData.transportMode, people, destination: dest })
+          : estimateTransportRough(dest, wizardData.transportMode, people, days);
+        const bd = buildBudgetBreakdown(budget, people, live.totalPerPerson);
+        if (!bd || live.totalPerPerson <= 0) return null;
+        const ferryPart = live.ferryPerPerson > 0 ? `離島船票 $${live.ferryPerPerson}、` : '';
+        return `交通預估：每人約 $${live.totalPerPerson}（${ferryPart}站間移動約 $${live.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點`;
+      })() : null,
       accommodation ? `住宿安排：${accommodation}` : null,
       startLoc ? `出發車站：${startLoc}` : null,
       endLoc ? `回程車站：${endLoc}` : null,
