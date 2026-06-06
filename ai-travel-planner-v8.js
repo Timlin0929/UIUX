@@ -59,29 +59,14 @@
     { value: 'public', label: '大眾交通', icon: '🚌' }
   ];
 
-  // 離島交通設定：各離島的島內港口、本島港口與別名
-  const ISLAND_FERRY_CONFIG = {
-    '綠島': {
-      islandHarbor: { name: '南寮漁港', emoji: '⚓', lat: 22.6696, lng: 121.4888 },
-      mainlandHarbor: { name: '富岡漁港', emoji: '⚓', lat: 22.7489, lng: 121.1551, region: '台東' },
-      mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港', '台東富岡漁港']
-    },
-    '蘭嶼': {
-      islandHarbor: { name: '開元漁港', emoji: '⚓', lat: 22.0444, lng: 121.5581 },
-      mainlandHarbor: { name: '富岡漁港', emoji: '⚓', lat: 22.7489, lng: 121.1551, region: '台東' },
-      mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港']
-    },
-    '小琉球': {
-      islandHarbor: { name: '白沙港', emoji: '⚓', lat: 22.3435, lng: 120.3722 },
-      mainlandHarbor: { name: '東港漁港', emoji: '⚓', lat: 22.4577, lng: 120.4512, region: '屏東' },
-      mainlandHarborAlias: ['東港漁港', '東港', '大鵬灣港']
-    },
-    '澎湖': {
-      islandHarbor: { name: '馬公港', emoji: '⚓', lat: 23.5636, lng: 119.5693 },
-      mainlandHarbor: { name: '布袋港', emoji: '⚓', lat: 23.3815, lng: 120.1616, region: '嘉義' },
-      mainlandHarborAlias: ['布袋港', '嘉義布袋', '布袋漁港']
-    }
-  };
+  // 離島交通設定（島內港/本島港/別名）改由資料端 ferry-config.js 提供（window.WAI_FERRY_CONFIG）。
+  // 要修港口座標或新增離島，改該資料檔即可，不必動主程式邏輯。
+  const ISLAND_FERRY_CONFIG = (typeof window !== 'undefined' && window.WAI_FERRY_CONFIG && typeof window.WAI_FERRY_CONFIG === 'object')
+    ? window.WAI_FERRY_CONFIG
+    : {};
+  if (!Object.keys(ISLAND_FERRY_CONFIG).length) {
+    console.warn('[ferry-config] 未載入 ferry-config.js（window.WAI_FERRY_CONFIG 為空），離島港口處理將停用。');
+  }
   const REGION_MAP_PRESETS = [
     {
       keywords: ['台東', 'taitung', '三仙台', '成功', '池上', '關山', '鹿野', '太麻里', '東河', '長濱', '海端', '卑南', '土坂', '達仁', '金峰', '富岡', '比西里岸'],
@@ -133,6 +118,15 @@
   }
 
   function findRegionMapPreset(region, title = '') {
+    // 先以 region 單獨比對：綠島/蘭嶼隸屬台東縣，若併入 title 比對，標題含「台東/富岡」時會誤中
+    // 排序在前的台東 preset，導致離島行程套到本島中心。region 命中者優先回傳。
+    const regionText = String(region || '').toLowerCase();
+    if (regionText) {
+      const byRegion = REGION_MAP_PRESETS.find((preset) =>
+        preset.keywords.some((keyword) => regionText.includes(keyword))
+      );
+      if (byRegion) return byRegion;
+    }
     const source = `${region || ''} ${title || ''}`.toLowerCase();
     return REGION_MAP_PRESETS.find((preset) =>
       preset.keywords.some((keyword) => source.includes(keyword))
@@ -237,8 +231,10 @@
       '澎湖': 30000,
       '金門': 25000,
       '馬祖': 25000,
-      '蘭嶼': 30000,
-      '綠島': 20000
+      // 單一小離島：門檻收緊到島嶼尺度，外海/近岸偏移/誤抓鄰區的座標才會被判超範圍而觸發校正
+      '蘭嶼': 8000,
+      '綠島': 8000,
+      '小琉球': 6000
     };
     const normalized = normalizeMapText(region || '');
     return map[normalized] || 50000;
@@ -1043,19 +1039,27 @@
     const variants = [];
     variants.push(`${rawName}${reg}`.trim());
     if (cleanedName && cleanedName !== rawName) variants.push(`${cleanedName}${reg}`.trim());
+    // 位置偏置：以區域中心 + region 半徑門檻偏置 textSearch，避免抓到同名的外地/外海 POI
+    // （對小離島尤其重要，與 searchPrecisePlaceCoordinates 的偏置寫法一致）。
+    const biasCenter = resolveTripCenter(region, title);
     for (const q of variants) {
       const cacheKey = `strict__${q}`;
       let cached = placeSearchCache.has(cacheKey) ? placeSearchCache.get(cacheKey) : undefined;
       if (cached === undefined) {
+        const request = { query: q };
+        if (biasCenter && Number.isFinite(Number(biasCenter.lat)) && Number.isFinite(Number(biasCenter.lng))) {
+          request.location = new google.maps.LatLng(Number(biasCenter.lat), Number(biasCenter.lng));
+          request.radius = Math.min(getRegionRadiusThreshold(region), 50000);
+        }
         cached = await new Promise((resolve) => {
-          service.textSearch({ query: q }, (results, status) => {
+          service.textSearch(request, (results, status) => {
             const okStatus = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
             if (status !== okStatus || !Array.isArray(results) || !results.length) { resolve(null); return; }
             const ranked = results
               .filter(p => p && p.geometry && p.geometry.location)
               .map(p => {
                 const position = { lat: p.geometry.location.lat(), lng: p.geometry.location.lng() };
-                return { name: p.name || '', position, score: scorePlaceCandidate(p, stop, region, title, null, position) };
+                return { name: p.name || '', position, score: scorePlaceCandidate(p, stop, region, title, biasCenter, position) };
               })
               .sort((a, b) => b.score - a.score);
             const strict = ranked.find(r => placeNameMatchesStrict(r.name, stop && stop.name));
@@ -1077,7 +1081,8 @@
     if (!ready) { console.warn('[coord reverify] Places 服務未就緒，略過座標重驗'); return stops; }
     let snapped = 0, checked = 0;
     for (const stop of stops) {
-      if (!stop || stop.type === 'start' || stop.type === 'end') continue;
+      // 座標已鎖定的站（本島港/離島返程港）不重驗，避免被「超出離島範圍」誤判而搬到島上
+      if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
       const name = String(stop.name || '').trim();
       if (!name) continue;
       checked++;
@@ -1476,6 +1481,29 @@
     return true;
   }
 
+  // 端點站（起點/終點）預設停留 0；但若該端點本身是合併大景點（含子景點，如綠島起點富岡漁港
+  // 一帶的富岡燈塔/地質公園），需保留停留時間才能遊覽其子景點。其餘端點維持 0。
+  function resolveStopStayMin(s, fallback) {
+    const isEndpoint = s && (s.type === 'start' || s.type === 'end');
+    const hasMergedSubSpots = s && s.isMergedAttraction
+      && Array.isArray(s.mergedSubSpots) && s.mergedSubSpots.length > 0;
+    if (isEndpoint && !hasMergedSubSpots) return 0;
+    return s.duration || s.stayMin || fallback;
+  }
+
+  // 港口/端點站描述清理：去掉完整「（含 …）」，再移除尾端未閉合的破碎括號片段
+  // （如 AI desc 末端殘留「…探索（s…」沒有對應的右括號），避免顯示亂碼。
+  function sanitizeHarborDesc(desc) {
+    let text = String(desc || '');
+    if (!text) return text;
+    text = parseIncludedSpotsFromDesc(text).clean;
+    const lastOpen = Math.max(text.lastIndexOf('（'), text.lastIndexOf('('));
+    if (lastOpen >= 0 && !/[）)]/.test(text.slice(lastOpen))) {
+      text = text.slice(0, lastOpen);
+    }
+    return text.replace(/\s+/g, ' ').trim();
+  }
+
   async function initFromUrl() {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -1538,6 +1566,27 @@
             // 對齊描述「（含 …）」與 mergedSubSpots，並清掉歷次累加的重複括號（純字串，不依賴 Places）
             reconcileMergedSubSpots(normalizedStops);
 
+            // 返程/端點港口清理：返回港不應是合併大景點（清掉 merged 欄位），desc 去掉殘留「（含…）」與破碎括號。
+            // 注意：起點本島港（首站）刻意保留其子景點與停留時間（前次決策），故不清。
+            const _lastStopIdx = normalizedStops.length - 1;
+            normalizedStops.forEach((s, idx) => {
+              if (!s) return;
+              if (s.type === 'start' || idx === 0) return; // 保留起點本島港的子景點/停留
+              const isMainlandHarbor = islandConfig && isMainlandHarborStop(s.name, islandConfig);
+              const isIslandHarbor = islandConfig && isIslandHarborStop(s.name, islandConfig);
+              const isReturnHarbor = s.type === 'end'
+                || isIslandHarbor                              // 島內上船港（返程）一律純轉乘點
+                || (idx === _lastStopIdx && isMainlandHarbor); // 尾站本島港＝返回本島
+              if (!isReturnHarbor) return;
+              if (s.isMergedAttraction || s.mergedSubSpots || s.mergedRadiusMeters || s.mergedMemberCoords) {
+                s.isMergedAttraction = false;
+                s.mergedSubSpots = null;
+                s.mergedRadiusMeters = null;
+                s.mergedMemberCoords = null;
+              }
+              if (typeof s.desc === 'string') s.desc = sanitizeHarborDesc(s.desc);
+            });
+
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
 
@@ -1559,7 +1608,7 @@
                     id: `stop-${Date.now()}-${idx}`,
                     emoji: s.emoji || '📍', name: s.name || '景點',
                     type: s.type || null,
-                    stayMin: (s.type === 'start' || s.type === 'end') ? 0 : (s.duration || s.stayMin || 20),
+                    stayMin: resolveStopStayMin(s, 20),
                     transitMin: normalizeTransitMinutesValue(s.transitMin),
                     transitMode: normalizeTransitMode(s.transitMode),
                     mapPinId: assignedPinId,
@@ -1637,7 +1686,7 @@
                 emoji: s.emoji || scenicRecord?.emoji || '📍',
                 name: s.name || scenicRecord?.name || s.desc || '景點',
                 type: s.type || null,
-                stayMin: (s.type === 'start' || s.type === 'end') ? 0 : (s.duration || s.stayMin || 30),
+                stayMin: resolveStopStayMin(s, 30),
                 transitMin: persistedTransitMin,
                 transitMode: normalizedTransitMode,
                 mapPinId: assignedPinId,
@@ -1674,7 +1723,7 @@
                   lng: returnPos.lng
                 };
               }
-              replanStops.push({
+              const returnStop = {
                 id: `stop-return-${Date.now()}`,
                 emoji: returnHarbor.emoji,
                 name: returnHarbor.name,
@@ -1687,7 +1736,16 @@
                 lat: returnPos.lat,
                 lng: returnPos.lng,
                 nearbyToiletLocations: []
-              });
+              };
+              // 若最後一站是本島港（返回本島的終點），把島內上船港插在它「之前」，
+              // 得到「島上景點 → 南寮(島內上船) → 富岡(本島抵達)」的正確順序；
+              // 否則（最後一站是島上景點）照舊接在最後。
+              const lastStopRef = replanStops[replanStops.length - 1];
+              if (isMainlandHarborStop(lastStopRef?.name, islandConfig)) {
+                replanStops.splice(replanStops.length - 1, 0, returnStop);
+              } else {
+                replanStops.push(returnStop);
+              }
             }
 
             const durationSum = replanStops.reduce((sum, s, idx) => {
@@ -1888,9 +1946,11 @@
   // 否則取「被最多其他成員名稱包含」者（如『三仙台』被多個子景點名包含），同分取最短。
   function pickClusterName(names) {
     const prefix = commonNamePrefix(names);
-    // 前綴 ≥ 3 字、且去掉行政區後綴（市/縣/鄉…）後仍 ≥ 3 字才採用，
-    // 避免「台東」「花蓮市」等城市名變成合併站名（應落在具體地標如「台東海濱公園」）
-    if (prefix && prefix.length >= 3 && prefix.replace(/[市縣鄉鎮區村里]$/, '').length >= 3) return prefix;
+    // 前綴 ≥ 3 字、去掉行政區後綴（市/縣/鄉…）後仍 ≥ 3 字、且前綴本身即某個實際成員名時才採用，
+    // 避免「台東」「花蓮市」等城市名或「綠島小」這類截斷片段變成合併站名（應落在具體地標）。
+    if (prefix && prefix.length >= 3
+      && prefix.replace(/[市縣鄉鎮區村里]$/, '').length >= 3
+      && names.some(n => String(n) === prefix)) return prefix;
     let best = '', bestScore = -1;
     for (const cand of names) {
       const cn = normalizeText(cand);
@@ -2086,8 +2146,9 @@
       const names = [...set];
       if (names.length < 2) continue;
       const exactIsPlace = all.some(n => n === p);
-      const nextChars = new Set(names.map(n => n.slice(p.length, p.length + 1)).filter(Boolean));
-      if (!exactIsPlace && nextChars.size < 2) continue;          // 非真分支點且前綴本身不是POI → 跳過
+      // 只採用「前綴本身即一個真實 POI（成員或附近景點）」的名稱，避免取到截斷片段
+      // （如「綠島小長城」「綠島小夜市」→ 前綴「綠島小」並非真實地點）。三仙台等本身是 POI 者不受影響。
+      if (!exactIsPlace) continue;
       if (!names.some(n => nears.includes(n))) continue;           // 需有附近POI佐證
       if (names.length > bestCount || (names.length === bestCount && (best === '' || p.length < best.length))) {
         best = p; bestCount = names.length;
@@ -2101,7 +2162,8 @@
     if (!Array.isArray(stops) || !stops.length || !hasGooglePlacesService()) return stops;
     const otherNorms = new Set(stops.map(s => normalizeText(s && s.name)).filter(Boolean));
     for (const stop of stops) {
-      if (!stop || stop.type === 'start' || stop.type === 'end') continue;
+      // 跳過端點與「座標已鎖定」的站（如本島港/離島返程港）：不再用 Places 補子景點或 snap，避免被搬位
+      if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
       const coord = readStopCoordinates(stop);
       if (!coord) continue;
       const parentName = String(stop.name || '');
@@ -2241,7 +2303,10 @@
     for (let i = 0; i < stops.length; i++) {
       const s = stops[i];
       const isEndpoint = s && (s.type === 'start' || s.type === 'end');
-      if (!isEndpoint) total += Math.max(0, Number(s.stayMin) || Number(s.duration) || 0);
+      // 端點原則不計停留；但端點為合併大景點（含子景點）時需計入，與卡片/時間軸顯示一致
+      const mergedEndpoint = isEndpoint && s.isMergedAttraction
+        && Array.isArray(s.mergedSubSpots) && s.mergedSubSpots.length > 0;
+      if (!isEndpoint || mergedEndpoint) total += Math.max(0, Number(s.stayMin) || Number(s.duration) || 0);
       if (i < stops.length - 1) total += estimateLegMinutes(s, stops[i + 1]);
     }
     return total;
@@ -2267,9 +2332,49 @@
     return norm === harborNorm || norm.includes(harborNorm) || harborNorm.includes(norm);
   }
 
-  // 將行程中所有本島港口站點替換為正確的離島港口名稱與座標
+  // 將行程中的港口站點正規化：
+  //  - 島內港（南寮漁港）→ 不論位置，一律鎖定到「正確島內港座標」（config.islandHarbor），
+  //    避免 AI/Places 一直抓到錯誤位置。
+  //  - 起終點（出發/返回本島）的本島港 → 鎖定到「真實本島港座標」（config.mainlandHarbor），
+  //    避免它落在離島 region 範圍外、被座標解析誤搬到島上（出現「島內港口」幻覺）。
+  //  - 中段誤植的本島港 → 改成島內港（config.islandHarbor），修正 AI 把本島港排進島上行程的錯誤。
   function normalizeIslandHarborStops(stops, config) {
-    return stops.map((stop) => {
+    const lastIdx = stops.length - 1;
+    const mainland = config.mainlandHarbor;
+    const hasMainlandCoord = mainland && Number.isFinite(Number(mainland.lat)) && Number.isFinite(Number(mainland.lng));
+    const island = config.islandHarbor;
+    const hasIslandCoord = island && Number.isFinite(Number(island.lat)) && Number.isFinite(Number(island.lng));
+    return stops.map((stop, idx) => {
+      // 島內港（南寮漁港）：不論在哪個位置，都鎖定到正確島內港座標（名稱統一），不讓 AI/Places 覆寫
+      if (hasIslandCoord && stop && isIslandHarborStop(stop.name, config)) {
+        const pos = { lat: Number(island.lat), lng: Number(island.lng) };
+        return Object.assign({}, stop, {
+          name: island.name,
+          emoji: island.emoji || stop.emoji,
+          scenicCoordinates: pos,
+          '景點座標': pos,
+          _lockedCoordinates: pos,
+          lat: pos.lat,
+          lng: pos.lng
+        });
+      }
+      const isEndpoint = (stop && (stop.type === 'start' || stop.type === 'end')) || idx === 0 || idx === lastIdx;
+      if (isEndpoint) {
+        // 端點本島港：鎖定到真實本島港座標（名稱保留），其餘端點不動。
+        if (hasMainlandCoord && isMainlandHarborStop(stop.name, config)) {
+          const pos = { lat: Number(mainland.lat), lng: Number(mainland.lng) };
+          return Object.assign({}, stop, {
+            name: mainland.name || stop.name,
+            scenicCoordinates: pos,
+            '景點座標': pos,
+            _lockedCoordinates: pos,
+            lat: pos.lat,
+            lng: pos.lng
+          });
+        }
+        return stop;
+      }
+      // 中段誤植的本島港 → 正規化為島內港
       if (isMainlandHarborStop(stop.name, config)) {
         const harbor = config.islandHarbor;
         return Object.assign({}, stop, {
@@ -3729,6 +3834,8 @@
     const vehiclePref = String(currentTripPreferences?.transportMode || '').toLowerCase();
     const hasVehiclePref = ['taxi', 'scooter', 'car'].includes(vehiclePref);
 
+    // 保留 localStorage 中的完整 trip 物件，供 Firebase 首次建立時補齊頂層欄位
+    let localTrip = null;
     try {
       const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
       const tripIndex = myTrips.findIndex((t) => t.id === currentItineraryId);
@@ -3738,6 +3845,7 @@
           patch.wizardData = { ...(myTrips[tripIndex].wizardData || {}), transportMode: vehiclePref };
         }
         myTrips[tripIndex] = patch;
+        localTrip = patch;
         localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
       }
     } catch (e) {
@@ -3746,12 +3854,28 @@
 
     if (firebaseEnabled && firebaseDb) {
       try {
-        const fbPatch = {
-          stops: stopsSnapshot,
-          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        };
-        if (hasVehiclePref) fbPatch['wizardData.transportMode'] = vehiclePref;
-        await firebaseDb.collection('micro_trips').doc(currentItineraryId).update(fbPatch);
+        // 取得登入者 email（與生成頁一致），供 loadState 的 userEmail 查詢能撈到此行程
+        let userEmail = '';
+        try {
+          const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
+          if (u && u.currentUser && u.currentUser.email) userEmail = u.currentUser.email;
+        } catch (_e) {}
+
+        // 用 set(merge) 取代 update()：文件不存在時自動建立（self-heal），存在時只合併傳入欄位。
+        // 若是首次建立，帶入 localStorage trip 的頂層核心欄位（id/title/region/wizardData/createdAt…），
+        // 避免 Firebase 內留下殘缺文件，且確保 createdAt 存在讓 loadState 的 orderBy 查詢能撈到。
+        const { __saving, ...cleanLocal } = localTrip || {};
+        const fbPatch = localTrip
+          ? { ...cleanLocal, stops: stopsSnapshot }
+          : { id: currentItineraryId, stops: stopsSnapshot };
+        // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail
+        if (userEmail) fbPatch.userEmail = userEmail;
+        fbPatch.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
+        // set+merge 會把含 "." 的 key 當字面欄位名，故改用巢狀物件寫 wizardData.transportMode
+        if (hasVehiclePref) {
+          fbPatch.wizardData = { ...(fbPatch.wizardData || {}), transportMode: vehiclePref };
+        }
+        await firebaseDb.collection('micro_trips').doc(currentItineraryId).set(fbPatch, { merge: true });
       } catch (e) {
         console.warn('Failed to persist trip stops to Firebase:', e);
       }
@@ -5403,7 +5527,12 @@
     _addRgLine('$ WanderAI --replan --dest ' + dest, 'info');
 
     try {
-      const livePoiHint = await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      // 本地優先：有本地景點資料就用它，缺該目的地時才回退 live Google Maps
+      const _localHint = buildLocalPoiHintBlock(dest);
+      if (_localHint) _addRgLine('> 已從本地景點資料庫取得清單，交由 AI 重新排序…', 'info');
+      const livePoiHint = _localHint || await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      // 在 DevTools Console 標明景點清單來源：本地 / live Maps / 無
+      console.info(`[POI來源] ${_localHint ? '本地 poi-data.js' : (livePoiHint ? 'live Google Maps' : '無清單（AI 自行生成）')}｜目的地：${dest}｜（重新規劃）`);
       if (_rgPhase) _rgPhase.textContent = 'AI 生成行程中…';
       _addRgLine('> AI 正在生成新行程，請稍候…', 'info');
 
@@ -5697,6 +5826,52 @@
       throw new Error('AI 回傳格式不是有效 JSON。');
     }
     return parsed;
+  }
+
+  // 從本地靜態檔 window.WAI_POI_DATA（爬蟲 npm run export:local 產生）取某目的地的景點清單。
+  // dest 正規化：精確鍵 → 去掉「縣/市」後綴 → 與既有鍵互相包含比對。無資料回 []。
+  function getLocalPoiList(destination) {
+    const data = (typeof window !== 'undefined' && window.WAI_POI_DATA) || null;
+    // 正規化：臺→台（OpenData 用「臺東」、前端用「台東」，否則比對不到）；去頭尾空白
+    const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
+    const dest = norm(destination);
+    if (!data || !dest) return [];
+    const stripped = dest.replace(/[縣市]$/u, '').trim();
+    // 合併所有「正規化後相符」的桶（如「臺東」「台東」拆成兩桶需合併），並以名稱去重
+    const seen = new Set();
+    const out = [];
+    for (const key of Object.keys(data)) {
+      if (key === '__generatedAt' || !Array.isArray(data[key]) || !data[key].length) continue;
+      const k = norm(key);
+      const match = k === dest || (stripped && k === stripped)
+        || dest.includes(k) || k.includes(dest)
+        || (stripped && (stripped.includes(k) || k.includes(stripped)));
+      if (!match) continue;
+      for (const poi of data[key]) {
+        const id = poi && poi.name ? String(poi.name).trim() : '';
+        if (id && seen.has(id)) continue;
+        if (id) seen.add(id);
+        out.push(poi);
+      }
+    }
+    return out;
+  }
+
+  // 用本地景點清單組 hint（沿用 v8 的「只能從此清單挑選」指令），交給 AI 重新排序。無資料回 ''。
+  function buildLocalPoiHintBlock(destination) {
+    const pois = getLocalPoiList(destination);
+    if (!pois.length) return '';
+    const lines = pois.slice(0, 40).map((p) => {
+      const lat = Number(p.lat), lng = Number(p.lng);
+      return [
+        `景點名稱：${p.name}`,
+        (Number.isFinite(lat) && Number.isFinite(lng)) ? `景點座標：lat ${lat}, lng ${lng}` : '',
+        p.businessHours ? `營業時間：${p.businessHours}` : '',
+        p.address ? `地址：${p.address}` : '',
+        p.desc ? `描述：${p.desc}` : ''
+      ].filter(Boolean).join('\n');
+    });
+    return `\n【本地景點資料庫】\n以下景點來自本地已驗證資料，座標均已驗證。你的任務是依照目前的行程狀態，只能從此清單中挑選景點來推薦或安排行程，禁止自行創造清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
   }
 
   async function fetchLiveMapsPoiHintBlock(destination, interests = []) {

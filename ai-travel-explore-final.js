@@ -244,6 +244,51 @@ function getWizardDestination(wizardData) {
   return String((wizardData && (wizardData.dest || wizardData.destCustom)) || '').trim();
 }
 
+// 從本地靜態檔 window.WAI_POI_DATA（由爬蟲 npm run export:local 產生）取某目的地的景點清單。
+// dest 正規化：精確鍵 → 去掉「縣/市」後綴 → 與既有鍵互相包含比對。無資料回 []。
+function getLocalPoiList(destination) {
+  const data = (typeof window !== 'undefined' && window.WAI_POI_DATA) || null;
+  // 正規化：臺→台（OpenData 用「臺東」、前端用「台東」，否則比對不到）；去頭尾空白
+  const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
+  const dest = norm(destination);
+  if (!data || !dest) return [];
+  const stripped = dest.replace(/[縣市]$/u, '').trim();
+  // 合併所有「正規化後相符」的桶（例如「臺東」「台東」會被拆成兩桶，需合併），並以名稱去重
+  const seen = new Set();
+  const out = [];
+  for (const key of Object.keys(data)) {
+    if (key === '__generatedAt' || !Array.isArray(data[key]) || !data[key].length) continue;
+    const k = norm(key);
+    const match = k === dest || (stripped && k === stripped)
+      || dest.includes(k) || k.includes(dest)
+      || (stripped && (stripped.includes(k) || k.includes(stripped)));
+    if (!match) continue;
+    for (const poi of data[key]) {
+      const id = poi && poi.name ? String(poi.name).trim() : '';
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      out.push(poi);
+    }
+  }
+  return out;
+}
+
+// 用本地景點清單組「【已驗證景點快取】」hint（格式與 buildFirebasePoiHintBlock 一致），交給 AI 只做排序。
+function buildLocalPoiHintBlock(destination) {
+  const pois = getLocalPoiList(destination);
+  if (!pois.length) return '';
+  const poiLines = pois.slice(0, 40).map((poi) => {
+    const poiLat = Number(poi.lat);
+    const poiLng = Number(poi.lng);
+    const coordinateHint = Number.isFinite(poiLat) && Number.isFinite(poiLng)
+      ? `景點座標：lat ${poiLat}, lng ${poiLng}`
+      : '景點座標：未知';
+    const durationHint = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0 ? `${poi.duration} 分鐘` : '未知';
+    return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`;
+  });
+  return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
+}
+
 async function prefetchFirebasePoiHint(wizardData, force = false) {
   const destination = getWizardDestination(wizardData);
   if (!destination) return '';
@@ -712,15 +757,22 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
   const mode = options.mode === 'preview' ? 'preview' : 'final';
   const includeFirebase = options.includeFirebase !== false && mode === 'final';
   const useStreaming = options.useStreaming === true;
-  const firebasePromptBlock = includeFirebase
+  // 本地優先：有本地景點清單就用它，跳過 Firebase poi_cache 的網路讀取
+  const localBlock = buildLocalPoiHintBlock(getWizardDestination(wizardData));
+  const firebasePromptBlock = (!localBlock && includeFirebase)
     ? (await prefetchFirebasePoiHint(wizardData).catch(() => ''))
     : '';
 
-  const livePoiBlock = (!firebasePromptBlock && options.livePoiHint !== undefined)
+  const livePoiBlock = (!localBlock && !firebasePromptBlock && options.livePoiHint !== undefined)
     ? (options.livePoiHint || '')
     : '';
 
-  const hintBlock = firebasePromptBlock || livePoiBlock;
+  const hintBlock = localBlock || firebasePromptBlock || livePoiBlock;
+  // 在 DevTools Console 標明這次景點清單來源：本地 / Firebase / live Maps / 無
+  const _poiSource = localBlock ? '本地 poi-data.js'
+    : (firebasePromptBlock ? 'Firebase poi_cache'
+    : (livePoiBlock ? 'live Google Maps' : '無清單（AI 自行生成）'));
+  console.info(`[POI來源] ${_poiSource}｜目的地：${getWizardDestination(wizardData)}｜mode：${mode}`);
   const built = buildPrompt(wizardData, hintBlock, mode);
   const preferredModel = GEMINI_MODEL;
   const payload = {
@@ -947,8 +999,8 @@ const CIVIL_TRANSIT_HUB_MAP = {
   '鹿野': '鹿野車站', '關山': '關山車站',
   '池上': '池上車站', '富里': '富里車站',
   '成功': '成功漁港', '長濱': '成功漁港', '東河': '台東車站',
-  // 離島（從台東富岡出發）
-  '綠島': '富岡漁港', '蘭嶼': '富岡漁港',
+  // 離島：預設起終點用「島內港」，讓行程聚焦島上（使用者自填則尊重）。本島搭船港由 ferry-config 管理。
+  '綠島': '南寮漁港', '蘭嶼': '開元漁港',
   // 花蓮縣
   '花蓮': '花蓮車站', '玉里': '玉里車站', '瑞穗': '瑞穗車站',
   '光復': '光復車站', '壽豐': '壽豐車站',
@@ -969,8 +1021,17 @@ const CIVIL_TRANSIT_HUB_MAP = {
   '恆春': '枋寮車站', '墾丁': '枋寮車站', '枋寮': '枋寮車站',
   // 離島
   '澎湖': '馬公港', '金門': '水頭碼頭', '馬祖': '南竿福澳港',
-  '小琉球': '東港漁港',
+  '小琉球': '白沙港',
 };
+
+// 離島（綠島/蘭嶼/小琉球）預設起終點用「島內港」，名稱以資料端 ferry-config.js
+// （window.WAI_FERRY_CONFIG.islandHarbor）為單一來源；缺檔時沿用上方字面值。
+// 澎湖/金門/馬祖本就用島上港/機場，不在此同步。
+['綠島', '蘭嶼', '小琉球'].forEach((dest) => {
+  const cfg = (typeof window !== 'undefined' && window.WAI_FERRY_CONFIG) ? window.WAI_FERRY_CONFIG[dest] : null;
+  const harborName = cfg && cfg.islandHarbor && cfg.islandHarbor.name;
+  if (harborName) CIVIL_TRANSIT_HUB_MAP[dest] = harborName;
+});
 
 const TRAFFIC_RISK_KEYWORDS = [
   '交流道', '匝道', '國道', '快速道路', '高架', '環河', '環東', '環南', '橋', '隧道',
@@ -1813,7 +1874,8 @@ async function fetchCoordinateFromGooglePlaces(name, destination) {
       body.locationBias = {
         circle: {
           center: { latitude: destCenter.lat, longitude: destCenter.lng },
-          radius: Math.min(getDestinationMaxDistanceMeters(destination) || 50000, 80000)
+          // Places API (New) 的 locationBias.circle.radius 上限為 50000 公尺，超過會回 400 Bad Request
+          radius: Math.min(getDestinationMaxDistanceMeters(destination) || 50000, 50000)
         }
       };
     }
@@ -2015,9 +2077,11 @@ function shouldClusterStops(a, b) {
 // 從一組名稱挑出「大景點名」：有共同前綴就用前綴，否則取「被最多其他成員名稱包含」者，同分取最短。
 function pickClusterName(names) {
   const prefix = subSpotCommonPrefix(names);
-  // 前綴 ≥ 3 字、且去掉行政區後綴（市/縣/鄉…）後仍 ≥ 3 字才採用，
-  // 避免「台東」「花蓮市」等城市名變成合併站名（應落在具體地標如「台東海濱公園」）
-  if (prefix && prefix.length >= 3 && prefix.replace(/[市縣鄉鎮區村里]$/, '').length >= 3) return prefix;
+  // 前綴 ≥ 3 字、去掉行政區後綴（市/縣/鄉…）後仍 ≥ 3 字、且前綴本身即某個實際成員名時才採用，
+  // 避免「台東」「花蓮市」等城市名或「綠島小」這類截斷片段變成合併站名（應落在具體地標）。
+  if (prefix && prefix.length >= 3
+    && prefix.replace(/[市縣鄉鎮區村里]$/, '').length >= 3
+    && names.some(n => String(n) === prefix)) return prefix;
   let best = '', bestScore = -1;
   for (const cand of names) {
     const cn = normalizeLookupText(cand);
@@ -2168,8 +2232,9 @@ function deriveBigAreaName(memberNames, nearbyNames) {
     const names = [...set];
     if (names.length < 2) continue;
     const exactIsPlace = all.some(n => n === p);
-    const nextChars = new Set(names.map(n => n.slice(p.length, p.length + 1)).filter(Boolean));
-    if (!exactIsPlace && nextChars.size < 2) continue;     // 非真分支點且前綴本身不是POI → 跳過
+    // 只採用「前綴本身即一個真實 POI（成員或附近景點）」的名稱，避免取到截斷片段
+    // （如「綠島小長城」「綠島小夜市」→ 前綴「綠島小」並非真實地點）。三仙台等本身是 POI 者不受影響。
+    if (!exactIsPlace) continue;
     if (!names.some(n => nears.includes(n))) continue;      // 需有附近POI佐證
     if (names.length > bestCount || (names.length === bestCount && (best === '' || p.length < best.length))) {
       best = p; bestCount = names.length;
@@ -2389,12 +2454,22 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   const _userEndLoc   = (wizardData.endLocation   || '').trim();
   const _startLocCalc = _userStartLoc || _defaultHub;
   const _endLocCalc   = _userEndLoc   || _defaultHub;
-  const [_startCoords, _rawEndCoords] = await Promise.all([
-    fetchCoordinateFromGooglePlaces(_startLocCalc, destination).catch(() => null),
-    _startLocCalc === _endLocCalc
-      ? Promise.resolve(null)
-      : fetchCoordinateFromGooglePlaces(_endLocCalc, destination).catch(() => null),
-  ]);
+  // 離島且使用者未自填起/終點：直接採用 ferry-config 的島內港座標，避免「南寮漁港」等同名港
+  // 被 geocode 到本島（如新竹也有南寮漁港）。使用者自填時仍走正常 Places 解析。
+  const _ferryCfg = (typeof window !== 'undefined' && window.WAI_FERRY_CONFIG) ? window.WAI_FERRY_CONFIG[destination] : null;
+  const _islandHarborCoord = (_ferryCfg && _ferryCfg.islandHarbor
+    && Number.isFinite(Number(_ferryCfg.islandHarbor.lat)) && Number.isFinite(Number(_ferryCfg.islandHarbor.lng)))
+    ? { lat: Number(_ferryCfg.islandHarbor.lat), lng: Number(_ferryCfg.islandHarbor.lng), source: 'ferry_config' }
+    : null;
+  const _resolveStart = (!_userStartLoc && _islandHarborCoord)
+    ? Promise.resolve(_islandHarborCoord)
+    : fetchCoordinateFromGooglePlaces(_startLocCalc, destination).catch(() => null);
+  const _resolveEnd = (_startLocCalc === _endLocCalc)
+    ? Promise.resolve(null)
+    : ((!_userEndLoc && _islandHarborCoord)
+        ? Promise.resolve(_islandHarborCoord)
+        : fetchCoordinateFromGooglePlaces(_endLocCalc, destination).catch(() => null));
+  const [_startCoords, _rawEndCoords] = await Promise.all([_resolveStart, _resolveEnd]);
   const _endCoords = _startLocCalc === _endLocCalc ? _startCoords : _rawEndCoords;
 
   const sanitizedStops = sanitizeStopCoordinates(preMatchedStops, wizardData, poiCache);
@@ -2446,8 +2521,10 @@ async function saveMicroTripToFirebase(trip) {
   if (!firebaseEnabled || !firebaseDb) return false;
   try {
     const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
+    // 剝除暫存旗標 __saving，避免把 UI 狀態寫進 Firestore
+    const cleanTrip = serializeTripForStorage(trip);
     await tripRef.set({
-      ...trip,
+      ...cleanTrip,
       stops: trip.stops || [],
       userEmail: currentUser && currentUser.email ? currentUser.email : 'unknown',
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -3519,7 +3596,13 @@ function persistMicroTripInBackground(trip) {
       trip.__saving = true;
       saveState(); renderSideMyTrips(); renderMyTrips();
 
-      const firebaseSaved = await saveMicroTripToFirebase(trip);
+      // 失敗時重試，避免單次網路抖動造成行程沒存進 Firebase（後續編輯就看不到景點）
+      let firebaseSaved = await saveMicroTripToFirebase(trip);
+      for (let attempt = 1; !firebaseSaved && attempt <= 2; attempt++) {
+        console.warn(`Firebase 保存失敗，第 ${attempt} 次重試…`);
+        await new Promise(r => setTimeout(r, 1500));
+        firebaseSaved = await saveMicroTripToFirebase(trip);
+      }
       if (firebaseSaved) {
         // 成功：顯示成功提示，之後才啟用編輯按鍵
         showToast(`✅ 微旅行已保存到 Firebase: ${trip.id}`, 'green');
@@ -3666,23 +3749,32 @@ async function _doGeneration(trip, wData) {
   isGeneratingTrip = true;
   showGenPanel(trip.title);
   try {
-    addGenLine('> 正在從 Google Maps 查詢可用景點清單…', 'info');
     setGenPhase('查詢景點中…');
     const _liveDest = wData.dest || wData.destCustom || '';
-    const _liveCenter = getDestinationCenter(_liveDest);
-    const livePlaces = await fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
-    const livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
-    if (livePlaces.length > 0) {
-      addGenLine(`> 已從 Google Maps 取得 ${livePlaces.length} 個景點，交由 AI 安排行程…`, 'info');
+    // 本地優先：有本地景點資料就直接用，跳過 Google Maps 即時抓取
+    const _localHint = buildLocalPoiHintBlock(_liveDest);
+    let livePlaces = [];
+    let livePoiHint = '';
+    if (_localHint) {
+      addGenLine('> 已從本地景點資料庫取得清單，交由 AI 安排行程…', 'info');
+      livePoiHint = _localHint;
     } else {
-      addGenLine('> 使用備用景點資料，繼續規劃…', 'info');
+      addGenLine('> 正在從 Google Maps 查詢可用景點清單…', 'info');
+      const _liveCenter = getDestinationCenter(_liveDest);
+      livePlaces = await fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
+      livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
+      if (livePlaces.length > 0) {
+        addGenLine(`> 已從 Google Maps 取得 ${livePlaces.length} 個景點，交由 AI 安排行程…`, 'info');
+      } else {
+        addGenLine('> 使用備用景點資料，繼續規劃…', 'info');
+      }
     }
     setGenPhase('AI 規劃行程中…');
 
     let lastNames = [];
     const finalPlan = await requestGeminiMicroTravelPlan(wData, {
       mode: 'final',
-      includeFirebase: livePlaces.length === 0,
+      includeFirebase: !_localHint && livePlaces.length === 0,
       livePoiHint,
       useStreaming: true,
       onChunk: (_chunk, fullText) => {

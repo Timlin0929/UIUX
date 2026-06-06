@@ -7,7 +7,9 @@
     "start": "node worker.js",
     "dry": "node worker.js --dry-run",
     "import": "node worker.js --import",
-    "import:dry": "node worker.js --import --dry-run"
+    "import:dry": "node worker.js --import --dry-run",
+    "export:local": "node worker.js --export-local",
+    "export:local:dry": "node worker.js --export-local --dry-run"
   },
   "author": "",
   "license": "MIT",

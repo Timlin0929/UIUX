@@ -139,6 +139,29 @@ npm start
 
 這個模式只會處理已存在且 `needsCrawl: true` 的文件，不會自動新增 OpenData 全部景點。
 
+## 匯出本地景點檔（給前端離線優先使用）
+
+把 Firestore `scenic_points` 匯出成前端可直接載入的靜態檔 `..\poi-data.js`（`window.WAI_POI_DATA`），讓「生成 / 重新規劃行程」時先用本地景點清單交給 AI 排序，減少 Google Places / Firebase 呼叫。
+
+先預覽（不寫檔，只印出內容）：
+
+```powershell
+npm run export:local:dry
+```
+
+確認沒問題後正式產檔：
+
+```powershell
+npm run export:local
+```
+
+說明：
+
+- 會依景點的行政區把資料分桶成前端目的地鍵（如「台東」「綠島」「蘭嶼」）。
+- 每筆只保留變動不大的欄位：`name / lat / lng / desc / address / businessHours / duration? / nearbyToiletLocations`。
+- 預設輸出到專案根目錄的 `poi-data.js`；可用 `$env:EXPORT_LOCAL_PATH` 覆寫路徑。
+- 前端兩頁（explore、planner-v8）以 `<script src="poi-data.js">` 載入；檔案為空 `{}` 時自動回退 Firebase / live Maps。
+
 ## 可選設定
 
 通常不用改，但需要時可以在 PowerShell 設定：
