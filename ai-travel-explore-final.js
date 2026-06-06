@@ -362,6 +362,57 @@ function getPeopleProfile(people) {
     introSentence: `根據用戶需求生成一份適合 ${count} 人大型團體的可執行行程，全程選擇可接待大團體的場所、預留訂位與共同用餐時段，並安排充足的集合與移動緩衝。` };
 }
 
+// === 預算（人均）階梯與換算 ===
+// 預算一律以「人均」表示；整團總額 = 人均 × Step 0 選定人數，於 UI 與 AI prompt 同步呈現，
+// 避免「$500-1500」這類金額看不出是單人還是整團。
+const BUDGET_TIERS = [
+  { key: '節省', perMin: 0,    perMax: 500 },
+  { key: '適中', perMin: 500,  perMax: 1500 },
+  { key: '舒適', perMin: 1500, perMax: 3000 },
+  { key: '豪華', perMin: 3000, perMax: null } // 開放上限
+];
+
+// 把任意 budget 字串（新人均 token／舊籠統字串／社群範例 `$2,000`）對應回某個 tier
+function getBudgetTier(value) {
+  const str = String(value || '').trim();
+  if (!str) return null;
+  // 1) 直接含 tier key（如「節省」「適中（每人…）」）
+  const byKey = BUDGET_TIERS.find(t => str.includes(t.key));
+  if (byKey) return byKey;
+  // 2) 退回用字串中的金額對應級距（社群範例如 `$2,000`、舊字串如 `$500-1500`）
+  const nums = (str.match(/\d[\d,]*/g) || []).map(n => parseInt(n.replace(/,/g, ''), 10)).filter(Number.isFinite);
+  if (nums.length) {
+    const amount = Math.max(...nums); // 取較大值代表該預算量級
+    return BUDGET_TIERS.find(t => t.perMax == null ? amount >= t.perMin : amount <= t.perMax) || BUDGET_TIERS[BUDGET_TIERS.length - 1];
+  }
+  return null;
+}
+
+// 千分位
+function formatMoney(n) {
+  return '$' + Math.round(n).toLocaleString('en-US');
+}
+
+// 由 budget 值 + 人數產生人均/總額描述：
+// { tier, perPersonLabel:'每人 $500–1500', groupLabel:'2 人約共 $1,000–3,000', promptText:'每人 $500–1500（2 人共約 $1,000–3,000）' }
+function describeBudget(value, people) {
+  const tier = getBudgetTier(value);
+  if (!tier) return null;
+  const count = getPeopleCount(people);
+  const open = tier.perMax == null;
+  const perPersonLabel = open
+    ? `每人 ${formatMoney(tier.perMin)} 以上`
+    : (tier.perMin > 0 ? `每人 ${formatMoney(tier.perMin)}–${formatMoney(tier.perMax)}` : `每人 ${formatMoney(tier.perMax)} 內`);
+  const groupMin = tier.perMin * count;
+  const groupMax = open ? null : tier.perMax * count;
+  const groupTotal = open
+    ? `${formatMoney(groupMin || tier.perMin)}+`
+    : (tier.perMin > 0 ? `${formatMoney(groupMin)}–${formatMoney(groupMax)}` : `${formatMoney(groupMax)} 內`);
+  const groupLabel = `${count} 人約共 ${groupTotal}`;
+  const promptText = `每人 ${open ? `${formatMoney(tier.perMin)} 以上` : (tier.perMin > 0 ? `${formatMoney(tier.perMin)}–${formatMoney(tier.perMax)}` : `${formatMoney(tier.perMax)} 內`)}（${count} 人共約 ${groupTotal}）`;
+  return { tier, count, perPersonLabel, groupLabel, promptText };
+}
+
 function getDurationStopRange(days, people) {
   const base = isLongTrip(days)
     ? { min: 12, max: 18 }
@@ -458,7 +509,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     `主要交通工具：${({ taxi: '計程車', scooter: '機車', car: '汽車' }[wizardData.transportMode]) || '汽車'}（各段移動以此工具為主，短程可步行）`,
     `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
     `旅程風格：${wizardData.theme || '經典旅人'}`,
-    wizardData.budget ? `預算：${wizardData.budget}` : null,
+    wizardData.budget ? `預算：${(describeBudget(wizardData.budget, wizardData.people) || {}).promptText || wizardData.budget}` : null,
     wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
     wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
     `出發站點：${(wizardData.startLocation || '').trim() || getDefaultTransitHub(destination)}`,
@@ -2060,8 +2111,23 @@ function isSameAttractionFamily(a, b) {
   return false;
 }
 
+// 是否為「餐廳／用餐站」：用餐站永不參與合併（既不被景點吸收、也不吸收景點），維持獨立用餐停留。
+// AI 生成的景點無 type 欄位，故以 tag（社群範例）＋ emoji ＋ 名稱關鍵字判定。
+const FOOD_EMOJI_SET = new Set(['🍜','🍱','☕','🍽️','🍽','🍦','🍢','🐟','🍲','🍛','🍔','🍕','🍻','🍸','🧋','🍵','🥟','🍤','🍧','🍨','🥘','🍰']);
+const FOOD_NAME_RE = /餐廳|食堂|小吃|料理|美食|便當|海鮮|餐酒|甜點|冰淇淋|冰品|火鍋|燒烤|烘焙|早午餐|咖啡|茶館|茶屋|夜市|cafe|coffee|restaurant/i;
+function isFoodStop(stop) {
+  if (!stop) return false;
+  if (stop.tag === 'food') return true;
+  if (stop.emoji && FOOD_EMOJI_SET.has(String(stop.emoji).trim())) return true;
+  const name = String(stop.name || stop.title || '');
+  if (!name) return false;
+  if (/飯店|飯館|麵店/.test(name)) return false; // 防誤判：飯店（住宿）等含「飯/麵」但非用餐站
+  return FOOD_NAME_RE.test(name);
+}
+
 // 是否該歸入同一大景區（以距離為主）
 function shouldClusterStops(a, b) {
+  if (isFoodStop(a) || isFoodStop(b)) return false; // 餐廳閘門：用餐站不與他站合併
   const ca = getStopCoordinate(a);
   const cb = getStopCoordinate(b);
   if (ca && cb) {
@@ -2251,6 +2317,7 @@ async function enrichBigAttractionSubSpots(stops, destination) {
   const otherNorms = new Set(stops.map(s => normalizeLookupText(s && s.name)).filter(Boolean));
   for (const stop of stops) {
     if (!stop || stop.type === 'start' || stop.type === 'end') continue;
+    if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
     const coord = getStopCoordinate(stop);
     if (!coord) continue;
     const parentName = String(stop.name || '');
@@ -2267,6 +2334,7 @@ async function enrichBigAttractionSubSpots(stops, destination) {
       const pn = normalizeLookupText(p.name);
       if (!pn || pn === parentNorm) continue;
       if (otherNorms.has(pn)) continue;
+      if (isFoodStop({ name: p.name })) continue; // 餐廳閘門：附近餐廳 POI 不被拉進景點子景點
       const dist = getDistanceMeters(coord, { lat: p.lat, lng: p.lng });
       if (dist < 60 || dist > SUB_SPOT_MERGE_RADIUS_M) continue;
       cands.push({ name: p.name, lat: p.lat, lng: p.lng, dist });
@@ -3204,13 +3272,20 @@ function renderWizard() {
     body.innerHTML = `<h3 class="wizard-block-title">💰 預算 & 其他</h3>
       <p class="wizard-block-help">設定旅行預算，並可選填希望拜訪的景點</p>
       <div class="wizard-field">
-        <label>預算</label>
+        <label>預算 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（每人預算，下方自動換算 ${getPeopleCount(wizData.people)} 人總額）</span></label>
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(2,1fr)">
-          ${['節省（$500 內）','適中（$500-1500）','舒適（$1500-3000）','豪華（$3000+）'].map(b=>`
-            <button class="wizard-tag${wizData.budget===b?' active':''}" type="button"
-              onclick="wizData.budget='${b}';renderWizard()"
-              style="background:${wizData.budget===b?'#dff1ff':'#f7fbff'};border-color:${wizData.budget===b?'#7db8ee':'#d8e2ef'}">${b}</button>`).join('')}
+          ${BUDGET_TIERS.map(t=>{
+            const open=t.perMax==null;
+            const per=open?`每人 ${formatMoney(t.perMin)} 以上`:(t.perMin>0?`每人 ${formatMoney(t.perMin)}–${formatMoney(t.perMax)}`:`每人 ${formatMoney(t.perMax)} 內`);
+            const token=`${t.key}（${per}）`;
+            const on=wizData.budget===token;
+            return `<button class="wizard-tag${on?' active':''}" type="button"
+              onclick="wizData.budget='${token}';renderWizard()"
+              style="display:flex;flex-direction:column;gap:2px;align-items:center;line-height:1.3;background:${on?'#dff1ff':'#f7fbff'};border-color:${on?'#7db8ee':'#d8e2ef'}">
+              <span style="font-weight:600;">${t.key}</span><span style="font-size:11px;color:#5f6876;">${per}</span></button>`;
+          }).join('')}
         </div>
+        ${(()=>{ const d=describeBudget(wizData.budget, wizData.people); return d?`<p style="margin-top:8px;font-size:12px;color:#4a7fad;">👥 ${d.groupLabel}</p>`:''; })()}
       </div>
       ${isLongTrip(wizData.days)?`
       <div class="wizard-field">

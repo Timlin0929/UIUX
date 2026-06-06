@@ -1928,8 +1928,23 @@
     return false;
   }
 
+  // 是否為「餐廳／用餐站」：用餐站永不參與合併（既不被景點吸收、也不吸收景點），維持獨立用餐停留。
+  // AI 生成的景點無 type 欄位，故以 tag（社群範例）＋ emoji ＋ 名稱關鍵字判定。
+  const FOOD_EMOJI_SET = new Set(['🍜','🍱','☕','🍽️','🍽','🍦','🍢','🐟','🍲','🍛','🍔','🍕','🍻','🍸','🧋','🍵','🥟','🍤','🍧','🍨','🥘','🍰']);
+  const FOOD_NAME_RE = /餐廳|食堂|小吃|料理|美食|便當|海鮮|餐酒|甜點|冰淇淋|冰品|火鍋|燒烤|烘焙|早午餐|咖啡|茶館|茶屋|夜市|cafe|coffee|restaurant/i;
+  function isFoodStop(stop) {
+    if (!stop) return false;
+    if (stop.tag === 'food') return true;
+    if (stop.emoji && FOOD_EMOJI_SET.has(String(stop.emoji).trim())) return true;
+    const name = String(stop.name || stop.title || '');
+    if (!name) return false;
+    if (/飯店|飯館|麵店/.test(name)) return false; // 防誤判：飯店（住宿）等含「飯/麵」但非用餐站
+    return FOOD_NAME_RE.test(name);
+  }
+
   // 是否該歸入同一大景區（以距離為主）
   function shouldClusterStops(a, b) {
+    if (isFoodStop(a) || isFoodStop(b)) return false; // 餐廳閘門：用餐站不與他站合併
     const ca = readStopCoordinates(a);
     const cb = readStopCoordinates(b);
     if (ca && cb) {
@@ -2164,6 +2179,7 @@
     for (const stop of stops) {
       // 跳過端點與「座標已鎖定」的站（如本島港/離島返程港）：不再用 Places 補子景點或 snap，避免被搬位
       if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
+      if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
       const coord = readStopCoordinates(stop);
       if (!coord) continue;
       const parentName = String(stop.name || '');
@@ -2180,6 +2196,7 @@
         const pn = normalizeText(p.name);
         if (!pn || pn === parentNorm) continue;
         if (otherNorms.has(pn)) continue;
+        if (isFoodStop({ name: p.name })) continue; // 餐廳閘門：附近餐廳 POI 不被拉進景點子景點
         const dist = approxDistanceMeters(coord.lat, coord.lng, p.lat, p.lng);
         if (dist < 60 || dist > SUB_SPOT_MERGE_RADIUS_M) continue;
         cands.push({ name: p.name, lat: p.lat, lng: p.lng, dist });
@@ -5294,6 +5311,33 @@
       introSentence: `生成一份適合 ${count} 人大型團體的完整可執行行程，全程選擇可接待大團體的場所、預留訂位與共同用餐時段，並安排充足的集合緩衝` };
   }
 
+  // 預算（人均）→ prompt 字串：人均＋依人數換算的整團總額（鏡像 explore 的 describeBudget，v8 無預算 UI、僅帶值）
+  function describeBudgetForPrompt(budget, people) {
+    const str = String(budget || '').trim();
+    if (!str) return '';
+    const tiers = [
+      { key: '節省', perMin: 0,    perMax: 500 },
+      { key: '適中', perMin: 500,  perMax: 1500 },
+      { key: '舒適', perMin: 1500, perMax: 3000 },
+      { key: '豪華', perMin: 3000, perMax: null }
+    ];
+    let tier = tiers.find(t => str.includes(t.key));
+    if (!tier) {
+      const nums = (str.match(/\d[\d,]*/g) || []).map(n => parseInt(n.replace(/,/g, ''), 10)).filter(Number.isFinite);
+      if (nums.length) {
+        const amount = Math.max(...nums);
+        tier = tiers.find(t => t.perMax == null ? amount >= t.perMin : amount <= t.perMax) || tiers[tiers.length - 1];
+      }
+    }
+    if (!tier) return str; // 無法解析→原樣帶入
+    const count = getPeopleCount(people);
+    const money = n => '$' + Math.round(n).toLocaleString('en-US');
+    const open = tier.perMax == null;
+    const per = open ? `${money(tier.perMin)} 以上` : (tier.perMin > 0 ? `${money(tier.perMin)}–${money(tier.perMax)}` : `${money(tier.perMax)} 內`);
+    const group = open ? `${money(tier.perMin * count)}+` : (tier.perMin > 0 ? `${money(tier.perMin * count)}–${money(tier.perMax * count)}` : `${money(tier.perMax * count)} 內`);
+    return `每人 ${per}（${count} 人共約 ${group}）`;
+  }
+
   function calcReplanEndTime(startTime, days) {
     const duration = parseDurationMinutes(days);
     const parts = String(startTime || '09:00').split(':').map(Number);
@@ -5471,7 +5515,7 @@
       `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
       isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `同行人數：${people}，節奏：${pace}，風格：${theme}`,
       `興趣：${interests}`,
-      budget ? `預算：${budget}` : null,
+      budget ? `預算：${describeBudgetForPrompt(budget, people)}` : null,
       accommodation ? `住宿安排：${accommodation}` : null,
       startLoc ? `出發車站：${startLoc}` : null,
       endLoc ? `回程車站：${endLoc}` : null,
@@ -7974,10 +8018,21 @@
       }
     }
 
-    // 合併大景點：在景點介紹後補一行「（含 …）」（資料來自 mergedSubSpots，與時間軸一致；desc 本身只存乾淨 prose）
-    const includedText = matchedStop ? formatIncludedSubSpots(matchedStop) : '';
-    const micDescEl = document.getElementById('micDesc');
-    if (micDescEl) micDescEl.innerText = includedText ? `${finalDesc}\n${includedText}` : finalDesc;
+    // 合併大景點：子景點改用獨立「附近景點」中標題 + 小標籤列出（取代舊的內文「（含 …）」；
+    // 景點介紹（#micDesc）已於上方設為乾淨 finalDesc，不再嵌入「（含 …）」。資料來自 mergedSubSpots）
+    const micNearbyEl = document.getElementById('micNearby');
+    if (micNearbyEl) {
+      const nearbySubs = matchedStop && matchedStop.isMergedAttraction && Array.isArray(matchedStop.mergedSubSpots)
+        ? matchedStop.mergedSubSpots.filter(Boolean)
+        : [];
+      if (nearbySubs.length) {
+        micNearbyEl.innerHTML = nearbySubs.map(n => `<span class="mic-nearby-pill">${escapeHtml(n)}</span>`).join('');
+        micNearbyEl.style.display = '';
+      } else {
+        micNearbyEl.innerHTML = '';
+        micNearbyEl.style.display = 'none';
+      }
+    }
 
     // 顯示卡片
     document.getElementById('mapInfoCard').classList.add('show');

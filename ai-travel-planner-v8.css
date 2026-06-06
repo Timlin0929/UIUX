@@ -2654,6 +2654,43 @@ body.prototype-mode .prototype-id-chip {
   font-weight: 800;
   letter-spacing: 0.08em;
 }
+/* 合併大景點的「附近景點」區塊：沿用景點介紹卡片樣式，標題改為中標題 + 子景點以小標籤列出（取代舊的「（含 …）」內文） */
+.mic-nearby {
+  position: relative;
+  margin-top: 10px;
+  background: linear-gradient(180deg, rgba(250, 249, 246, 0.92) 0%, rgba(244, 241, 235, 0.72) 100%);
+  border: 1px solid rgba(214, 208, 196, 0.56);
+  border-radius: 18px;
+  padding: 16px 16px 12px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.82);
+}
+.mic-nearby::before {
+  content: '附近景點';
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(46, 125, 109, 0.1);
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.mic-nearby-pill {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 6px 6px 0;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(214, 208, 196, 0.62);
+  color: #5f5a52;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
 .mic-notice {
   background: linear-gradient(180deg, rgba(253, 242, 237, 0.95) 0%, rgba(250, 235, 226, 0.92) 100%);
   color: #7f583e;
