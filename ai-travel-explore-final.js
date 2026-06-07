@@ -519,6 +519,18 @@ function getPromptRuleLines(wizardData, mode) {
     lines.push('8. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35');
     lines.push('9. 景點名稱禁止在名稱後自行附加縣市或行政區名稱（如「台東」、「臺東市」、「卑南鄉」等）；若上方快取清單有對應景點，名稱必須與快取完全一致，不得改寫或加上任何後綴');
     lines.push('10. 大型景區（如三仙台、伯朗大道、鯉魚潭）請拆成該景區內 2–4 個具體子景點／觀景點（例：三仙台觀景台、三仙台跨海拱橋、比西里岸部落、礫石灘），用正式可定位名稱，不要只填一個籠統的景區名；系統會自動把鄰近子景點合併成一站並標示範圍');
+    if (!win.multi) {
+      // 單日行程：時間窗涵蓋用餐時段就強制安排具體店名的用餐站（餐廳候選由系統即時提供）
+      const _sM = timeStringToMinutes(startTime);
+      const _eM = timeStringToMinutes(endTime);
+      const _overlaps = (a, b) => _sM <= b && _eM >= a;
+      const _meals = [];
+      if (_overlaps(11 * 60 + 30, 13 * 60 + 30)) _meals.push('午餐（安排在約 12:00–13:00）');
+      if (_overlaps(17 * 60 + 30, 19 * 60 + 30)) _meals.push('晚餐（安排在約 18:00–19:00）');
+      if (_meals.length) {
+        lines.push(`${lines.length + 1}. 必須安排${_meals.join('與')}用餐站，使用具體店家名稱（優先從上方「即時餐廳候選」清單挑選，名稱需完全一致；嚴禁「在地午餐」「附近餐廳」等模糊名稱），並排在對應用餐時段`);
+      }
+    }
     if (isLongTrip(days)) {
       lines.push(`13. 兩天一夜分配：第一天 ${win.start}–${win.day1End} 安排主要景點與過夜；第二天約 ${win.day2Start} 開始、最後一站需在 ${win.day2End} 前後 15 分鐘結束並返程，第二天景點數量明顯少於第一天`);
       lines.push('14. 行程規劃應避開塞車路段，優先交通順暢、少折返路線；若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
@@ -1097,6 +1109,14 @@ const DESTINATION_CENTER_MAP = {
   '歐洲': { lat: 48.857, lng: 2.352 }
 };
 
+// 地標型目的地 → 所屬地理區域（僅用於座標解析/範圍驗證/Places 查詢；標題與顯示仍用原目的地）。
+// 海濱公園/三仙台/知本等是台東「境內地標」，不是縣市區域，直接拿來做地理判定會查無中心而失準。
+const DESTINATION_REGION_ALIAS = { '海濱公園': '台東', '三仙台': '台東', '知本': '台東' };
+function resolveGeoRegion(dest) {
+  const t = String(dest || '').trim();
+  return DESTINATION_REGION_ALIAS[t] || t;
+}
+
 const MILITARY_EXCLUSION_KEYWORDS = ['空軍', '海軍基地', '軍用', '軍港', '軍機場', '基地', '海巡署'];
 
 const CIVIL_TRANSIT_HUB_MAP = {
@@ -1166,7 +1186,7 @@ function clearStopCoordinates(stop) {
 }
 
 function getDestinationCenter(destinationText) {
-  const lookup = String(destinationText || '').trim();
+  const lookup = resolveGeoRegion(destinationText);
   if (!lookup) return null;
   if (DESTINATION_CENTER_MAP[lookup]) return DESTINATION_CENTER_MAP[lookup];
   const hit = Object.keys(DESTINATION_CENTER_MAP).find((key) => lookup.includes(key));
@@ -1175,14 +1195,14 @@ function getDestinationCenter(destinationText) {
 
 function getDefaultTransitHub(destination) {
   if (!destination) return '台東車站';
-  const text = String(destination).trim();
+  const text = resolveGeoRegion(destination);
   if (CIVIL_TRANSIT_HUB_MAP[text]) return CIVIL_TRANSIT_HUB_MAP[text];
   const hit = Object.keys(CIVIL_TRANSIT_HUB_MAP).find(key => text.includes(key));
   return hit ? CIVIL_TRANSIT_HUB_MAP[hit] : '台東車站';
 }
 
 function getDestinationMaxDistanceMeters(destinationText) {
-  const lookup = String(destinationText || '').trim();
+  const lookup = resolveGeoRegion(destinationText);
   if (!lookup) return 45000;
   if (/日本|韓國|歐洲/.test(lookup)) return 120000;
   if (/台北|新北|桃園|台中|台南|高雄|基隆|新竹/.test(lookup)) return 40000;
@@ -1865,15 +1885,17 @@ const INTEREST_QUERY_TERMS = {
   '戶外': ['戶外', '山林'],
 };
 
-async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = null) {
+async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = null, termsOverride = null) {
   const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
   if (!key || !destination) return [];
 
-  const terms = new Set(['景點', '餐廳']);
-  (interests || []).forEach(interest => {
-    (INTEREST_QUERY_TERMS[interest] || []).forEach(t => terms.add(t));
-  });
-  const queries = Array.from(terms).slice(0, 5).map(t => `${destination} ${t}`);
+  const terms = termsOverride ? new Set(termsOverride) : new Set(['景點', '餐廳']);
+  if (!termsOverride) {
+    (interests || []).forEach(interest => {
+      (INTEREST_QUERY_TERMS[interest] || []).forEach(t => terms.add(t));
+    });
+  }
+  const queries = Array.from(terms).slice(0, 5).map(t => `${resolveGeoRegion(destination)} ${t}`);
 
   const radius = getDestinationMaxDistanceMeters(destination) || 15000;
   const seenNames = new Set();
@@ -1942,6 +1964,20 @@ function buildLiveMapsPoiHintBlock(places) {
     ].filter(Boolean).join('\n');
   });
   return `【Google Maps 景點清單】以下景點已直接從 Google Maps 取得，座標均已驗證。你的任務是從此清單中挑選景點並排成行程，禁止自行創造或加入清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
+}
+
+// 餐廳每次生成都即時抓最新（本地 poi-data.js 不含餐廳，僅出現在景點描述文字中）
+async function fetchGoogleMapsFoodList(destination, destCenter = null) {
+  return fetchGoogleMapsPoiList(destination, [], destCenter, ['餐廳', '美食', '小吃']);
+}
+
+function buildLiveFoodHintBlock(places) {
+  if (!Array.isArray(places) || !places.length) return '';
+  const lines = places.map(p => {
+    const coordLine = (p.lat != null && p.lng != null) ? `座標：lat ${p.lat}, lng ${p.lng}` : '座標：未知';
+    return [`餐廳名稱：${p.name}`, coordLine, `營業時間：${p.businessHours}`, `地址：${p.address || '無'}`, p.rating ? `評分：${p.rating}` : ''].filter(Boolean).join('\n');
+  });
+  return `【即時餐廳候選（Google Maps）】用餐站請從以下餐廳挑選，名稱需與清單完全一致：\n\n${lines.join('\n\n')}`;
 }
 
 function findBestPoiMatch(stopName, livePlaces) {
@@ -2080,7 +2116,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
           'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours'
         },
         // 取多筆候選，從中挑「名稱嚴格配對且在目的地範圍內」者，避免只取 top1 而被通用後綴（漁港/部落）誤配到別的地點
-        body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 5 })
+        body: JSON.stringify({ textQuery: `${name} ${resolveGeoRegion(destination)}`, languageCode: 'zh-TW', maxResultCount: 5 })
       });
       const data = await res.json();
       const places = Array.isArray(data.places) ? data.places : [];
@@ -2142,6 +2178,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
 // 單一「三仙台」站；同名（同前綴家族）再放寬到 2km；缺座標才退回名稱判定。避免景點密集擠在目的地端。
 const SUB_SPOT_MERGE_RADIUS_M = 800;
 const SUB_SPOT_NAME_MERGE_RADIUS_M = 2000;
+const SUB_SPOT_SAME_SPOT_RADIUS_M = 300; // 不同名景點僅在此極近距離內才視為「同一處」而合併
 
 // 計算一組名稱的最長共同前綴（作為「大景點」顯示名）
 function subSpotCommonPrefix(names) {
@@ -2191,9 +2228,10 @@ function shouldClusterStops(a, b) {
   const cb = getStopCoordinate(b);
   if (ca && cb) {
     const d = getDistanceMeters(ca, cb);
-    if (d <= SUB_SPOT_MERGE_RADIUS_M) return true;            // 距離為主：1.2km 內即同區
-    if (d <= SUB_SPOT_NAME_MERGE_RADIUS_M && isSameAttractionFamily(a, b)) return true; // 同名再放寬
-    return false;
+    // 只併「真正同一景區」：同名家族放寬到 2km；不同名僅在極近(同一入口/同一處)才併，
+    // 避免市區密集但不同的景點(海濱公園/生命之樹…)被 800m 規則塌成一站、壓縮整日時數。
+    if (isSameAttractionFamily(a, b)) return d <= SUB_SPOT_NAME_MERGE_RADIUS_M;
+    return d <= SUB_SPOT_SAME_SPOT_RADIUS_M;
   }
   return isSameAttractionFamily(a, b); // 缺座標退回名稱判定
 }
@@ -2211,12 +2249,16 @@ function pickClusterName(names) {
   for (const cand of names) {
     const cn = normalizeLookupText(cand);
     if (!cn) continue;
+    const core = String(cand || '').trim().replace(/[市縣鄉鎮區村里]$/, '');
+    if (core.length < 3) continue; // 跳過「台東」「花蓮市」等純地名，避免吃掉真實地標
     const score = names.reduce((acc, other) => acc + (normalizeLookupText(other).includes(cn) ? 1 : 0), 0);
     if (score > bestScore || (score === bestScore && (best === '' || cand.length < best.length))) {
       best = cand; bestScore = score;
     }
   }
-  return best || names[0] || '景點';
+  return best
+    || names.find(n => String(n || '').trim().replace(/[市縣鄉鎮區村里]$/, '').length >= 3)
+    || names[0] || '景點';
 }
 
 // 去掉描述中既有的「（含 A、B…）」括號，回傳乾淨 prose（「（含 …）」改由渲染時用 mergedSubSpots 生成）
@@ -2237,7 +2279,7 @@ function buildMergedAttraction(members) {
     .filter(Boolean);
   // 合併後停留時間 = 取最長子景點停留 + 緩衝（上限 90 分，不灌水）；縮掉的時間由「補景點」補回
   const maxStay = members.reduce((mx, m) => Math.max(mx, Number(m.duration) || Number(m.stayMin) || 0), 0);
-  const mergedStay = Math.min(90, (maxStay || 30) + 30 * (members.length - 1));
+  const mergedStay = Math.min(120, (maxStay || 30) + 30 * (members.length - 1));
   // 入口/代表座標：優先名稱等於合併名者（大景點本體），否則用所有成員座標的質心
   const memberCoords = members.map(getStopCoordinate).filter(Boolean);
   const namedCoord = getStopCoordinate(members.find(m => String(m.name || '') === mergedName && getStopCoordinate(m)));
@@ -2295,7 +2337,7 @@ function mergeNearbySubAttractions(stops) {
 }
 
 // === 單站大景區補子景點：合併不到鄰近站時，用 Google Places 附近搜尋補出子景點並標記為合併站 ===
-const BIG_AREA_KEYWORDS = ['台', '潭', '步道', '大道', '園區', '國家風景區', '瀑布', '山', '岬', '灣', '古道', '部落', '濕地', '牧場'];
+const BIG_AREA_KEYWORDS = ['潭', '步道', '大道', '園區', '國家風景區', '瀑布', '山', '岬', '灣', '古道', '部落', '濕地', '牧場'];
 const _nearbySubSpotCache = new Map();
 
 // 用新版 Places REST「附近搜尋」取回某座標周邊的景點類 POI（沿用 verifyAndFilterStopsWithPlaces 的金鑰/標頭模式）
@@ -2377,6 +2419,7 @@ async function enrichBigAttractionSubSpots(stops, destination) {
   for (const stop of stops) {
     if (!stop || stop.type === 'start' || stop.type === 'end') continue;
     if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
+    if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) continue; // 交通樞紐閘門：車站/機場等樞紐不補子景點、不搬座標
     const coord = getStopCoordinate(stop);
     if (!coord) continue;
     const parentName = String(stop.name || '');
@@ -2470,6 +2513,15 @@ async function enrichBigAttractionSubSpots(stops, destination) {
       }
       stop.mergedSubSpots = finalSubs;
       if (finalSubs.length) stop.isMergedAttraction = true;
+      // 補了子景點 → 大景點實際遊覽時間變長，依子景點數加長建議停留（只加長、不縮短）。
+      // target 以固定基準算（非當前值），確保重開重跑時冪等、不會逐次累加。
+      if (finalSubs.length) {
+        const cur = Number(stop.duration) || Number(stop.stayMin) || 30;
+        const target = Math.min(120, 30 + 20 * finalSubs.length);
+        const bumped = Math.max(cur, target);
+        stop.duration = bumped;
+        stop.stayMin = bumped;
+      }
     }
   }
   return stops;
@@ -3962,6 +4014,13 @@ async function _doGeneration(trip, wData) {
       } else {
         addGenLine('> 使用備用景點資料，繼續規劃…', 'info');
       }
+    }
+    // 餐廳一律即時抓（本地 poi-data 不含餐廳），讓 AI 有用餐站候選——不吃本地、每次都撈最新
+    const _foodPlaces = await fetchGoogleMapsFoodList(_liveDest, getDestinationCenter(_liveDest)).catch(() => []);
+    if (_foodPlaces.length) {
+      livePlaces = livePlaces.concat(_foodPlaces);
+      livePoiHint = [livePoiHint, buildLiveFoodHintBlock(_foodPlaces)].filter(Boolean).join('\n\n');
+      addGenLine(`> 已即時取得 ${_foodPlaces.length} 間餐廳候選…`, 'info');
     }
     setGenPhase('AI 規劃行程中…');
 

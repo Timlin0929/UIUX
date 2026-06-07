@@ -133,8 +133,16 @@
     ) || null;
   }
 
+  // 地標型目的地 → 所屬地理區域（僅用於座標解析/範圍驗證/Places 查詢；標題與顯示仍用原目的地）。
+  // 海濱公園/三仙台/知本等是台東「境內地標」，不是縣市區域，直接拿來做地理判定會查無中心而失準。
+  const DESTINATION_REGION_ALIAS = { '海濱公園': '台東', '三仙台': '台東', '知本': '台東' };
+  function resolveGeoRegion(dest) {
+    const t = String(dest || '').trim();
+    return DESTINATION_REGION_ALIAS[t] || t;
+  }
+
   function resolveTripCenter(region, title = '') {
-    const preset = findRegionMapPreset(region, title);
+    const preset = findRegionMapPreset(resolveGeoRegion(region), title);
     return preset ? { ...preset.center } : { lat: 23.6978, lng: 120.9605 };
   }
 
@@ -236,7 +244,7 @@
       '綠島': 8000,
       '小琉球': 6000
     };
-    const normalized = normalizeMapText(region || '');
+    const normalized = normalizeMapText(resolveGeoRegion(region));
     return map[normalized] || 50000;
   }
 
@@ -257,7 +265,7 @@
 
   function buildRegionAwareSearchQueries(stop, region, title = '') {
     const name = String(stop?.name || '').trim();
-    const regionName = String(region || '').trim();
+    const regionName = resolveGeoRegion(region);
     const titleName = String(title || '').trim();
     const queries = new Set();
     if (name) {
@@ -1034,7 +1042,7 @@
     if (!service) return null;
     const rawName = String(query || '').trim();
     if (!rawName) return null;
-    const reg = region ? ' ' + String(region).trim() : '';
+    const reg = region ? ' ' + resolveGeoRegion(region) : '';
     const cleanedName = rawName.replace(/[（(][^）)]*[）)]/g, '').trim(); // 去掉括號別名
     const variants = [];
     variants.push(`${rawName}${reg}`.trim());
@@ -1184,10 +1192,11 @@
   }
 
   async function resolveTripCenterAsync(region, title = '') {
-    const preset = findRegionMapPreset(region, title);
+    const geoRegion = resolveGeoRegion(region);
+    const preset = findRegionMapPreset(geoRegion, title);
     if (preset) return { ...preset.center };
 
-    const candidates = [region, title, `${region || ''} 台灣`, `${title || ''} 台灣`]
+    const candidates = [geoRegion, title, `${geoRegion || ''} 台灣`, `${title || ''} 台灣`]
       .map((item) => String(item || '').trim())
       .filter(Boolean);
 
@@ -1748,6 +1757,33 @@
               }
             }
 
+            // 本島行程：若行程沒有終點站、且最後一站不是出發點，補一個「返回出發點」終點
+            // （比照離島返程邏輯，修正既有沒有終點的行程，一打開就補上）
+            if (!islandConfig && replanStops.length > 1) {
+              const firstStop = replanStops[0];
+              const lastStop = replanStops[replanStops.length - 1];
+              const hasEnd = replanStops.some(s => s.type === 'end');
+              const firstPos = readStopCoordinates(firstStop);
+              if (!hasEnd && firstStop && firstPos && lastStop && lastStop.type !== 'end'
+                  && normalizeText(lastStop.name) !== normalizeText(firstStop.name)) {
+                const returnPinId = `ai-pin-return-${Date.now()}`;
+                mapPinLocations[returnPinId] = { lat: firstPos.lat, lng: firstPos.lng, title: `🏁 ${firstStop.name}` };
+                if (typeof pinData !== 'undefined') {
+                  pinData[returnPinId] = {
+                    ...buildSpotPinPayload({ emoji: '🏁', name: firstStop.name,
+                      desc: `返回出發點 ${firstStop.name}，結束本次行程。`, region: trip.region || '', title: currentTripTitle }),
+                    lat: firstPos.lat, lng: firstPos.lng
+                  };
+                }
+                replanStops.push({
+                  id: `stop-return-${Date.now()}`, emoji: '🏁', name: firstStop.name, type: 'end',
+                  stayMin: 0, transitMin: null, transitMode: normalizeTransitMode(firstStop.transitMode),
+                  mapPinId: returnPinId, scenicCoordinates: firstPos,
+                  lat: firstPos.lat, lng: firstPos.lng, nearbyToiletLocations: []
+                });
+              }
+            }
+
             const durationSum = replanStops.reduce((sum, s, idx) => {
               const stay = s.stayMin || 0;
               const transit = idx < replanStops.length - 1
@@ -1891,6 +1927,7 @@
   // 以「距離為主」：同區 800m 內即合併；同名（同前綴家族）再放寬到 2km；缺座標才退回名稱判定。
   const SUB_SPOT_MERGE_RADIUS_M = 800;
   const SUB_SPOT_NAME_MERGE_RADIUS_M = 2000;
+  const SUB_SPOT_SAME_SPOT_RADIUS_M = 300; // 不同名景點僅在此極近距離內才視為「同一處」而合併
 
   function readStopCoordinates(stop) {
     if (!stop) return null;
@@ -1949,9 +1986,10 @@
     const cb = readStopCoordinates(b);
     if (ca && cb) {
       const d = approxDistanceMeters(ca.lat, ca.lng, cb.lat, cb.lng);
-      if (d <= SUB_SPOT_MERGE_RADIUS_M) return true;            // 距離為主：1.2km 內即同區
-      if (d <= SUB_SPOT_NAME_MERGE_RADIUS_M && isSameAttractionFamily(a, b)) return true; // 同名再放寬
-      return false;
+      // 只併「真正同一景區」：同名家族放寬到 2km；不同名僅在極近(同一入口/同一處)才併，
+      // 避免市區密集但不同的景點(海濱公園/生命之樹…)被 800m 規則塌成一站、壓縮整日時數。
+      if (isSameAttractionFamily(a, b)) return d <= SUB_SPOT_NAME_MERGE_RADIUS_M;
+      return d <= SUB_SPOT_SAME_SPOT_RADIUS_M;
     }
     // 缺座標：退回名稱判定（保守）
     return isSameAttractionFamily(a, b);
@@ -1970,12 +2008,16 @@
     for (const cand of names) {
       const cn = normalizeText(cand);
       if (!cn) continue;
+      const core = String(cand || '').trim().replace(/[市縣鄉鎮區村里]$/, '');
+      if (core.length < 3) continue; // 跳過「台東」「花蓮市」等純地名，避免吃掉真實地標
       const score = names.reduce((acc, other) => acc + (normalizeText(other).includes(cn) ? 1 : 0), 0);
       if (score > bestScore || (score === bestScore && (best === '' || cand.length < best.length))) {
         best = cand; bestScore = score;
       }
     }
-    return best || names[0] || '景點';
+    return best
+      || names.find(n => String(n || '').trim().replace(/[市縣鄉鎮區村里]$/, '').length >= 3)
+      || names[0] || '景點';
   }
 
   // 從描述文字解析出已嵌入的「（含 A、B…）」子景點名，並回傳去掉這些括號後的乾淨描述
@@ -2039,7 +2081,7 @@
       .filter(Boolean);
     // 合併後停留時間 = 取最長子景點停留 + 緩衝（上限 90 分，不灌水）；縮掉的時間由「補景點」補回
     const maxStay = members.reduce((mx, m) => Math.max(mx, Number(m.duration) || Number(m.stayMin) || 0), 0);
-    const mergedStay = Math.min(90, (maxStay || 30) + 30 * (members.length - 1));
+    const mergedStay = Math.min(120, (maxStay || 30) + 30 * (members.length - 1));
     // 入口/代表座標：優先名稱等於合併名者（大景點本體），否則用所有成員座標的質心
     const memberCoords = members.map(readStopCoordinates).filter(Boolean);
     const namedCoord = readStopCoordinates(members.find(m => String(m.name || '') === mergedName && readStopCoordinates(m)));
@@ -2107,7 +2149,7 @@
   }
 
   // === 單站大景區補子景點：合併不到鄰近站時，用 Google Places 附近搜尋補出子景點並標記為合併站 ===
-  const BIG_AREA_KEYWORDS = ['台', '潭', '步道', '大道', '園區', '國家風景區', '瀑布', '山', '岬', '灣', '古道', '部落', '濕地', '牧場'];
+  const BIG_AREA_KEYWORDS = ['潭', '步道', '大道', '園區', '國家風景區', '瀑布', '山', '岬', '灣', '古道', '部落', '濕地', '牧場'];
   const _nearbySubSpotCache = new Map();
 
   // 用 Google Maps JS PlacesService「附近搜尋」取回某座標周邊的景點類 POI
@@ -2180,6 +2222,7 @@
       // 跳過端點與「座標已鎖定」的站（如本島港/離島返程港）：不再用 Places 補子景點或 snap，避免被搬位
       if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
       if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
+      if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) continue; // 交通樞紐閘門：車站/機場等樞紐不補子景點、不搬座標
       const coord = readStopCoordinates(stop);
       if (!coord) continue;
       const parentName = String(stop.name || '');
@@ -2268,6 +2311,14 @@
       // 只回寫 mergedSubSpots（地理結果）；desc 維持乾淨 prose，不在此處嵌入「（含 …）」
       if (changed && (stop.isMergedAttraction || (subs && subs.length))) {
         setMergedSubSpots(stop, subs);
+      }
+      // 合併大景點：依子景點數加長建議停留（固定基準、冪等；只加長不縮短，含重開既有行程的補正）
+      if (stop.isMergedAttraction && Array.isArray(stop.mergedSubSpots) && stop.mergedSubSpots.length) {
+        const cur = Number(stop.duration) || Number(stop.stayMin) || 30;
+        const target = Math.min(120, 30 + 20 * stop.mergedSubSpots.length);
+        const bumped = Math.max(cur, target);
+        stop.duration = bumped;
+        stop.stayMin = bumped;
       }
     }
     return stops;
@@ -4114,6 +4165,7 @@
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     const planningBlock = document.getElementById('itineraryPlanningBlock');
     const startBtn = document.getElementById('replanStartBtn');
+    const editBtn = document.getElementById('replanEditOrderBtn');
     const applyBtn = document.getElementById('replanApplyBtn');
     const cancelBtn = document.getElementById('replanCancelBtn');
 
@@ -4129,6 +4181,7 @@
     }
 
     if (startBtn) startBtn.style.display = isReplanning ? 'none' : '';
+    if (editBtn) editBtn.style.display = isReplanning ? 'none' : '';
     if (applyBtn) applyBtn.style.display = isReplanning ? '' : 'none';
     if (cancelBtn) cancelBtn.style.display = isReplanning ? '' : 'none';
   }
@@ -5741,6 +5794,16 @@
       `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
       `3. 每個景點必須是台灣 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
+      (() => {
+        // 單日行程：時間窗涵蓋用餐時段就強制安排具體店名的用餐站（餐廳候選由系統即時提供）
+        if (String(days) === '2天' || String(days) === '兩天一夜') return null;
+        const sM = clockToMinutes(startTime), eM = clockToMinutes(endTime);
+        const overlaps = (a, b) => sM <= b && eM >= a;
+        const meals = [];
+        if (overlaps(11 * 60 + 30, 13 * 60 + 30)) meals.push('午餐（約 12:00–13:00）');
+        if (overlaps(17 * 60 + 30, 19 * 60 + 30)) meals.push('晚餐（約 18:00–19:00）');
+        return meals.length ? `🍽️ 必須安排${meals.join('與')}用餐站，使用具體店家名稱（優先從上方「即時餐廳候選」清單挑選、名稱需完全一致），排在對應用餐時段` : null;
+      })(),
       '5. 座標使用 WGS84 精確小數（至少 6 位），必須是景點實際位置',
       '6. duration 為建議停留分鐘數（10–180），依景點規模設定，不要固定用 30/60/90',
       '🏞️ 大型景區（如三仙台、伯朗大道、鯉魚潭）請拆成該景區內 2–4 個具體子景點／觀景點（例：三仙台觀景台、三仙台跨海拱橋、比西里岸部落、礫石灘），每個給精確座標，不要只填一個籠統的景區名；系統會自動把鄰近子景點合併成一站並標示範圍',
@@ -5761,6 +5824,9 @@
       window.alert('找不到目的地資訊，請先匯入行程後再重新規劃。');
       return;
     }
+
+    if (Array.isArray(replanStops) && replanStops.length
+      && !window.confirm('「重新規劃」會讓 AI 重新生成整份行程，覆蓋目前的景點與順序。要繼續嗎？')) return;
 
     enterReplanMode();
 
@@ -5788,7 +5854,10 @@
       // 本地優先：有本地景點資料就用它，缺該目的地時才回退 live Google Maps
       const _localHint = buildLocalPoiHintBlock(dest);
       if (_localHint) _addRgLine('> 已從本地景點資料庫取得清單，交由 AI 重新排序…', 'info');
-      const livePoiHint = _localHint || await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      let livePoiHint = _localHint || await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      // 餐廳一律即時抓（本地 poi-data 不含餐廳），每次重新規劃都從 Google Maps 撈最新餐廳候選
+      const _foodHint = await fetchLiveFoodHintBlock(dest).catch(() => '');
+      if (_foodHint) { livePoiHint = (livePoiHint || '') + '\n' + _foodHint; _addRgLine('> 已即時取得餐廳候選…', 'info'); }
       // 在 DevTools Console 標明景點清單來源：本地 / live Maps / 無
       console.info(`[POI來源] ${_localHint ? '本地 poi-data.js' : (livePoiHint ? 'live Google Maps' : '無清單（AI 自行生成）')}｜目的地：${dest}｜（重新規劃）`);
       if (_rgPhase) _rgPhase.textContent = 'AI 生成行程中…';
@@ -5942,7 +6011,12 @@
         : newStops;
       replanStops = filteredNewStops;
       if (preservedStartStop) replanStops.unshift({ ...preservedStartStop, transitMin: null });
-      if (preservedEndStop) replanStops.push(preservedEndStop);
+      if (preservedEndStop) {
+        replanStops.push(preservedEndStop);
+      } else if (preservedStartStop) {
+        // 沒有現成終點 → 合成「返回出發點」終點（沿用起點的座標/pin），避免重新規劃後行程沒有終點
+        replanStops.push({ ...preservedStartStop, id: `stop-return-${Date.now()}`, type: 'end', stayMin: 0, transitMin: null });
+      }
 
       // === 合併後時間回填：行程縮水超過 45 分時，沿路線補景點填回目標時段（含回終點交通、不超時）===
       try {
@@ -6185,6 +6259,35 @@
       ].filter(Boolean).join('\n');
     });
     return `\n【Google Maps 即時景點清單】\n以下景點已直接從 Google Maps 取得，座標均已驗證。你的任務是依照目前的行程狀態，只能從此清單中挑選景點來推薦或安排行程，禁止自行創造清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
+  }
+
+  // 餐廳每次重新規劃都即時抓最新（本地 poi-data.js 不含餐廳）
+  async function fetchLiveFoodHintBlock(destination) {
+    if (!destination || !hasGooglePlacesService()) return '';
+    const service = getPlacesService();
+    const queries = ['餐廳', '美食', '小吃'].map(t => `${resolveGeoRegion(destination)} ${t}`);
+    const seenNames = new Set();
+    const allPlaces = [];
+    for (const query of queries) {
+      const results = await new Promise((resolve) => {
+        service.textSearch({ query, language: 'zh-TW' }, (res, status) => {
+          resolve(status === google.maps.places.PlacesServiceStatus.OK && res ? res : []);
+        });
+      });
+      for (const place of results.slice(0, 8)) {
+        const name = place.name;
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        allPlaces.push({ name, rating: place.rating, address: place.formatted_address || place.vicinity || '' });
+      }
+    }
+    if (!allPlaces.length) return '';
+    const lines = allPlaces.map(p => [
+      `餐廳名稱：${p.name}`,
+      p.address ? `地址：${p.address}` : '',
+      p.rating ? `評分：${p.rating}` : ''
+    ].filter(Boolean).join('\n'));
+    return `\n【即時餐廳候選（Google Maps）】\n用餐站請從以下餐廳挑選，名稱需與清單完全一致：\n\n${lines.join('\n\n')}`;
   }
 
   async function handleAiSendMessage() {
@@ -6803,8 +6906,16 @@
 
     switchView('itinerary');
     activeItineraryStopId = stop.id;
+    // 自動聚焦該停靠點所屬的路線階段（不清除 activeItineraryStopId），讓地圖路線跳到該段並顯示 pin
+    const _stopIdx = replanStops.findIndex(s => s.id === stop.id);
+    const _stage = getRouteStageBySourceStopIndex(_stopIdx)
+      || routeStageCache.find(s => s && s.destinationStopIndex === _stopIdx) || null;
+    if (_stage && _stage.index !== activeRouteStage) {
+      activeRouteStage = _stage.index;
+      updateRouteRendererVisibility(currentRouteBounds, _stage.origin, _stage.destination);
+    }
     renderToiletMarkersForActiveRouteStage();
-    
+
     if (stop.mapPinId) {
       showPinInfo(stop.mapPinId);
     }
