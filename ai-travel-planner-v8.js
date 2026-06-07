@@ -7014,6 +7014,7 @@
   // ── Google Maps API 整合 ──
   let map;
   let markers = {};
+  let mergedAreaShapes = {}; // 大景點涵蓋範圍的半透明色塊（key = mapPinId）
   let currentOpenPin = null; // 紀錄目前打開資訊卡的圖釘
   let directionsService;
   let directionsRenderers = []; // 存放每個階段的 Renderer
@@ -7177,6 +7178,13 @@
       }
     });
     markers = {};
+    Object.values(mergedAreaShapes).forEach((circle) => {
+      if (circle && typeof circle.setMap === 'function') {
+        circle.setMap(null);
+      }
+    });
+    mergedAreaShapes = {};
+    clearSubSpotMarkers();
   }
 
   function getStopToiletLocations(stop) {
@@ -7363,6 +7371,13 @@
       }
     });
     markers = {};
+    Object.values(mergedAreaShapes).forEach((circle) => {
+      if (circle && typeof circle.setMap === 'function') {
+        circle.setMap(null);
+      }
+    });
+    mergedAreaShapes = {};
+    clearSubSpotMarkers();
   }
 
   function isToiletMarkerId(markerId) {
@@ -7407,12 +7422,107 @@
     if (!activeItineraryStopId) return [];
     const stopIndex = replanStops.findIndex((stop) => stop.id === activeItineraryStopId);
     if (stopIndex < 0) return [];
-    
+
     const stop = replanStops[stopIndex];
     return [{
       stop: stop,
       stopIndex: stopIndex
     }];
+  }
+
+  // ── 大景點子景點（小景點）小圓點：只在選取該階段時顯示、不畫路線 ──────────────
+  function isSubSpotMarkerId(id) {
+    return String(id || '').startsWith('subspot-');
+  }
+
+  function clearSubSpotMarkers() {
+    Object.entries(markers).forEach(([markerId, marker]) => {
+      if (!isSubSpotMarkerId(markerId)) return;
+      if (marker && typeof marker.setMap === 'function') marker.setMap(null);
+      delete markers[markerId];
+    });
+    if (typeof pinData !== 'undefined') {
+      Object.keys(pinData).forEach((pinId) => { if (isSubSpotMarkerId(pinId)) delete pinData[pinId]; });
+    }
+  }
+
+  // 缺 mergedMemberCoords 時，用 Places 以子景點名 + 站中心解析座標（取最近相符、快取）
+  const _subSpotCoordCache = new Map();
+  function resolveSubSpotCoord(name, center) {
+    const nm = String(name || '').trim();
+    if (!nm || !center) return Promise.resolve(null);
+    const key = `${normalizeText(nm)}@${center.lat.toFixed(3)},${center.lng.toFixed(3)}`;
+    if (_subSpotCoordCache.has(key)) return Promise.resolve(_subSpotCoordCache.get(key));
+    const service = getPlacesService();
+    if (!service) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      service.textSearch({ query: nm, location: new google.maps.LatLng(center.lat, center.lng), radius: 1200 }, (res, status) => {
+        const ok = hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+        let coord = null;
+        if (status === ok && Array.isArray(res) && res.length) {
+          let best = null, bestD = Infinity;
+          for (const p of res) {
+            const loc = p && p.geometry && p.geometry.location;
+            if (!loc) continue;
+            const c = { lat: loc.lat(), lng: loc.lng() };
+            const d = measureDistanceMeters(c, center);
+            if (d < bestD) { bestD = d; best = c; }
+          }
+          if (best && bestD <= 3000) coord = best; // 太遠視為誤配，捨棄
+        }
+        _subSpotCoordCache.set(key, coord);
+        resolve(coord);
+      });
+    });
+  }
+
+  let subSpotRenderToken = 0;
+  async function renderSubSpotMarkersForActiveRouteStage() {
+    if (!map || !window.google || !google.maps) return;
+    const myToken = ++subSpotRenderToken;
+    clearSubSpotMarkers();
+
+    let stops = [];
+    if (activeItineraryStopId) stops = getStopsForActiveItineraryToilets();
+    else if (activeRouteStage !== null) stops = getStopsForActiveRouteStageToilets();
+    if (!stops.length) { layoutMapMarkers(); return; }
+
+    for (const { stop } of stops) {
+      if (myToken !== subSpotRenderToken) return;
+      if (!stop || !stop.isMergedAttraction || !Array.isArray(stop.mergedSubSpots) || !stop.mergedSubSpots.length) continue;
+      const center = readStopCoordinates(stop);
+      if (!center) continue;
+      const memberCoords = Array.isArray(stop.mergedMemberCoords) ? stop.mergedMemberCoords : [];
+      for (let i = 0; i < stop.mergedSubSpots.length; i++) {
+        if (myToken !== subSpotRenderToken) return;
+        const subName = String(stop.mergedSubSpots[i] || '').trim();
+        if (!subName) continue;
+        // 優先用 mergedMemberCoords（[0]=母站，[i+1] 對應子景點）；缺則 Places 解析
+        let coord = null;
+        const mc = memberCoords[i + 1];
+        if (mc && Number.isFinite(Number(mc.lat)) && Number.isFinite(Number(mc.lng))) {
+          coord = { lat: Number(mc.lat), lng: Number(mc.lng) };
+        } else {
+          coord = await resolveSubSpotCoord(subName, center);
+          if (myToken !== subSpotRenderToken) return;
+        }
+        if (!coord) continue;
+        const pinId = `subspot-${stop.id}-${i}`;
+        if (typeof pinData !== 'undefined') {
+          pinData[pinId] = { title: `📍 ${subName}`, desc: `${stop.name} 的子景點。`, notice: '', lat: coord.lat, lng: coord.lng };
+        }
+        const marker = new google.maps.Marker({
+          position: coord, map,
+          title: subName,
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: '#1f5f9e', fillOpacity: 0.95, strokeColor: '#ffffff', strokeWeight: 1.5 },
+          zIndex: 3
+        });
+        rememberMarkerBasePosition(marker, coord);
+        markers[pinId] = marker;
+        marker.addListener('click', () => { showPinInfo(pinId); map.panTo(marker.getPosition()); });
+      }
+    }
+    if (myToken === subSpotRenderToken) layoutMapMarkers();
   }
 
   async function resolveToiletCoordinatesNearStop(stop, toilet, service) {
@@ -7612,6 +7722,7 @@
     // Token guard: if a newer call arrives, abandon this one mid-async to prevent race conditions
     const myToken = ++toiletRenderToken;
     clearToiletMarkers();
+    renderSubSpotMarkersForActiveRouteStage(); // 子景點小圓點與廁所同步（同樣只在選取階段時顯示）
 
     let stopsToRender = [];
 
@@ -7689,13 +7800,232 @@
     updateToiletSectionsInDOM();
   }
 
+  // 一組經緯度的凸包（Andrew monotone chain）；少於 3 點回原點集
+  function convexHullLatLng(points) {
+    const pts = (points || [])
+      .map(p => ({ lat: Number(p.lat), lng: Number(p.lng) }))
+      .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+    if (pts.length < 3) return pts;
+    pts.sort((a, b) => a.lng - b.lng || a.lat - b.lat);
+    const cross = (o, a, b) => (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng);
+    const lower = [];
+    for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+    lower.pop(); upper.pop();
+    return lower.concat(upper);
+  }
+
+  // 把多邊形頂點沿「離質心方向」外擴 padMeters，讓區塊飽滿一點
+  function padPolygonOutward(poly, ref, padMeters) {
+    const latScale = 110540;
+    const lngScale = 111320 * Math.cos((ref.lat || 0) * Math.PI / 180) || 1;
+    return poly.map(p => {
+      const dLat = p.lat - ref.lat, dLng = p.lng - ref.lng;
+      const distM = Math.hypot(dLat * latScale, dLng * lngScale) || 1;
+      const f = (distM + padMeters) / distM;
+      return { lat: ref.lat + dLat * f, lng: ref.lng + dLng * f };
+    });
+  }
+
+  // 以中心畫一個方形區塊（成員不足以構成多邊形時的後備，非圓圈）
+  function boxAroundLatLng(center, halfMeters) {
+    const latScale = 110540;
+    const lngScale = 111320 * Math.cos((center.lat || 0) * Math.PI / 180) || 1;
+    const dLat = halfMeters / latScale, dLng = halfMeters / lngScale;
+    return [
+      { lat: center.lat + dLat, lng: center.lng - dLng },
+      { lat: center.lat + dLat, lng: center.lng + dLng },
+      { lat: center.lat - dLat, lng: center.lng + dLng },
+      { lat: center.lat - dLat, lng: center.lng - dLng }
+    ];
+  }
+
+  // 大景點區塊路徑：成員子景點的凸包（外擴 120m）；成員不足則用方形區塊
+  function buildMergedAreaPath(stop, center) {
+    const members = (Array.isArray(stop.mergedMemberCoords) ? stop.mergedMemberCoords : [])
+      .map(c => ({ lat: Number(c.lat), lng: Number(c.lng) }))
+      .filter(c => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+    const hull = convexHullLatLng(members);
+    if (hull.length >= 3) {
+      const ref = {
+        lat: members.reduce((s, c) => s + c.lat, 0) / members.length,
+        lng: members.reduce((s, c) => s + c.lng, 0) / members.length
+      };
+      return padPolygonOutward(hull, ref, 120);
+    }
+    const half = Math.min(2500, Math.max(180, Number(stop.mergedRadiusMeters) || 0));
+    return boxAroundLatLng(center, half);
+  }
+
+  // ── 大景點真實邊界（OpenStreetMap / Overpass）──────────────────
+  const _osmBoundaryCache = new Map(); // key: normalizeText(name)@lat,lng → path|null
+
+  function _osmRingArea(ring) {
+    let a = 0; // 經緯度平面 shoelace，僅用來比較環大小
+    for (let i = 0, n = ring.length; i < n; i++) {
+      const p = ring[i], q = ring[(i + 1) % n];
+      a += p.lng * q.lat - q.lng * p.lat;
+    }
+    return Math.abs(a) / 2;
+  }
+
+  function _osmRingFromGeometry(geom) {
+    return (Array.isArray(geom) ? geom : [])
+      .map(g => ({ lat: Number(g.lat), lng: Number(g.lon) }))
+      .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  }
+
+  // 從 Overpass 結果挑出「名稱相符、質心離中心最近」的面狀邊界環
+  function pickOsmBoundary(data, name, center) {
+    const els = data && Array.isArray(data.elements) ? data.elements : [];
+    let best = null, bestDist = Infinity;
+    for (const el of els) {
+      const elName = el && el.tags && el.tags.name;
+      if (!elName || !placeNameMatchesStrict(elName, name)) continue;
+      let ring = null;
+      if (el.type === 'way' && Array.isArray(el.geometry)) {
+        const r = _osmRingFromGeometry(el.geometry);
+        // 只接受「封閉環」（面）；開放線（道路/步道）跳過，避免畫出怪多邊形
+        if (r.length >= 4) {
+          const a = r[0], b = r[r.length - 1];
+          if (Math.abs(a.lat - b.lat) < 1e-7 && Math.abs(a.lng - b.lng) < 1e-7) ring = r.slice(0, -1);
+        }
+      } else if (el.type === 'relation' && Array.isArray(el.members)) {
+        let outerBest = null, outerArea = -1; // multipolygon：取面積最大的 outer 環
+        for (const m of el.members) {
+          if (m && m.role === 'outer' && Array.isArray(m.geometry)) {
+            const r = _osmRingFromGeometry(m.geometry);
+            if (r.length >= 3) { const ar = _osmRingArea(r); if (ar > outerArea) { outerArea = ar; outerBest = r; } }
+          }
+        }
+        ring = outerBest;
+      }
+      if (!ring || ring.length < 3) continue;
+      const cen = {
+        lat: ring.reduce((s, p) => s + p.lat, 0) / ring.length,
+        lng: ring.reduce((s, p) => s + p.lng, 0) / ring.length
+      };
+      const dist = measureDistanceMeters(cen, center);
+      if (dist < bestDist) { bestDist = dist; best = ring; }
+    }
+    return best;
+  }
+
+  // 持久快取（localStorage）：載入時讀入，成功結果寫回；失敗不寫
+  const _OSM_CACHE_LS_KEY = 'wai_osm_boundary_cache';
+  (function _loadOsmBoundaryCache() {
+    try {
+      const obj = JSON.parse(localStorage.getItem(_OSM_CACHE_LS_KEY) || '{}') || {};
+      Object.keys(obj).forEach(k => _osmBoundaryCache.set(k, obj[k]));
+    } catch (e) { /* ignore */ }
+  })();
+
+  function _osmKey(name, center) {
+    return `${normalizeText(name)}@${Number(center.lat).toFixed(3)},${Number(center.lng).toFixed(3)}`;
+  }
+
+  // 把景點名清成可放進 Overpass 正規表達式的字串（去括號附註、跳脫特殊字元）
+  function _osmNameRegex(name) {
+    let s = String(name || '').replace(/[（(][^）)]*[）)]/g, '').trim();
+    s = s.replace(/[\\^$.*+?()[\]{}|"]/g, '\\$&');
+    return s.length >= 2 ? s : '';
+  }
+
+  // 抽稀環點數，控制 localStorage 體積
+  function _simplifyRing(ring, maxPts) {
+    if (!Array.isArray(ring) || ring.length <= maxPts) return ring;
+    const step = Math.ceil(ring.length / maxPts);
+    const out = [];
+    for (let i = 0; i < ring.length; i += step) out.push(ring[i]);
+    return out;
+  }
+
+  function _persistOsmEntry(key, value) {
+    const stored = Array.isArray(value) ? _simplifyRing(value, 120) : null;
+    _osmBoundaryCache.set(key, stored);
+    try {
+      let obj = {};
+      try { obj = JSON.parse(localStorage.getItem(_OSM_CACHE_LS_KEY) || '{}') || {}; } catch (e) { obj = {}; }
+      obj[key] = stored;
+      const keys = Object.keys(obj);
+      if (keys.length > 200) keys.slice(0, keys.length - 200).forEach(k => delete obj[k]); // 清舊鍵
+      localStorage.setItem(_OSM_CACHE_LS_KEY, JSON.stringify(obj));
+    } catch (e) { /* quota/unavailable → 僅留記憶體快取 */ }
+  }
+
+  // 全域單併發 + 端點備援 + 429 退避（避免一次 render 連發多支被限流）
+  const _OVERPASS_ENDPOINTS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter'
+  ];
+  let _osmInFlight = Promise.resolve();
+  function _osmSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function _overpassRequest(q) {
+    const run = async () => {
+      for (let attempt = 0; attempt < _OVERPASS_ENDPOINTS.length * 2; attempt++) {
+        const ep = _OVERPASS_ENDPOINTS[attempt % _OVERPASS_ENDPOINTS.length];
+        try {
+          const res = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: q });
+          if (res.status === 429) { await _osmSleep(1500 * (attempt + 1)); continue; }
+          const text = await res.text();
+          if (!res.ok || /rate_limited|Too Many Requests/i.test(text)) { await _osmSleep(1500 * (attempt + 1)); continue; }
+          try { return JSON.parse(text); } catch (e) { return null; } // 成功但非 JSON → 視為無資料
+        } catch (e) { /* 網路錯誤 → 換下一個端點 */ }
+      }
+      return null; // 全部端點皆失敗
+    };
+    _osmInFlight = _osmInFlight.then(run, run); // 串接，永不並發
+    return _osmInFlight;
+  }
+
+  // 批次：把同一波 render 的多個大景點請求合併成「一支」Overpass union 查詢
+  let _osmBatchQueue = [];
+  let _osmBatchTimer = null;
+  function fetchOsmBoundaryPath(name, center, radiusMeters) {
+    const nm = String(name || '').trim();
+    if (!nm || !center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) return Promise.resolve(null);
+    const key = _osmKey(nm, center);
+    if (_osmBoundaryCache.has(key)) return Promise.resolve(_osmBoundaryCache.get(key));
+    return new Promise(resolve => {
+      _osmBatchQueue.push({ key, name: nm, center, radius: Number(radiusMeters) || 0, resolve });
+      if (_osmBatchTimer) clearTimeout(_osmBatchTimer);
+      _osmBatchTimer = setTimeout(_flushOsmBatch, 60);
+    });
+  }
+
+  async function _flushOsmBatch() {
+    const batch = _osmBatchQueue; _osmBatchQueue = []; _osmBatchTimer = null;
+    const byKey = new Map();
+    batch.forEach(b => { if (!byKey.has(b.key)) byKey.set(b.key, b); });
+    const todo = [...byKey.values()].filter(b => !_osmBoundaryCache.has(b.key));
+    let data = null;
+    const groups = todo.map(b => {
+      const R = Math.min(3000, Math.max(1200, Math.round(b.radius * 2)));
+      const term = _osmNameRegex(b.name);
+      // 伺服器端用「名稱」過濾（只回該名稱的面），避免掃全區的公園/行政邊界導致 504 逾時
+      return term ? `wr["name"~"${term}"](around:${R},${b.center.lat},${b.center.lng});` : '';
+    }).filter(Boolean).join('');
+    if (groups) {
+      data = await _overpassRequest(`[out:json][timeout:25];(${groups});out geom;`);
+    }
+    batch.forEach(b => {
+      if (_osmBoundaryCache.has(b.key)) { b.resolve(_osmBoundaryCache.get(b.key)); return; }
+      if (data) { const path = pickOsmBoundary(data, b.name, b.center); _persistOsmEntry(b.key, path || null); b.resolve(path || null); }
+      else { b.resolve(null); } // 查詢失敗（限流/網路）→ 不快取、回 null（維持近似區塊、下次可重試）
+    });
+  }
+
   function renderMapMarkersFromCurrentLocations() {
     if (!map || !window.google || !google.maps) return;
     clearRenderedMapMarkers();
 
     const stopOrderByPin = {};
+    const stopByPin = {};
     replanStops.forEach((stop, index) => {
-      if (stop.mapPinId) stopOrderByPin[stop.mapPinId] = index + 1;
+      if (stop.mapPinId) { stopOrderByPin[stop.mapPinId] = index + 1; stopByPin[stop.mapPinId] = stop; }
     });
 
     for (const id in mapPinLocations) {
@@ -7712,6 +8042,26 @@
           : createEmojiPinIcon(loc.title.split(' ')[0])
       });
       rememberMarkerBasePosition(marker, position);
+
+      // 大景點：先以子景點涵蓋範圍畫半透明區塊（70% 透明），再非同步抓 OSM 真實邊界升級
+      const _stop = stopByPin[id];
+      if (_stop && _stop.isMergedAttraction && ((_stop.mergedSubSpots && _stop.mergedSubSpots.length) || Number(_stop.mergedRadiusMeters) > 0)) {
+        const _poly = new google.maps.Polygon({
+          map,
+          paths: buildMergedAreaPath(_stop, position),
+          strokeColor: '#2f6fb0', strokeOpacity: 0.6, strokeWeight: 1,
+          fillColor: '#4a90d9', fillOpacity: 0.3, // 0.3 = 70% 透明度
+          clickable: false, zIndex: 1
+        });
+        mergedAreaShapes[id] = _poly;
+        // 抓 OpenStreetMap 真實輪廓；回來後若該圖層仍是當前物件（未被重繪），換成真實邊界並加強描邊
+        fetchOsmBoundaryPath(_stop.name, position, Math.max(Number(_stop.mergedRadiusMeters) || 0, 800)).then((path) => {
+          if (path && path.length >= 3 && mergedAreaShapes[id] === _poly) {
+            _poly.setPaths(path);
+            _poly.setOptions({ strokeColor: '#1f5f9e', strokeOpacity: 0.95, strokeWeight: 2 });
+          }
+        }).catch(() => {});
+      }
 
       markers[id] = marker;
       if (pinData[id]) {
@@ -7768,9 +8118,10 @@
     Object.entries(markers).forEach(([markerId, marker]) => {
       if (!marker) return;
 
-      if (!isToiletMarkerId(markerId)) {
+      if (!isToiletMarkerId(markerId) && !isSubSpotMarkerId(markerId)) {
         const shouldShow = visibleAttractionPinIds === null || visibleAttractionPinIds.has(markerId);
         marker.setVisible(shouldShow);
+        if (mergedAreaShapes[markerId]) mergedAreaShapes[markerId].setVisible(shouldShow);
         if (!shouldShow) return;
       }
 
