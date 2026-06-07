@@ -3235,7 +3235,10 @@ function renderWizard() {
                 </div>
                 <div>
                   <div style="font-size:13px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
-                  <input type="time" value="${day2End}" onchange="setDay2EndTime(this.value)" style="width:100%;padding:10px 12px;border:1px solid #d8e2ef;border-radius:12px;font-size:15px;color:#1f3a52;background:#f7fbff;">
+                  <div class="wai-dt-field" onclick="pickWizDay2EndTime('${day2End}')">
+                    <span>${day2End}</span>
+                    <span class="wai-dt-ic">🕒</span>
+                  </div>
                 </div>
               </div>
               <p style="margin-top:10px;font-size:12px;color:#5f6876;text-align:center;">🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）</p>
@@ -3316,13 +3319,19 @@ function renderWizard() {
       <p class="wizard-block-help">設定出發與回程日期，以及當天的出發時間</p>
       <div class="wizard-field">
         <label>出發日期</label>
-        <input type="date" id="wizDepartureDate" min="${new Date().toISOString().split('T')[0]}" value="${wizData.departureDate||''}" onchange="wizData.departureDate=this.value;autoUpdateReturnDate();renderWizard()">
+        <div class="wai-dt-field" onclick="pickWizDepartureDate()">
+          <span class="${wizData.departureDate?'':'wai-dt-ph'}">${wizData.departureDate ? wizData.departureDate.replace(/-/g,'/') : '請選擇出發日期'}</span>
+          <span class="wai-dt-ic">📅</span>
+        </div>
         ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:12px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${ wizData.returnDate !== wizData.departureDate ? '（隔日）' : '（當天）'}</p>` : ''}
       </div>
 
       <div class="wizard-field">
         <label>出發時間</label>
-        <input type="time" id="wizStartTime" value="${wizData.startTime||'09:00'}" onchange="wizData.startTime=this.value;renderFlowPreview()">
+        <div class="wai-dt-field" onclick="pickWizStartTime()">
+          <span>${wizData.startTime||'09:00'}</span>
+          <span class="wai-dt-ic">🕒</span>
+        </div>
         <p style="margin-top:8px;font-size:12px;color:#5f6876;">行程將依「${wizData.pace||'平衡'}」節奏自動計算每站間距</p>
       </div>`;
 
@@ -3473,6 +3482,55 @@ function setDay2EndTime(value) {
   wizData.day2EndTime = normalizeClockInput(value, '12:00');
   scheduleWizardPreviewRequest('step0-day2');
   renderWizard();
+}
+
+// 本地（非 UTC）今日字串，修台灣半夜用 toISOString 偏一天的問題
+function waiLocalDateStr() {
+  var d = new Date(), m = d.getMonth() + 1, day = d.getDate();
+  return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+}
+function waiLocalTimeStr() {
+  var d = new Date(), h = d.getHours(), mi = d.getMinutes();
+  return (h < 10 ? '0' + h : h) + ':' + (mi < 10 ? '0' + mi : mi);
+}
+
+// ── 滾輪日期/時間選擇器包裝（取代原生 input；onSet 沿用原欄位副作用並重繪以更新觸發欄位）──
+function pickWizDepartureDate() {
+  if (!window.WAIPicker) return;
+  WAIPicker.openDate({
+    value: wizData.departureDate || '',
+    min: waiLocalDateStr(),
+    title: '設定出發日期',
+    onSet: function (v) { wizData.departureDate = v; autoUpdateReturnDate(); renderWizard(); },
+    onClear: function () { wizData.departureDate = ''; autoUpdateReturnDate(); renderWizard(); }
+  });
+}
+function pickWizStartTime() {
+  if (!window.WAIPicker) return;
+  // 出發日期是今天 → 出發時間不能早於現在
+  var minTime = (wizData.departureDate && wizData.departureDate === waiLocalDateStr()) ? waiLocalTimeStr() : null;
+  WAIPicker.openTime({
+    value: wizData.startTime || '09:00',
+    min: minTime,
+    title: '設定出發時間',
+    onSet: function (v) { wizData.startTime = v; renderWizard(); }
+  });
+}
+function pickWizDay2EndTime(current) {
+  if (!window.WAIPicker) return;
+  WAIPicker.openTime({
+    value: wizData.day2EndTime || current || '18:00',
+    title: '設定第二天結束時間',
+    onSet: function (v) { setDay2EndTime(v); }
+  });
+}
+function pickPreviewNodeTime(index, current) {
+  if (!window.WAIPicker) return;
+  WAIPicker.openTime({
+    value: current || '09:00',
+    title: '設定時間',
+    onSet: function (v) { updatePreviewNodeTime(index, v); }
+  });
 }
 
 function updateWizardPace(value) {
@@ -3642,7 +3700,7 @@ function renderFlowPreview() {
     <div class="wizard-node">
       <div class="wizard-node-top">
         <h4 class="wizard-node-title">🧭 ${spot.title}</h4>
-        <input class="wizard-node-time-input" type="time" value="${times[i]}" onchange="updatePreviewNodeTime(${i}, this.value)">
+        <div class="wizard-node-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickPreviewNodeTime(${i}, '${times[i]}')">${times[i]}<span style="font-size:11px;opacity:.6;">🕒</span></div>
       </div>
       <p class="wizard-node-desc">${spot.desc}</p>
     </div>
@@ -3714,7 +3772,9 @@ function autoUpdateReturnDate() {
 function wizNext() {
   if (isGeneratingTrip) { showToast('正在生成行程中，請稍候…', 'orange'); return; }
   if (wizStep===0 && !wizData.dest && !wizData.destCustom) { showToast('請選擇或輸入目的地', 'orange'); return; }
-  // Step 1：若有出發日期但回程日期空，自動推算
+  // Step 3（出發日期 & 時間）：必須先選好出發日期才能進下一步
+  if (wizStep===2 && !wizData.departureDate) { showToast('請先選擇出發日期', 'orange'); return; }
+  // Step 3：有出發日期但回程日期空，自動推算
   if (wizStep===2 && wizData.departureDate && !wizData.returnDate) autoUpdateReturnDate();
   if (wizStep===WIZ_TOTAL-1) { finishWizard(); return; }
   wizStep++; renderWizard();

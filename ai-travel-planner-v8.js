@@ -3522,6 +3522,16 @@
     }
   }
 
+  // ── 滾輪時間選擇器包裝（取代修改視窗的原生 time input；onSet 於「設定」時更新區間並重繪欄位）──
+  function pickModifyTime(type, current) {
+    if (!window.WAIPicker) return;
+    WAIPicker.openTime({
+      value: current || '09:00',
+      title: type === 'start' ? '設定開始時間' : '設定結束時間',
+      onSet: function (v) { updateModifyTimeRange(type, v); renderModifyWindowBody(); }
+    });
+  }
+
   function renderModifyWindowBody() {
     const body = document.getElementById('modifyWindowBody');
     if (!body) return;
@@ -3583,9 +3593,9 @@
         <div class="modify-time-apply">
           <div class="modify-time-label">時間區間（預設沿用原景點時段）</div>
           <div class="modify-time-range">
-            <input class="modify-time-input" type="time" value="${selectedModifyStartTime || defaultStart}" oninput="updateModifyTimeRange('start', this.value)">
+            <div class="modify-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickModifyTime('start','${selectedModifyStartTime || defaultStart}')">${selectedModifyStartTime || defaultStart}<span style="font-size:11px;opacity:.6;">🕒</span></div>
             <span class="modify-time-sep">到</span>
-            <input class="modify-time-input" type="time" value="${selectedModifyEndTime || defaultEnd}" oninput="updateModifyTimeRange('end', this.value)">
+            <div class="modify-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickModifyTime('end','${selectedModifyEndTime || defaultEnd}')">${selectedModifyEndTime || defaultEnd}<span style="font-size:11px;opacity:.6;">🕒</span></div>
           </div>
           <div class="modify-time-hint">若與其他景點重疊，系統會自動把後續景點往後順延。</div>
           <button class="modify-apply-btn" onclick="applyModifySelection()">套用</button>
