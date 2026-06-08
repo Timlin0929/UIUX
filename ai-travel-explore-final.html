@@ -144,6 +144,16 @@
           <h3 class="wizard-flow-title" id="flowTitle">台東・1天微旅行</h3>
           <div class="wizard-flow-col" id="flowNodes"></div>
           <div class="wizard-summary" id="flowSummary">先完成左側步驟，AI 會在這裡生成你的個人化微旅行流程故事。</div>
+          <div class="wiz-gen-progress" id="wizGenProgress" hidden>
+            <div class="wgp-title" id="wgpTitle">正在為你生成行程…</div>
+            <div class="wgp-steps">
+              <div class="wgp-step" data-step="0"><span class="wgp-dot"></span><span class="wgp-label">查景點</span></div>
+              <div class="wgp-step" data-step="1"><span class="wgp-dot"></span><span class="wgp-label">AI 規劃</span></div>
+              <div class="wgp-step" data-step="2"><span class="wgp-dot"></span><span class="wgp-label">對應地圖</span></div>
+              <div class="wgp-step" data-step="3"><span class="wgp-dot"></span><span class="wgp-label">完成</span></div>
+            </div>
+            <div class="wgp-cta" id="wgpCta"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -367,6 +377,15 @@
 </div>
 
 <script src="./ai-travel-explore-final.js"></script>
+<!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
+<div id="genMiniBar" hidden onclick="reopenWizGen()">
+  <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>
+  <div class="gmb-title">生成中…</div>
+  <div class="gmb-dots">
+    <span class="gmb-dot"></span><span class="gmb-dot"></span><span class="gmb-dot"></span><span class="gmb-dot"></span>
+  </div>
+  <div class="gmb-hint">點此返回進度視窗</div>
+</div>
 <div id="genOverlay" style="display:none">
   <div class="gen-container">
     <div class="gen-header">

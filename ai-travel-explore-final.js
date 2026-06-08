@@ -3406,7 +3406,11 @@ function selectTripMode(mode) {
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
 }
-function closeWizard() { document.getElementById('wizardOverlay').classList.remove('open'); }
+function closeWizard() {
+  const ov = document.getElementById('wizardOverlay');
+  if (ov) ov.classList.remove('open');
+  if (isGeneratingTrip) showGenMiniBar(); // 生成中關閉 → 改用右下角浮動小進度卡
+}
 function closeCollabCode() { document.getElementById('collabCodeOverlay').classList.remove('open'); }
 function copyCollabCode() {
   const code = document.getElementById('collabCodeDisplay').textContent;
@@ -3421,6 +3425,11 @@ function renderWizard() {
   document.getElementById('wizardBadge').textContent = `Step ${wizStep+1} / ${WIZ_TOTAL}`;
   document.getElementById('wizBackBtn').style.visibility = wizStep===0 ? 'hidden' : '';
   document.getElementById('wizNextBtn').textContent = wizStep===WIZ_TOTAL-1 ? '🚀 建立行程' : '下一步 →';
+  // 新的精靈互動 → 還原導覽鈕顯示、收起上次的進度條與浮動卡
+  _restoreWizNav();
+  const _wgp = document.getElementById('wizGenProgress');
+  if (_wgp) _wgp.hidden = true;
+  hideGenMiniBar();
 
   const body = document.getElementById('wizBody');
 
@@ -4132,6 +4141,124 @@ function showGenDoneButton(tripId) {
   footer.appendChild(skip);
 }
 
+// === 建立行程：分段步驟進度條（顯示在行程預覽下方，取代舊 CLI 面板）===
+const WGP_PHASES = ['查景點', 'AI 規劃', '對應地圖', '完成'];
+const _genMini = { index: 0, label: '', status: 'running', tripId: null }; // running | done | error
+function showWizGenProgress() {
+  const host = document.getElementById('wizGenProgress');
+  if (!host) return;
+  host.classList.remove('is-error');
+  const cta = document.getElementById('wgpCta');
+  if (cta) cta.innerHTML = '';
+  host.querySelectorAll('.wgp-step').forEach(s => s.classList.remove('done', 'active', 'error'));
+  _genMini.status = 'running';
+  host.hidden = false;
+  setWizGenStep(0);
+  // 按下建立行程後，隱藏「上一步／建立行程」兩顆鈕，只剩步驟條
+  const back = document.getElementById('wizBackBtn');
+  const next = document.getElementById('wizNextBtn');
+  if (back) back.style.display = 'none';
+  if (next) next.style.display = 'none';
+  hideGenMiniBar(); // 重開精靈時收起浮動卡
+  const wrap = host.closest('.wizard-flow-wrap');
+  if (wrap) wrap.scrollTop = wrap.scrollHeight;
+}
+function setWizGenStep(index, subLabel) {
+  _genMini.index = index;
+  _genMini.status = 'running';
+  _genMini.label = subLabel || ('正在' + (WGP_PHASES[index] || '處理') + '…');
+  const host = document.getElementById('wizGenProgress');
+  if (host && !host.hidden) {
+    host.querySelectorAll('.wgp-step').forEach((s, i) => {
+      s.classList.remove('error');
+      s.classList.toggle('done', i < index);
+      s.classList.toggle('active', i === index);
+    });
+    const title = document.getElementById('wgpTitle');
+    if (title) title.textContent = _genMini.label;
+  }
+  renderGenMini();
+}
+function wizGenDone(tripId) {
+  _genMini.status = 'done';
+  _genMini.tripId = tripId;
+  const host = document.getElementById('wizGenProgress');
+  if (host && !host.hidden) {
+    host.querySelectorAll('.wgp-step').forEach(s => { s.classList.remove('active', 'error'); s.classList.add('done'); });
+    const title = document.getElementById('wgpTitle');
+    if (title) title.textContent = '🎉 行程就緒！';
+    const cta = document.getElementById('wgpCta');
+    if (cta) {
+      cta.innerHTML = '';
+      const edit = document.createElement('button');
+      edit.className = 'wizard-btn primary';
+      edit.textContent = '✏️ 開始編輯行程';
+      edit.onclick = function () { window.location = 'ai-travel-planner-v8.html?id=' + tripId; };
+      cta.appendChild(edit);
+      const list = document.createElement('button');
+      list.className = 'wgp-cta-link';
+      list.textContent = '前往我的行程列表';
+      list.onclick = function () { closeWizard(); showMainView('mytrips'); };
+      cta.appendChild(list);
+    }
+  }
+  renderGenMini();
+}
+function wizGenError(msg) {
+  _genMini.status = 'error';
+  const host = document.getElementById('wizGenProgress');
+  if (host && !host.hidden) {
+    host.classList.add('is-error');
+    const active = host.querySelector('.wgp-step.active');
+    if (active) { active.classList.remove('active'); active.classList.add('error'); }
+    const title = document.getElementById('wgpTitle');
+    if (title) title.textContent = '生成失敗，請重試';
+  }
+  _restoreWizNav(); // 還原導覽鈕，讓使用者可重試
+  renderGenMini();
+  showToast('生成行程失敗：' + msg, 'red');
+}
+// 還原精靈導覽鈕顯示（生成失敗 / 開新一輪精靈時）
+function _restoreWizNav() {
+  const back = document.getElementById('wizBackBtn');
+  const next = document.getElementById('wizNextBtn');
+  if (back) back.style.display = '';
+  if (next) next.style.display = '';
+}
+
+// === 浮動小進度卡：關閉精靈後仍可看進度並點回 ===
+function showGenMiniBar() {
+  const bar = document.getElementById('genMiniBar');
+  if (!bar) return;
+  bar.hidden = false;
+  renderGenMini();
+}
+function hideGenMiniBar() {
+  const bar = document.getElementById('genMiniBar');
+  if (bar) bar.hidden = true;
+}
+function renderGenMini() {
+  const bar = document.getElementById('genMiniBar');
+  if (!bar || bar.hidden) return;
+  bar.classList.toggle('is-done', _genMini.status === 'done');
+  bar.classList.toggle('is-error', _genMini.status === 'error');
+  const title = bar.querySelector('.gmb-title');
+  if (title) {
+    if (_genMini.status === 'done') title.textContent = '🎉 行程就緒 · 點我查看';
+    else if (_genMini.status === 'error') title.textContent = '⚠ 生成失敗 · 點我查看';
+    else title.textContent = '生成中 · ' + (WGP_PHASES[_genMini.index] || '') + ' (' + Math.min(_genMini.index + 1, 4) + '/4)';
+  }
+  bar.querySelectorAll('.gmb-dot').forEach((d, i) => {
+    d.classList.toggle('done', _genMini.status === 'done' || i < _genMini.index);
+    d.classList.toggle('active', _genMini.status === 'running' && i === _genMini.index);
+  });
+}
+function reopenWizGen() {
+  const ov = document.getElementById('wizardOverlay');
+  if (ov) ov.classList.add('open');
+  hideGenMiniBar();
+}
+
 async function finishWizard() {
   if (isGeneratingTrip) return;
 
@@ -4178,7 +4305,7 @@ async function finishWizard() {
   // 記錄待完成的生成任務，供頁面重新載入後恢復
   localStorage.setItem('wai_pending_gen', JSON.stringify({ tripId: newTrip.id, wData: { ...wizData } }));
 
-  closeWizard();
+  showWizGenProgress(); // 精靈保持開啟，進度顯示在行程預覽下方
   if (inviteCode) {
     document.getElementById('collabCodeDisplay').textContent = inviteCode;
     document.getElementById('collabCodeOverlay').classList.add('open');
@@ -4190,36 +4317,27 @@ async function finishWizard() {
 async function _doGeneration(trip, wData) {
   if (isGeneratingTrip) return;
   isGeneratingTrip = true;
-  showGenPanel(trip.title);
   try {
-    setGenPhase('查詢景點中…');
+    setWizGenStep(0);
     const _liveDest = wData.dest || wData.destCustom || '';
     // 本地優先：有本地景點資料就直接用，跳過 Google Maps 即時抓取
     const _localHint = buildLocalPoiHintBlock(_liveDest);
     let livePlaces = [];
     let livePoiHint = '';
     if (_localHint) {
-      addGenLine('> 已從本地景點資料庫取得清單，交由 AI 安排行程…', 'info');
       livePoiHint = _localHint;
     } else {
-      addGenLine('> 正在從 Google Maps 查詢可用景點清單…', 'info');
       const _liveCenter = getDestinationCenter(_liveDest);
       livePlaces = await fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
       livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
-      if (livePlaces.length > 0) {
-        addGenLine(`> 已從 Google Maps 取得 ${livePlaces.length} 個景點，交由 AI 安排行程…`, 'info');
-      } else {
-        addGenLine('> 使用備用景點資料，繼續規劃…', 'info');
-      }
     }
     // 餐廳一律即時抓（本地 poi-data 不含餐廳），讓 AI 有用餐站候選——不吃本地、每次都撈最新
     const _foodPlaces = await fetchGoogleMapsFoodList(_liveDest, getDestinationCenter(_liveDest)).catch(() => []);
     if (_foodPlaces.length) {
       livePlaces = livePlaces.concat(_foodPlaces);
       livePoiHint = [livePoiHint, buildLiveFoodHintBlock(_foodPlaces)].filter(Boolean).join('\n\n');
-      addGenLine(`> 已即時取得 ${_foodPlaces.length} 間餐廳候選…`, 'info');
     }
-    setGenPhase('AI 規劃行程中…');
+    setWizGenStep(1);
 
     let lastNames = [];
     const finalPlan = await requestGeminiMicroTravelPlan(wData, {
@@ -4230,15 +4348,13 @@ async function _doGeneration(trip, wData) {
       onChunk: (_chunk, fullText) => {
         const names = extractNamesFromStream(fullText);
         if (names.length > lastNames.length) {
-          for (let i = lastNames.length; i < names.length; i++) addGenLine('  ❆ ' + names[i], 'spot');
           lastNames = names;
-          setGenPhase('已識別 ' + names.length + ' 個景點，持續接收中…');
+          setWizGenStep(1, '已識別 ' + names.length + ' 個景點，持續接收中…');
         }
       }
     });
 
-    addGenLine('> AI 已安排行程，正在對應地圖座標…', 'info');
-    setGenPhase('對應地圖資訊中…');
+    setWizGenStep(2);
 
     if (finalPlan && finalPlan.stops) {
       trip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wData, livePlaces);
@@ -4251,18 +4367,15 @@ async function _doGeneration(trip, wData) {
     saveState(); renderSideMyTrips(); renderMyTrips();
 
     localStorage.removeItem('wai_pending_gen');
-    addGenLine('> 已儲存到本機裝置 ✓', 'done');
-    setGenPhase('行程就緒！');
-    showGenDoneButton(trip.id);
+    setWizGenStep(3);
+    wizGenDone(trip.id);
 
     if (firebaseEnabled) persistMicroTripInBackground(trip);
 
   } catch (error) {
     localStorage.removeItem('wai_pending_gen');
     isGeneratingTrip = false;
-    addGenLine('> 錯誤：' + error.message, 'warn');
-    setGenPhase('生成失敗，請嘗試重新發起');
-    setTimeout(() => { hideGenPanel(); showToast('生成行程失敗：' + error.message, 'red'); }, 1500);
+    wizGenError(error.message);
     console.error('_doGeneration error:', error);
     return;
   }
