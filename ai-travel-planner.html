@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WanderAI — 微旅行與空檔助手</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="weather.env.js"></script>
 <style>
   :root {
     --bg: #f7f5f0;
@@ -590,8 +594,29 @@
 </div>
 
 <script>
+// ── Firebase Init ──
+let firebaseAuth = null;
+let firebaseDb = null;
+let firebaseEnabled = false;
+(function initFirebase() {
+  const config = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.FIREBASE_CONFIG;
+  if (!window.firebase || !config || !config.apiKey || !config.projectId) return;
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(config);
+    firebaseDb = firebase.firestore();
+    firebaseAuth = firebase.auth();
+    firebaseEnabled = true;
+  } catch(e) { console.warn('Firebase init failed:', e); }
+})();
+
 // ── AUTH HELPERS ──
 function openStartModal() {
+  // 檢查 Firebase 登入狀態（若已登入直接跳轉）
+  if (firebaseAuth && firebaseAuth.currentUser) {
+    window.location.href = 'ai-travel-explore-final.html';
+    return;
+  }
+  // fallback: 也檢查 localStorage（可能 auth 還沒 ready）
   const saved = JSON.parse(localStorage.getItem('wai_user') || '{}');
   if (saved.isLoggedIn) {
     window.location.href = 'ai-travel-explore-final.html';
@@ -602,7 +627,7 @@ function openStartModal() {
 
 function closeStartModal() {
   document.getElementById('startOverlay').classList.remove('open');
-  sessionStorage.removeItem('intent_join'); // clean up intent if they cancel
+  sessionStorage.removeItem('intent_join');
 }
 
 function switchTab(tab) {
@@ -615,49 +640,130 @@ function switchTab(tab) {
   document.getElementById('tabReg').style.borderBottomColor   = isLogin ? 'transparent' : '#2a6b5e';
 }
 
-function saveAndRedirect(name, email, emoji) {
+function handleAuthSuccess(user, name, emoji, isNewUser = false) {
   localStorage.setItem('wai_user', JSON.stringify({
     isLoggedIn: true,
-    currentUser: { name, email, emoji }
+    currentUser: { name, email: user.email || '', emoji }
   }));
   sessionStorage.setItem('wai_just_logged_in', '1');
+  if (isNewUser) sessionStorage.setItem('wai_just_registered', '1');
 
-  // 如果是因為點擊了「加入行程」而強制登入的，登入後立刻彈出加入視窗
   if (sessionStorage.getItem('intent_join')) {
     sessionStorage.removeItem('intent_join');
     closeStartModal();
     showToast('✅ 登入成功！請輸入朋友的邀請碼', 'green');
-    setTimeout(() => {
-      // 在登入成功的狀態下，重新呼叫 openJoinModal 就會順利打開輸入框了
-      openJoinModal();
-    }, 400);
+    setTimeout(() => openJoinModal(), 400);
   } else {
-    // 一般登入，跳轉至探索頁面
     window.location.href = 'ai-travel-explore-final.html';
   }
 }
 
-function doLogin() {
+async function doLogin() {
   const email = document.getElementById('loginEmail').value.trim();
   const pw    = document.getElementById('loginPw').value;
   if (!email || !pw) { showToast('請填寫完整資料', 'red'); return; }
-  saveAndRedirect(email.split('@')[0], email, '😊');
+  if (!firebaseEnabled || !firebaseAuth) { showToast('Firebase 尚未初始化', 'orange'); return; }
+  try {
+    const cred = await firebaseAuth.signInWithEmailAndPassword(email, pw);
+    handleAuthSuccess(cred.user, cred.user.displayName || email.split('@')[0], '😊');
+  } catch(e) {
+    showToast('登入失敗: ' + e.message, 'red');
+  }
 }
 
-function doRegister() {
+async function doRegister() {
   const name  = document.getElementById('regName').value.trim();
   const email = document.getElementById('regEmail').value.trim();
   const pw    = document.getElementById('regPw').value;
   if (!name || !email || pw.length < 6) { showToast('請填寫完整資料，密碼至少 6 字元', 'red'); return; }
-  saveAndRedirect(name, email, '🌟');
+  if (!firebaseEnabled || !firebaseAuth) { showToast('Firebase 尚未初始化', 'orange'); return; }
+  try {
+    const cred = await firebaseAuth.createUserWithEmailAndPassword(email, pw);
+    const user = cred.user;
+    // 在 Firestore 建立使用者文件
+    if (firebaseDb) {
+      await firebaseDb.collection('users').doc(user.uid).set({
+        uid: user.uid,
+        email: email,
+        name: name,
+        emoji: '🌟',
+        preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+        visitedSpots: [],
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    handleAuthSuccess(user, name, '🌟', true);
+  } catch(e) {
+    showToast('註冊失敗: ' + e.message, 'red');
+  }
 }
 
-function doSocial(provider) {
-  saveAndRedirect(provider + '用戶', provider.toLowerCase() + '@example.com', provider === 'Google' ? '🌐' : '📘');
+async function doSocial(providerName) {
+  if (!firebaseEnabled || !firebaseAuth) { showToast('Firebase 尚未初始化', 'orange'); return; }
+  try {
+    let provider = null;
+    if (providerName === 'Google') provider = new firebase.auth.GoogleAuthProvider();
+    else if (providerName === 'Facebook') provider = new firebase.auth.FacebookAuthProvider();
+    else return;
+    const cred = await firebaseAuth.signInWithPopup(provider);
+    const user = cred.user;
+    let isNew = false;
+    // 新用戶：建立 Firestore 文件
+    if (firebaseDb) {
+      const docRef = firebaseDb.collection('users').doc(user.uid);
+      const doc = await docRef.get();
+      if (!doc.exists) {
+        isNew = true;
+        await docRef.set({
+          uid: user.uid,
+          email: user.email || '',
+          name: user.displayName || '社群用戶',
+          emoji: providerName === 'Google' ? '🌐' : '📘',
+          preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+          visitedSpots: [],
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+    } else {
+      // 沒 DB 的情況，預設當新用戶彈出偏好視窗也可以
+      isNew = true;
+    }
+    handleAuthSuccess(user, user.displayName || providerName + '用戶', providerName === 'Google' ? '🌐' : '📘', isNew);
+  } catch(e) {
+    showToast('登入失敗: ' + e.message, 'red');
+  }
 }
 
 function doGuest() {
-  saveAndRedirect('訪客', 'guest@example.com', '👤');
+  // 訪客模式：匿名登入 Firebase
+  if (firebaseEnabled && firebaseAuth) {
+    firebaseAuth.signInAnonymously().then(cred => {
+      handleAuthSuccess(cred.user, '訪客', '👤');
+    }).catch(e => {
+      // 匿名登入失敗：fallback 到純 localStorage
+      localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn: true, currentUser: { name: '訪客', email: 'guest@local', emoji: '👤' } }));
+      window.location.href = 'ai-travel-explore-final.html';
+    });
+  } else {
+    localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn: true, currentUser: { name: '訪客', email: 'guest@local', emoji: '👤' } }));
+    window.location.href = 'ai-travel-explore-final.html';
+  }
+}
+
+// ── Auth State Listener：頁面載入時若已登入，自動跳過登入按鈕 ──
+if (typeof firebase !== 'undefined' && firebase.auth) {
+  firebase.auth().onAuthStateChanged(user => {
+    if (user) {
+      // 已登入：更新 localStorage 讓其他頁面也能讀到
+      const displayName = user.displayName || user.email?.split('@')[0] || '使用者';
+      localStorage.setItem('wai_user', JSON.stringify({
+        isLoggedIn: true,
+        currentUser: { name: displayName, email: user.email || '', emoji: '😊' }
+      }));
+    }
+  });
 }
 
 // ── JOIN BY INVITE CODE (強制登入後才能使用) ──

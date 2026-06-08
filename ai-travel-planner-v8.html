@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
@@ -45,7 +45,7 @@
           <div class="hero-tag">📍 等待匯入目的地</div>
         </div>
         <div class="hero-actions" id="itineraryHeroActions">
-          <label class="trip-vehicle-wrap" id="tripPrimaryVehicleWrap" title="切換全程主要交通工具（走路與大眾交通的路段不受影響）" style="display:none;">
+          <label class="trip-vehicle-wrap" id="tripPrimaryVehicleWrap" title="切換全程主要交通工具（走路的路段不受影響）" style="display:none;">
             🚦 主要交通工具
             <select id="tripPrimaryVehicleSelect" class="trip-vehicle-select" onchange="setTripPrimaryVehicle(this.value)">
               <option value="taxi">🚕 計程車</option>
@@ -492,6 +492,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="./ai-travel-planner-v8.js"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，

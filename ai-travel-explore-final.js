@@ -131,6 +131,7 @@ function initFirebaseIfConfigured() {
       firebase.initializeApp(config);
     }
     firebaseDb = firebase.firestore();
+    firebaseAuth = firebase.auth();
     firebaseEnabled = true;
     return true;
   } catch (error) {
@@ -2868,7 +2869,7 @@ function renderUserMenu() {
   if (!isLoggedIn) {
     wrap.innerHTML = `<button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>`;
   } else {
-    const u = currentUser;
+    const u = currentUser || {};
     wrap.innerHTML = `
       <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${u.name}">
         ${u.emoji||'😊'}
@@ -2907,39 +2908,196 @@ function switchAuthTab(tab) {
   document.getElementById('loginForm').style.display = tab==='login' ? '' : 'none';
   document.getElementById('registerForm').style.display = tab==='register' ? '' : 'none';
 }
+
 async function doLogin() {
+  if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
   const email = document.getElementById('loginEmail').value.trim();
   const pwd = document.getElementById('loginPwd').value;
   if (!email || !pwd) { showToast('請填寫帳號和密碼', 'orange'); return; }
-  isLoggedIn = true;
-  currentUser = {name: email.split('@')[0], email, emoji:'😊'};
-  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
-  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
-  showToast(`👋 歡迎回來，${currentUser.name}！`, 'green');
+  try {
+    const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
+    showToast(`👋 歡迎回來！`, 'green');
+    closeLogin();
+  } catch(e) {
+    showToast(`登入失敗: ${e.message}`, 'red');
+  }
 }
+
 async function doRegister() {
+  if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
   const name = document.getElementById('regName').value.trim();
   const email = document.getElementById('regEmail').value.trim();
   const pwd = document.getElementById('regPwd').value;
   if (!name || !email || !pwd) { showToast('請填寫所有欄位', 'orange'); return; }
-  isLoggedIn = true;
-  currentUser = {name, email, emoji:'🌟'};
-  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
-  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
-  showToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+  try {
+    const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
+    const user = userCredential.user;
+    if (firebaseDb) {
+      await firebaseDb.collection('users').doc(user.uid).set({
+        uid: user.uid,
+        email: email,
+        name: name,
+        emoji: '🌟',
+        preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+        visitedSpots: [],
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    showToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+    closeLogin();
+    openPrefWizard(); // 引導設定偏好
+  } catch(e) {
+    showToast(`註冊失敗: ${e.message}`, 'red');
+  }
 }
-async function doSocialLogin(provider) {
-  isLoggedIn = true;
-  currentUser = {name:`${provider}用戶`, email:`${provider.toLowerCase()}@example.com`, emoji: provider==='Google'?'🌐':'📘'};
-  localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
-  await loadState(); closeLogin(); renderUserMenu(); renderGrid();
-  showToast(`✅ 已透過 ${provider} 登入`, 'green');
+
+async function doSocialLogin(providerName) {
+  if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
+  try {
+    let provider = null;
+    if (providerName === 'Google') provider = new firebase.auth.GoogleAuthProvider();
+    else if (providerName === 'Facebook') provider = new firebase.auth.FacebookAuthProvider();
+    else return;
+    
+    const userCredential = await firebaseAuth.signInWithPopup(provider);
+    const user = userCredential.user;
+    
+    if (firebaseDb) {
+      const docRef = firebaseDb.collection('users').doc(user.uid);
+      const doc = await docRef.get();
+      if (!doc.exists) {
+        await docRef.set({
+          uid: user.uid,
+          email: user.email || '',
+          name: user.displayName || '社群用戶',
+          emoji: providerName === 'Google' ? '🌐' : '📘',
+          preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+          visitedSpots: [],
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        openPrefWizard(); // 新用戶引導設定
+      }
+    }
+    showToast(`✅ 已透過 ${providerName} 登入`, 'green');
+    closeLogin();
+  } catch(e) {
+    showToast(`登入失敗: ${e.message}`, 'red');
+  }
 }
+
 function doLogout() {
-  isLoggedIn = false; currentUser = null;
-  saveState();
+  if (firebaseAuth) firebaseAuth.signOut();
   showToast('已登出，跳轉回首頁…');
   setTimeout(() => { window.location.href = 'ai-travel-planner.html'; }, 800);
+}
+
+// === Preferences Wizard ===
+let tempPrefs = { theme: '經典旅人', interests: [], pace: '平衡' };
+function openPrefWizard() {
+  tempPrefs = { theme: '經典旅人', interests: [], pace: '平衡' };
+  renderPrefWizard();
+  document.getElementById('prefWizardOverlay').classList.add('open');
+}
+function closePrefWizard() { document.getElementById('prefWizardOverlay').classList.remove('open'); }
+function setPrefTheme(theme) {
+  tempPrefs.theme = theme;
+  document.querySelectorAll('#prefThemeGrid .wizard-tag').forEach(btn => {
+    const isAct = btn.textContent.includes(theme);
+    btn.classList.toggle('active', isAct);
+    btn.style.background = isAct ? '#dff1ff' : '';
+    btn.style.borderColor = isAct ? '#7db8ee' : '';
+  });
+}
+function togglePrefInterest(btn, int) {
+  const idx = tempPrefs.interests.indexOf(int);
+  if (idx > -1) {
+    tempPrefs.interests.splice(idx, 1);
+    btn.classList.remove('active');
+  } else {
+    if (tempPrefs.interests.length >= 3) return showToast('最多選擇三個興趣');
+    tempPrefs.interests.push(int);
+    btn.classList.add('active');
+  }
+}
+function setPrefPace(pace) {
+  tempPrefs.pace = pace;
+  document.querySelectorAll('#prefPaceGrid .wizard-tag').forEach(btn => {
+    btn.classList.toggle('active', btn.textContent.includes(pace));
+  });
+}
+function renderPrefWizard() {
+  setPrefTheme(tempPrefs.theme);
+  setPrefPace(tempPrefs.pace);
+  document.querySelectorAll('#prefInterestsGrid .wizard-tag').forEach(btn => {
+    const int = btn.textContent.replace(/[^\u4e00-\u9fa5]/g, '').trim();
+    btn.classList.toggle('active', tempPrefs.interests.includes(int));
+  });
+}
+async function saveUserPreferences() {
+  if (!isLoggedIn || !currentUser || !firebaseDb) return closePrefWizard();
+  try {
+    const uid = firebaseAuth.currentUser?.uid;
+    if (uid) {
+      await firebaseDb.collection('users').doc(uid).set({
+        preferences: tempPrefs,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+    currentUser.preferences = { ...tempPrefs };
+    localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn, currentUser }));
+    showToast('✨ 喜好設定已儲存', 'green');
+    closePrefWizard();
+  } catch(e) {
+    showToast('儲存失敗', 'red');
+  }
+}
+
+// === Auth State Listener ===
+if (typeof firebase !== 'undefined') {
+  firebase.auth().onAuthStateChanged(async (user) => {
+    if (user) {
+      isLoggedIn = true;
+      let userData = {
+        name: user.displayName || user.email?.split('@')[0] || '使用者',
+        email: user.email,
+        emoji: '😊',
+        preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+        visitedSpots: []
+      };
+      if (firebaseDb) {
+        try {
+          const doc = await firebaseDb.collection('users').doc(user.uid).get();
+          if (doc.exists) {
+            const data = doc.data();
+            userData = { ...userData, ...data };
+            if (data.visitedSpots && Array.isArray(data.visitedSpots)) {
+              localStorage.setItem('wai_visited_places', JSON.stringify(data.visitedSpots));
+            }
+          }
+        } catch(e) { console.warn('無法讀取使用者資料', e); }
+      }
+      currentUser = userData;
+      localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn, currentUser }));
+      await loadState();
+      renderUserMenu();
+      renderGrid();
+      
+      // 檢查是否為剛從 landing page 註冊跳轉進來的
+      if (sessionStorage.getItem('wai_just_registered')) {
+        sessionStorage.removeItem('wai_just_registered');
+        setTimeout(openPrefWizard, 500); // 稍微延遲一下，等畫面渲染好
+      }
+    } else {
+      isLoggedIn = false;
+      currentUser = null;
+      localStorage.removeItem('wai_user');
+      saveState();
+      renderUserMenu();
+      renderGrid();
+    }
+  });
 }
 
 // ══════════════════════════════════════════════════
@@ -3205,6 +3363,11 @@ function selectTripMode(mode) {
   closeModeChoice();
   wizStep = 0;
   wizData = { days: '8小時', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
+  if (currentUser && currentUser.preferences) {
+    if (currentUser.preferences.theme) wizData.theme = currentUser.preferences.theme;
+    if (currentUser.preferences.interests) wizData.interests = [...currentUser.preferences.interests];
+    if (currentUser.preferences.pace) wizData.pace = currentUser.preferences.pace;
+  }
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');

@@ -40,13 +40,16 @@
   let tripSessionId = `${currentItineraryId || 'prototype-empty'}-${Date.now()}`;
   let firebaseDb = null;
   let firebaseStorage = null;
+  let firebaseAuth = null;
   let firebaseEnabled = false;
   const geocodeCache = new Map();
   const scenicPointCache = new Map();
   const placeSearchCache = new Map();
   const tdxSpotsCache = new Map();
+  const tdxParkingCache = new Map();
   const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
   const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/v2/Tourism/ScenicSpot';
+  const TDX_PARKING_BASE = 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/CarPark/City';
   const replanStartMinutes = 14 * 60;
   let replanStops = [];
   let persistTripDebounceTimer = null;
@@ -55,8 +58,7 @@
     { value: 'taxi', label: '計程車', icon: '🚕' },
     { value: 'scooter', label: '機車', icon: '🛵' },
     { value: 'car', label: '汽車', icon: '🚗' },
-    { value: 'walk', label: '走路', icon: '🚶' },
-    { value: 'public', label: '大眾交通', icon: '🚌' }
+    { value: 'walk', label: '走路', icon: '🚶' }
   ];
 
   // 離島交通設定（島內港/本島港/別名）改由資料端 ferry-config.js 提供（window.WAI_FERRY_CONFIG）。
@@ -312,21 +314,33 @@
     return null;
   }
 
-  async function fetchTdxScenicSpots(county) {
-    if (!county) return [];
-    if (tdxSpotsCache.has(county)) return tdxSpotsCache.get(county);
+  // 取得 TDX OAuth2 access token（scenic / parking 共用）
+  async function getTdxAccessToken() {
     const cfg = window.TRAVEL_APP_CONFIG || {};
     const appId = cfg.TDX_APP_ID;
     const appKey = cfg.TDX_APP_KEY;
-    if (!appId || !appKey) return [];
+    if (!appId || !appKey) return null;
     try {
       const tokenRes = await fetch(TDX_AUTH_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `grant_type=client_credentials&client_id=${encodeURIComponent(appId)}&client_secret=${encodeURIComponent(appKey)}`
       });
-      if (!tokenRes.ok) return [];
+      if (!tokenRes.ok) return null;
       const { access_token } = await tokenRes.json();
+      return access_token || null;
+    } catch (e) {
+      console.warn('[TDX] 取得 token 失敗', e.message);
+      return null;
+    }
+  }
+
+  async function fetchTdxScenicSpots(county) {
+    if (!county) return [];
+    if (tdxSpotsCache.has(county)) return tdxSpotsCache.get(county);
+    try {
+      const access_token = await getTdxAccessToken();
+      if (!access_token) return [];
       const dataRes = await fetch(
         `${TDX_SCENIC_BASE}/${county}?$select=ScenicSpotName,Position,OpenTime,DescriptionDetail&$top=200&$format=JSON`,
         { headers: { Authorization: `Bearer ${access_token}` } }
@@ -360,6 +374,50 @@
       const sNorm = normalizeText(s.name);
       return sNorm.includes(norm) || norm.includes(sNorm);
     }) || null;
+  }
+
+  // TDX 路外停車場（依縣市，仿 scenic 以 county 快取）
+  async function fetchTdxParking(county) {
+    if (!county) return [];
+    if (tdxParkingCache.has(county)) return tdxParkingCache.get(county);
+    try {
+      const access_token = await getTdxAccessToken();
+      if (!access_token) return [];
+      const dataRes = await fetch(
+        `${TDX_PARKING_BASE}/${county}?$format=JSON`,
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      );
+      if (!dataRes.ok) { tdxParkingCache.set(county, []); return []; }
+      const list = await dataRes.json();
+      const normalized = (Array.isArray(list) ? list : [])
+        .map(p => {
+          const pos = p.CarParkPosition || {};
+          const lat = Number(pos.PositionLat);
+          const lng = Number(pos.PositionLon);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+          const name = (p.CarParkName && (p.CarParkName.Zh_tw || p.CarParkName.En)) || '停車場';
+          return { name, lat, lng };
+        })
+        .filter(Boolean);
+      tdxParkingCache.set(county, normalized);
+      console.info(`[TDX] 載入 ${county} 停車場 ${normalized.length} 筆`);
+      return normalized;
+    } catch (e) {
+      console.warn('[TDX] 停車場抓取失敗，跳過 TDX 停車場', e.message);
+      tdxParkingCache.set(county, []);
+      return [];
+    }
+  }
+
+  // 從 TDX 停車場清單挑距 center ≤ 半徑、依距離排序的前幾筆候選
+  function nearbyTdxParkings(center, list, maxMeters, limit = 3) {
+    if (!center || !Array.isArray(list) || !list.length) return [];
+    return list
+      .map((p) => ({ cand: { lat: p.lat, lng: p.lng, name: p.name }, d: measureDistanceMeters(center, p) }))
+      .filter((x) => x.d <= maxMeters)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, limit)
+      .map((x) => x.cand);
   }
 
   function getExactCoordinateFromStop(stop = {}) {
@@ -1096,17 +1154,38 @@
       checked++;
       const cur = readStopCoordinates(stop);
       let cand = null;
+      let renamed = false;
       try { cand = await searchStrictPlaceCandidate(name, stop, region, title); } catch (e) { continue; }
-      if (!cand || !cand.position) { console.info('[coord reverify] 無嚴格配對候選：', name); continue; }
+      if (!cand || !cand.position) {
+        // 嚴格配對失敗（多為 AI 取的別名，如「白色陋屋」實為「台東阿伯小白屋」）：
+        // 信心控管的模糊退回——信任 Google 對該名稱的最佳 in-region 候選，連同名稱一起校正。
+        let fuzzy = null;
+        try { fuzzy = await searchVerifiedPlaceCandidate(name, stop, region, title, resolveTripCenter(region, title)); } catch (e) {}
+        if (fuzzy && fuzzy.position
+          && !isCoordinatesOutsideRegion(fuzzy.position, region, name)
+          && Number(fuzzy.score) > 0) {
+          cand = fuzzy;
+          renamed = true;
+        } else {
+          console.info('[coord reverify] 無嚴格配對候選：', name);
+          continue;
+        }
+      }
       if (isCoordinatesOutsideRegion(cand.position, region, name)) { console.info('[coord reverify] 候選超出範圍，略過：', name, cand.name); continue; }
       const dist = cur ? measureDistanceMeters(cur, cand.position) : Infinity;
-      if (!cur || dist > 800) {
+      if (!cur || dist > 800 || renamed) {
         stop.lat = cand.position.lat;
         stop.lng = cand.position.lng;
         stop.scenicCoordinates = { lat: cand.position.lat, lng: cand.position.lng };
-        stop.coordinateSource = 'places_reverify';
+        stop.coordinateSource = renamed ? 'places_fuzzy_reverify' : 'places_reverify';
         snapped++;
-        console.info('[coord reverify snap]', name, '→', cand.name, cand.position, '(原', cur, '偏移', Number.isFinite(dist) ? Math.round(dist) + 'm' : '無座標', ')');
+        console.info(renamed ? '[coord reverify snap(fuzzy)]' : '[coord reverify snap]', name, '→', cand.name, cand.position, '(原', cur, '偏移', Number.isFinite(dist) ? Math.round(dist) + 'm' : '無座標', ')');
+        // 名稱也校正成 Google 正規名（嚴格配對失敗時的別名修正）
+        if (renamed && cand.name && cand.name !== stop.name) {
+          console.info('[coord reverify rename]', stop.name, '→', cand.name);
+          stop.name = cand.name;
+          if (cand.placeId) stop.placeId = cand.placeId;
+        }
       }
     }
     console.info(`[coord reverify] 完成：檢查 ${checked} 站、校正 ${snapped} 站`);
@@ -1738,7 +1817,7 @@
                 name: returnHarbor.name,
                 stayMin: 20,
                 transitMin: null,
-                transitMode: 'public',
+                transitMode: 'car',
                 mapPinId: returnPinId,
                 scenicCoordinates: returnPos,
                 _lockedCoordinates: returnPos,
@@ -3189,6 +3268,8 @@
 
   function normalizeTransitMode(mode) {
     const source = String(mode || '').trim().toLowerCase();
+    // 「大眾交通」已移除；舊行程若存有 public，遷移為汽車（避免長程段被當成走路）
+    if (source === 'public') return 'car';
     return TRANSIT_MODE_OPTIONS.some((item) => item.value === source) ? source : 'walk';
   }
 
@@ -3244,7 +3325,6 @@
   function getGoogleTravelModeByTransit(mode) {
     const normalized = normalizeTransitMode(mode);
     if (normalized === 'walk') return google.maps.TravelMode.WALKING;
-    if (normalized === 'public') return google.maps.TravelMode.TRANSIT;
     if (normalized === 'scooter') {
       return google.maps.TravelMode.TWO_WHEELER || google.maps.TravelMode.DRIVING;
     }
@@ -3733,6 +3813,31 @@
     if (travellogList) renderTravelLog();
   }
 
+  // 給「開始行程」後續完成用的公開介面：自動將整趟行程的景點標為「去過了」
+  window.markTripAsCompleted = function() {
+    if (!replanStops || !replanStops.length) return showToast('沒有可記錄的行程', 'orange');
+    let addedCount = 0;
+    replanStops.forEach(stop => {
+      if (stop.type !== 'start' && stop.type !== 'end' && stop.name) {
+        if (!isPlaceVisited(stop.name)) {
+          toggleVisitedPlace(stop);
+          addedCount++;
+          // 更新畫面按鈕
+          document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stop.id}"]`).forEach(b => {
+            b.textContent = '✓ 已去過';
+            b.classList.add('visited');
+          });
+        }
+      }
+    });
+    if (addedCount > 0) {
+      showToast(`🎉 行程已完成！自動將 ${addedCount} 個景點加入去過清單。`, 'green');
+      if (document.getElementById('travellog-list')) renderTravelLog();
+    } else {
+      showToast('此行程的景點皆已記錄過。', 'blue');
+    }
+  };
+
   function showVisitedToast(msg) {
     let el = document.getElementById('visited-toast');
     if (!el) {
@@ -4007,7 +4112,7 @@
     sel.value = getPreferredVehicleMode();
   }
 
-  // 一次切換全程主要交通工具：所有「車輛類」路段改用新工具，保留走路與大眾交通
+  // 一次切換全程主要交通工具：所有「車輛類」路段改用新工具，保留走路
   function setTripPrimaryVehicle(modeValue) {
     const valid = ['taxi', 'scooter', 'car'];
     const vehicle = valid.includes(String(modeValue || '').toLowerCase()) ? String(modeValue).toLowerCase() : 'car';
@@ -4107,7 +4212,7 @@
           <div>
             <div class="replan-spot-name">${stop.name}</div>
             ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:11px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
-            <div class="replan-spot-meta">停留 <select class="replan-duration-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${getSuggestedStayDurations(stop).map(m => `<option value="${m}" ${(stop.stayMin ?? stop.computedStayMin) === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>${stop.transit ? ` · 後續 <select class="replan-transit-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); setSegmentTransitMode('${stop.id}', this.value)">${(() => { const cur = normalizeTransitMode(stop.transitMode); const allowed = new Set(['walk', 'public', getPreferredVehicleMode(), cur]); return TRANSIT_MODE_OPTIONS.filter(mo => allowed.has(mo.value)).map(mo => `<option value="${mo.value}" ${cur === mo.value ? 'selected' : ''}>${mo.icon} ${mo.label}</option>`).join(''); })()}</select> ${getTransitDurationText(stop.transit)}` : ''}</div>
+            <div class="replan-spot-meta">停留 <select class="replan-duration-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); updateStopStayTime('${stop.id}', Number(this.value))">${getSuggestedStayDurations(stop).map(m => `<option value="${m}" ${(stop.stayMin ?? stop.computedStayMin) === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>${stop.transit ? ` · 後續 <select class="replan-transit-select" onclick="event.stopPropagation()" ondragstart="event.stopPropagation()" onchange="event.stopPropagation(); setSegmentTransitMode('${stop.id}', this.value)">${(() => { const cur = normalizeTransitMode(stop.transitMode); const allowed = new Set(['walk', getPreferredVehicleMode(), cur]); return TRANSIT_MODE_OPTIONS.filter(mo => allowed.has(mo.value)).map(mo => `<option value="${mo.value}" ${cur === mo.value ? 'selected' : ''}>${mo.icon} ${mo.label}</option>`).join(''); })()}</select> ${getTransitDurationText(stop.transit)}` : ''}</div>
             ${(() => { const w = getBusinessHoursWarning(stop); return w ? `<div class="replan-hours-warn">${w}</div>` : ''; })()}
           </div>
           <div class="replan-emoji">${stop.emoji}</div>
@@ -4353,8 +4458,8 @@
         if (routeInfo && getRouteStageTimeText(routeInfo)) {
           transitText += ` · ${getRouteStageTimeText(routeInfo)}`;
         }
-        // 下拉只提供：所選交通工具 + 走路 + 大眾交通（並保留目前值以相容舊行程）
-        const allowedModes = new Set(['walk', 'public', getPreferredVehicleMode(), transitMode]);
+        // 下拉只提供：所選交通工具 + 走路（並保留目前值以相容舊行程）
+        const allowedModes = new Set(['walk', getPreferredVehicleMode(), transitMode]);
         const segmentModeOptions = TRANSIT_MODE_OPTIONS.filter((modeOption) => allowedModes.has(modeOption.value));
         html += `<div class="transit-block">
           <div class="transit-block-main">${transitText}</div>
@@ -4465,7 +4570,7 @@
     const cfg = getCostConfig();
     const modeKey = (cfg && cfg.modeRates && cfg.modeRates[mode]) ? mode : 'car';
     const modeLabel = (cfg && cfg.modeRates && cfg.modeRates[modeKey] && cfg.modeRates[modeKey].label) || '交通';
-    const modeEmoji = ({ scooter: '🛵', car: '🚗', taxi: '🚕', public: '🚌', walk: '🚶' })[modeKey] || '🚗';
+    const modeEmoji = ({ scooter: '🛵', car: '🚗', taxi: '🚕', walk: '🚶' })[modeKey] || '🚗';
 
     const hasTrip = stops.length > 0 || !!budget;
     if (!hasTrip) {
@@ -4778,6 +4883,7 @@
       if (firebase.storage && config.storageBucket) {
         firebaseStorage = firebase.storage();
       }
+      firebaseAuth = firebase.auth();
       firebaseEnabled = true;
       return true;
     } catch (error) {
@@ -5619,21 +5725,41 @@
     const places = getVisitedPlaces();
     const norm = (stop.name || '').replace(/\s/g, '').toLowerCase();
     const idx = places.findIndex(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
-    if (idx >= 0) {
-      places.splice(idx, 1);
-    } else {
-      places.push({
-        userId: (typeof currentUser !== 'undefined' && currentUser?.id) || null,
+    const isAdding = idx < 0;
+    
+    let spotData = null;
+    if (isAdding) {
+      spotData = {
         name: stop.name,
         region: currentTripRegion || '',
         visitDate: new Date().toISOString().slice(0, 10),
         tripId: currentItineraryId || '',
         tripTitle: currentTripTitle || '',
         emoji: stop.emoji || '📍'
-      });
+      };
+      places.push(spotData);
+    } else {
+      spotData = places[idx];
+      places.splice(idx, 1);
     }
+    
     localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places));
-    return idx < 0;
+    
+    // Sync with Firebase
+    if (firebaseEnabled && firebaseAuth && firebaseAuth.currentUser && firebaseDb) {
+      const uid = firebaseAuth.currentUser.uid;
+      const userRef = firebaseDb.collection('users').doc(uid);
+      if (isAdding) {
+        userRef.update({
+          visitedSpots: firebase.firestore.FieldValue.arrayUnion(spotData)
+        }).catch(e => console.warn('Sync visitedSpots add failed:', e));
+      } else {
+        userRef.update({
+          visitedSpots: firebase.firestore.FieldValue.arrayRemove(spotData)
+        }).catch(e => console.warn('Sync visitedSpots remove failed:', e));
+      }
+    }
+    return isAdding;
   }
 
   function getBlockedSpotNames(region) {
@@ -7018,6 +7144,8 @@
   let currentOpenPin = null; // 紀錄目前打開資訊卡的圖釘
   let directionsService;
   let directionsRenderers = []; // 存放每個階段的 Renderer
+  let walkRenderers = [];   // 每個階段的步行 overlay 陣列（停車點↔景點）
+  let parkingMarkers = [];  // 每個階段的 🅿️ 停車點 marker 陣列
   let activeRouteStage = null; // null 代表顯示全部路線
   let activeItineraryStopId = null; // 當點選行程階段時的活跃停靠點
   let currentRouteBounds = null;
@@ -7032,7 +7160,7 @@
 
   const mapPinLocations = {};
 
-  const ROUTE_MODE_COLORS = { car: '#1D4ED8', scooter: '#EA580C', walk: '#16A34A', public: '#7C3AED' };
+  const ROUTE_MODE_COLORS = { car: '#1D4ED8', scooter: '#EA580C', walk: '#F97316' };
 
   function createEmojiPinIcon(emoji) {
     const svg = `
@@ -8186,6 +8314,199 @@
     return replanStops.map((stop, index) => getRouteLocationForStop(stop, index)).filter(Boolean);
   }
 
+  // ── 停車樞紐：景點最近停車點（TDX 優先 → Places 退回）+ 停車點↔景點步行路徑 ──────────
+  const PARKING_WALKABLE_RADIUS_METERS = 500;   // 直線粗篩半徑（先撈候選）
+  const PARKING_MAX_WALK_MINUTES = 10;          // 最終以「實際步行時間」為準
+  const PARKING_MAX_WALK_SECONDS = PARKING_MAX_WALK_MINUTES * 60;
+  const _parkingCoordCache = new Map();
+  const _walkRouteCache = new Map();
+
+  function _coordKey(c) {
+    return `${Number(c.lat).toFixed(4)},${Number(c.lng).toFixed(4)}`;
+  }
+
+  // 從候選停車點（依直線距離排序）中，挑「實際步行時間 ≤10 分鐘」的最近一筆；都超過/無法驗證 → null
+  async function pickWalkableParking(center, candidates) {
+    for (const cand of (candidates || [])) {
+      const route = await resolveWalkRoute(cand, center);
+      const leg = route && route.routes && route.routes[0] && route.routes[0].legs && route.routes[0].legs[0];
+      const sec = leg && leg.duration ? Number(leg.duration.value) : null;
+      if (Number.isFinite(sec) && sec <= PARKING_MAX_WALK_SECONDS) return cand;
+    }
+    return null;
+  }
+
+  // 解析某景點最近、步行 ≤10 分鐘可達的停車點：TDX 優先 → Google Places 退回 → null
+  async function resolveParkingCoord(center) {
+    if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) {
+      return null;
+    }
+    const key = _coordKey(center);
+    if (_parkingCoordCache.has(key)) return _parkingCoordCache.get(key);
+    const finish = (coord) => { _parkingCoordCache.set(key, coord || null); return coord || null; };
+
+    try {
+      // 1) TDX 候選 → 用步行時間挑
+      const county = resolveTdxCounty(currentTripRegion);
+      if (county) {
+        const list = await fetchTdxParking(county);
+        const chosen = await pickWalkableParking(center, nearbyTdxParkings(center, list, PARKING_WALKABLE_RADIUS_METERS, 3));
+        if (chosen) return finish(chosen);
+      }
+      // 2) Places 候選 → 用步行時間挑
+      const placeCands = await listParkingFromPlaces(center);
+      const chosen2 = await pickWalkableParking(center, placeCands);
+      return finish(chosen2);
+    } catch (e) {
+      return finish(null);
+    }
+  }
+
+  // Places 停車場候選（≤500m 直線、依距離排序前 3 筆）；nearbySearch type:'parking' → textSearch 退回
+  function listParkingFromPlaces(center) {
+    const service = getPlacesService();
+    if (!service) return Promise.resolve([]);
+    const okStatus = () => hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
+    const loc = new google.maps.LatLng(center.lat, center.lng);
+    const toCandidates = (res) => {
+      if (!Array.isArray(res) || !res.length) return [];
+      return res
+        .map((p) => {
+          const g = p && p.geometry && p.geometry.location;
+          if (!g) return null;
+          const c = { lat: g.lat(), lng: g.lng(), name: p.name || '停車場' };
+          return { cand: c, d: measureDistanceMeters(center, c) };
+        })
+        .filter((x) => x && x.d <= PARKING_WALKABLE_RADIUS_METERS)
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 3)
+        .map((x) => x.cand);
+    };
+    return new Promise((resolve) => {
+      service.nearbySearch(
+        { location: loc, radius: PARKING_WALKABLE_RADIUS_METERS, type: 'parking', keyword: '停車場' },
+        (res, status) => {
+          const cands = (status === okStatus()) ? toCandidates(res) : [];
+          if (cands.length) { resolve(cands); return; }
+          service.textSearch(
+            { query: '停車場', location: loc, radius: PARKING_WALKABLE_RADIUS_METERS },
+            (res2, status2) => resolve(status2 === okStatus() ? toCandidates(res2) : [])
+          );
+        }
+      );
+    });
+  }
+
+  // 停車點 ↔ 景點 的步行路徑（無序快取，進/出共用），失敗回 null
+  function resolveWalkRoute(parking, attraction) {
+    if (!directionsService || !parking || !attraction) return Promise.resolve(null);
+    const a = _coordKey(parking), b = _coordKey(attraction);
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    if (_walkRouteCache.has(key)) return Promise.resolve(_walkRouteCache.get(key));
+    return new Promise((resolve) => {
+      directionsService.route({
+        origin: { lat: Number(parking.lat), lng: Number(parking.lng) },
+        destination: { lat: Number(attraction.lat), lng: Number(attraction.lng) },
+        travelMode: google.maps.TravelMode.WALKING
+      }, (response, status) => {
+        const ok = status === 'OK' || (google.maps.DirectionsStatus && status === google.maps.DirectionsStatus.OK);
+        const result = ok ? response : null;
+        _walkRouteCache.set(key, result);
+        resolve(result);
+      });
+    });
+  }
+
+  function _promiseWithTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((resolve) => setTimeout(() => resolve(null), ms))
+    ]);
+  }
+
+  // 對所有「開車類」路段的目的地景點平行解析停車點，回傳 { stopIndex: {lat,lng,name}|null }
+  async function resolveParkingForStages(locations, renderToken) {
+    const parkingByStopIndex = {};
+    const tasks = [];
+    for (let i = 0; i < locations.length - 1; i++) {
+      const stageMode = routeStageCache[i] ? normalizeTransitMode(routeStageCache[i].mode) : 'walk';
+      if (stageMode !== 'car' && stageMode !== 'scooter') continue;
+      const dest = locations[i + 1];
+      const di = dest.stopIndex;
+      if (Object.prototype.hasOwnProperty.call(parkingByStopIndex, di)) continue;
+      parkingByStopIndex[di] = null;
+      tasks.push(
+        _promiseWithTimeout(resolveParkingCoord({ lat: Number(dest.lat), lng: Number(dest.lng) }), 9000)
+          .then((p) => { if (renderToken === routeRenderToken) parkingByStopIndex[di] = p || null; })
+          .catch(() => {})
+      );
+    }
+    await Promise.all(tasks);
+    return parkingByStopIndex;
+  }
+
+  const WALK_LINE_COLOR = '#F97316';
+  let parkingInfoWindow = null;
+
+  // 階段聚焦時，該 overlay 是否該顯示（null=顯示全部）
+  function stageVisible(i) {
+    return activeRouteStage === null || activeRouteStage === i;
+  }
+
+  function clearStageWalkParkingOverlays() {
+    walkRenderers.forEach((arr) => (arr || []).forEach((o) => { if (o && o.setMap) o.setMap(null); }));
+    walkRenderers = [];
+    parkingMarkers.forEach((arr) => (arr || []).forEach((m) => { if (m && m.setMap) m.setMap(null); }));
+    parkingMarkers = [];
+    if (parkingInfoWindow) parkingInfoWindow.close();
+  }
+
+  function drawParkingMarker(stageIndex, parking, renderToken) {
+    if (renderToken !== routeRenderToken || !parking || !map) return;
+    const marker = new google.maps.Marker({
+      position: { lat: Number(parking.lat), lng: Number(parking.lng) },
+      map: stageVisible(stageIndex) ? map : null,
+      icon: createRouteMidLabelIcon('🅿️', parking.name || '停車場', '#1D4ED8'),
+      zIndex: 950,
+      title: parking.name || '停車場'
+    });
+    marker.addListener('click', () => {
+      if (!parkingInfoWindow) parkingInfoWindow = new google.maps.InfoWindow();
+      parkingInfoWindow.setContent(`<div style="font-size:13px;font-weight:700;color:#1D4ED8;">🅿️ ${parking.name || '停車場'}</div>`);
+      parkingInfoWindow.open(map, marker);
+    });
+    (parkingMarkers[stageIndex] = parkingMarkers[stageIndex] || []).push(marker);
+  }
+
+  // 畫一條停車點↔景點的綠色虛線步行線；回傳步行時間文字（取不到回 ''）
+  function drawWalkOverlay(stageIndex, parking, attraction, renderToken) {
+    const dash = { icon: { path: 'M 0,-1 0,1', strokeColor: WALK_LINE_COLOR, strokeOpacity: 1, strokeWeight: 6, scale: 3 }, offset: '0', repeat: '14px' };
+    return resolveWalkRoute(parking, attraction).then((result) => {
+      if (renderToken !== routeRenderToken || !map) return '';
+      const arr = (walkRenderers[stageIndex] = walkRenderers[stageIndex] || []);
+      const visMap = stageVisible(stageIndex) ? map : null;
+      if (result) {
+        const wr = new google.maps.DirectionsRenderer({
+          map: visMap,
+          suppressMarkers: true,
+          preserveViewport: true,
+          polylineOptions: { strokeColor: WALK_LINE_COLOR, strokeOpacity: 0, zIndex: 1100, icons: [dash] }
+        });
+        wr.setDirections(result);
+        arr.push(wr);
+        const leg = result.routes && result.routes[0] && result.routes[0].legs && result.routes[0].legs[0];
+        return (leg && leg.duration && leg.duration.text) || '';
+      }
+      const line = new google.maps.Polyline({
+        map: visMap,
+        path: [{ lat: Number(parking.lat), lng: Number(parking.lng) }, { lat: Number(attraction.lat), lng: Number(attraction.lng) }],
+        strokeColor: WALK_LINE_COLOR, strokeOpacity: 0, geodesic: true, zIndex: 1100, icons: [dash]
+      });
+      arr.push(line);
+      return '';
+    });
+  }
+
   function refreshRouteDirections() {
     if (!map || !directionsService) return;
     calculateAndDisplayRoute(buildRouteLocationsFromStops());
@@ -8268,6 +8589,14 @@
       if (label) {
         label.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null);
       }
+    });
+
+    // 步行線與 🅿️ 停車點：比照階段顯示/隱藏
+    walkRenderers.forEach((arr, idx) => {
+      (arr || []).forEach((o) => { if (o && o.setMap) o.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null); });
+    });
+    parkingMarkers.forEach((arr, idx) => {
+      (arr || []).forEach((m) => { if (m && m.setMap) m.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null); });
     });
 
     const panel = document.getElementById('directionsPanel');
@@ -8415,6 +8744,7 @@
       routeMidLabels = [];
       activeRouteStage = null;
       clearToiletMarkers();
+      clearStageWalkParkingOverlays();
       currentRouteBounds = null;
       currentRouteFocusBounds = null;
       const panel = document.getElementById('directionsPanel');
@@ -8449,6 +8779,7 @@
     routeMidLabels = [];
     activeRouteStage = null;
     clearToiletMarkers();
+    clearStageWalkParkingOverlays();
 
     const panel = document.getElementById('directionsPanel');
     if (panel) {
@@ -8464,12 +8795,21 @@
     map.fitBounds(routeBounds);
     renderMobileRouteSheet();
 
+    // 先解析各「開車類」目的地的停車點（TDX 優先 → Places 退回），再建線
+    resolveParkingForStages(locations, renderToken).then((parkingByStopIndex) => {
+    if (renderToken !== routeRenderToken) return;
     for (let i = 0; i < locations.length - 1; i++) {
       const origin = locations[i];
       const destination = locations[i + 1];
       const stageMode = routeStageCache[i] ? normalizeTransitMode(routeStageCache[i].mode) : 'walk';
       const stageMeta = getTransitModeMeta(stageMode);
-      const directionRequest = buildGoogleRouteRequest(stageMode, origin, destination);
+      // 停車樞紐：開車段連到停車點，第 0 段起點仍用景點本身、其後用上一段目的地的停車點
+      const isParkingMode = (stageMode === 'car' || stageMode === 'scooter');
+      const destParking = isParkingMode ? (parkingByStopIndex[destination.stopIndex] || null) : null;
+      const originParking = (isParkingMode && i >= 1) ? (parkingByStopIndex[origin.stopIndex] || null) : null;
+      const driveOrigin = originParking || origin;
+      const driveDest = destParking || destination;
+      const directionRequest = buildGoogleRouteRequest(stageMode, driveOrigin, driveDest);
 
       directionsService.route(
         directionRequest,
@@ -8583,6 +8923,7 @@
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
+                <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
               </div>
             `;
 
@@ -8598,6 +8939,23 @@
                 .forEach((node) => panel.appendChild(node));
             }
 
+            // 停車樞紐：畫 🅿️ 停車點 + 停車點↔景點綠色虛線步行線
+            if (destParking) {
+              drawParkingMarker(i, destParking, renderToken);
+              drawWalkOverlay(i, destParking, destination, renderToken).then((walkText) => {
+                if (renderToken !== routeRenderToken || !walkText) return;
+                const note = stageDiv.querySelector('.stage-walk-note');
+                if (note) {
+                  note.textContent = `🅿️ 停車後步行約 ${walkText} 到${destination.name || destination.title || '景點'}`;
+                  note.style.display = 'block';
+                }
+              });
+            }
+            if (originParking) {
+              drawParkingMarker(i, originParking, renderToken);
+              drawWalkOverlay(i, originParking, origin, renderToken);
+            }
+
             renderItineraryDisplay();
             renderMobileRouteSheet();
           } else {
@@ -8606,6 +8964,7 @@
         }
       );
     }
+    });
   }
 
   function highlightPin(pinId) {
