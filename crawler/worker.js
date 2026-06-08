@@ -28,7 +28,14 @@ const LOCAL_APP_CONFIG = loadLocalAppConfig();
 const DRY = !!(argv['dry-run'] || argv.dry);
 const IMPORT_MODE = !!(argv.import || argv.mode === 'import');
 const EXPORT_LOCAL_MODE = !!(argv['export-local'] || argv.export || argv.mode === 'export-local');
+const VERIFY_PLACES_MODE = !!(argv['verify-places'] || argv.mode === 'verify-places');
+const CRAWL_FOOD_MODE = !!(argv['crawl-food'] || argv.mode === 'crawl-food');
+const FORCE = !!argv.force;
+const VERIFY_NEAR_METERS = parseInt(process.env.VERIFY_NEAR_METERS || '5000', 10);
 const EXPORT_LOCAL_PATH = process.env.EXPORT_LOCAL_PATH || path.resolve(__dirname, '..', 'poi-data.js');
+const RESTAURANT_DATA_PATH = process.env.RESTAURANT_DATA_PATH || path.resolve(__dirname, '..', 'restaurant-data.js');
+const MIN_FOOD_POIS = parseInt(process.env.MIN_FOOD_POIS || '3', 10);
+const FOOD_PER_DEST = parseInt(process.env.FOOD_PER_DEST || '25', 10);
 const LIMIT = parseInt(argv.limit || process.env.CRAWL_LIMIT || '50', 10);
 const IMPORT_LIMIT = parseInt(argv.importLimit || process.env.IMPORT_LIMIT || '500', 10);
 const FETCH_LIMIT = parseInt(argv.fetchLimit || process.env.CRAWL_FETCH_LIMIT || String(LIMIT * 5), 10);
@@ -168,6 +175,40 @@ function normalizeText(value) {
     .toLowerCase()
     .replace(/\s+/g, '')
     .replace(/[()（）「」『』【】\[\],，.。·・-]/g, '');
+}
+
+// === Places 名稱嚴格比對（與前端 ai-travel-explore-final.js 同款，避免綁到同名異地）===
+const GENERIC_PLACE_SUFFIXES = [
+  '觀光漁港', '漁港', '港口', '碼頭', '港',
+  '火車站', '高鐵站', '捷運站', '轉運站', '客運站', '車站', '站',
+  '國家公園', '森林公園', '地質公園', '公園',
+  '國家風景區', '風景區', '遊客中心', '文化園區', '園區',
+  '部落', '老街', '夜市', '步道', '古道', '大橋', '吊橋', '橋',
+  '溫泉', '瀑布', '農場', '牧場', '林場',
+  '博物館', '美術館', '紀念館', '故事館', '展覽館',
+  '寺', '宮', '廟', '教堂', '神社'
+];
+function stripGenericPlaceSuffix(s) {
+  let t = String(s || '');
+  for (const suf of GENERIC_PLACE_SUFFIXES) {
+    if (t.length > suf.length && t.endsWith(suf)) return t.slice(0, -suf.length);
+  }
+  return t;
+}
+function placeNameMatchesQuery(displayName, queryName) {
+  if (!displayName || !queryName) return true;
+  const clean = (s) => String(s).replace(/[\s（）()[\]「」·\-_\/,.。，、！!？?～~]/g, '').toLowerCase();
+  const dn = clean(displayName);
+  const qn = clean(queryName);
+  if (!dn || !qn) return true;
+  if (dn.includes(qn) || qn.includes(dn)) return true;
+  const dCore = clean(stripGenericPlaceSuffix(displayName));
+  const qCore = clean(stripGenericPlaceSuffix(queryName));
+  if (dCore && qCore) {
+    if (dCore.includes(qCore) || qCore.includes(dCore)) return true;
+    if (dCore.length >= 2 && qCore.length >= 2 && dCore.slice(0, 2) === qCore.slice(0, 2)) return true;
+  }
+  return false;
 }
 
 function readNested(source, paths) {
@@ -566,6 +607,59 @@ function deriveDestKey(data) {
   return base.replace(/[縣市]$/u, '').trim() || base;
 }
 
+// 從描述文字解析「建議停留時間」（分鐘）。與前端 ai-travel-explore-final.js 的同名函式保持一致。
+function parseDurationFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const durations = [];
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*[個个]?小時/g)) {
+    const h = parseFloat(m[1]);
+    if (h >= 0.25 && h <= 8) durations.push(Math.round(h * 60));
+  }
+  for (const m of text.matchAll(/(\d+)\s*分[鐘钟]?/g)) {
+    const min = parseInt(m[1]);
+    if (min >= 10 && min <= 480) durations.push(min);
+  }
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)\b/gi)) {
+    const h = parseFloat(m[1]);
+    if (h >= 0.25 && h <= 8) durations.push(Math.round(h * 60));
+  }
+  for (const m of text.matchAll(/(\d+)\s*min(?:utes?)?\b/gi)) {
+    const min = parseInt(m[1]);
+    if (min >= 10 && min <= 480) durations.push(min);
+  }
+  if (!durations.length) return null;
+  durations.sort((a, b) => a - b);
+  return durations[Math.floor(durations.length / 2)];
+}
+
+// 依景點類型估「建議停留時間」（分鐘）。關鍵字比對 name+desc，回傳穩定預設值（語感對齊前端 prompt 的示例）。
+const DURATION_KEYWORD_TABLE = [
+  { min: 90, kw: ['溫泉', '泡湯'] },
+  { min: 75, kw: ['樂園', '遊樂', '農場', '牧場'] },
+  { min: 65, kw: ['博物館', '美術館', '文物館', '故事館', '展覽', '園區'] },
+  { min: 55, kw: ['步道', '登山', '健行', '森林', '瀑布'] },
+  { min: 50, kw: ['老街', '商圈', '夜市'] },
+  { min: 45, kw: ['市場', '漁港', '碼頭'] },
+  { min: 40, kw: ['公園', '廣場', '部落', '社區'] },
+  { min: 35, kw: ['海灘', '沙灘', '海濱', '海岸', '潭', '湖'] },
+  { min: 30, kw: ['觀景', '景觀台', '眺望', '燈塔', '橋'] },
+  { min: 25, kw: ['廟', '寺', '宮', '教堂', '神社'] }
+];
+const DURATION_DEFAULT_MINUTES = 60;
+
+// 用免費來源推估 duration：既有值 → 描述解析 → 關鍵字分類 → 全域預設。完全不打 Places API。
+function estimateDuration(data) {
+  const explicit = Number(data && data.duration);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.round(explicit);
+  const fromText = parseDurationFromText(data && (data.desc || data.description));
+  if (fromText) return fromText;
+  const hay = `${(data && data.name) || ''} ${(data && (data.desc || data.description)) || ''}`;
+  for (const row of DURATION_KEYWORD_TABLE) {
+    if (row.kw.some((k) => hay.includes(k))) return row.min;
+  }
+  return DURATION_DEFAULT_MINUTES;
+}
+
 // 把一筆 scenic_points 文件映射成前端要的精簡 POI（只保留變動不大的穩定欄位）
 function toLocalPoi(data) {
   const coord = data.scenicCoordinates || {};
@@ -578,13 +672,130 @@ function toLocalPoi(data) {
     lng,
     desc: data.desc || data.description || '',
     address: data.formatted_address || data.address || '',
-    businessHours: data.openTime || data.businessHours || ''
+    businessHours: data.placeOpeningHours || data.openTime || data.businessHours || ''
   };
-  if (Number.isFinite(Number(data.duration)) && Number(data.duration) > 0) poi.duration = Number(data.duration);
+  if (Number.isFinite(Number(data.placesRating)) && Number(data.placesRating) > 0) poi.rating = Number(data.placesRating);
+  if (data.placeVerified === true) poi.placeVerified = true; // 供前端 verify 短路：命中即可跳過 Places 呼叫
+  poi.duration = estimateDuration(data);
   if (Array.isArray(data.nearbyToiletLocations) && data.nearbyToiletLocations.length) {
     poi.nearbyToiletLocations = data.nearbyToiletLocations;
   }
   return poi;
+}
+
+// 對單一景點用 Places (New) searchText 嚴格比對名稱，回傳校正資料或 null。
+// FieldMask 只取座標/營業時間/評分/id/狀態（Enterprise 等級，不含 reviews 的 Atmosphere 高價 SKU），且名稱不更動。
+async function fetchPlaceVerification(name, region, center) {
+  if (!GOOGLE_KEY || !name) return null;
+  const body = {
+    textQuery: `${name} ${region || ''}`.trim(),
+    languageCode: 'zh-TW',
+    maxResultCount: 5
+  };
+  const hasCenter = center && Number.isFinite(center.lat) && Number.isFinite(center.lng);
+  if (hasCenter) {
+    body.locationBias = { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 30000 } };
+  }
+  try {
+    const r = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      body,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': GOOGLE_KEY,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours,places.rating,places.id,places.businessStatus'
+        },
+        timeout: 15000
+      }
+    );
+    const places = Array.isArray(r.data && r.data.places) ? r.data.places : [];
+    for (const p of places) {
+      if (!p.location) continue;
+      const dn = p.displayName && p.displayName.text;
+      // 嚴格名稱比對 → 擋掉只共用通用後綴的別處地點
+      if (!placeNameMatchesQuery(dn, name)) continue;
+      const pos = { lat: p.location.latitude, lng: p.location.longitude };
+      // 有 OpenData 座標時，要求 Places 結果落在附近（VERIFY_NEAR_METERS）→ 擋掉同名異地（如本島也有「南寮漁港」）
+      if (hasCenter && measureDistanceMeters(center, pos) > VERIFY_NEAR_METERS) continue;
+      const hours = (p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
+        ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '';
+      return {
+        lat: pos.lat,
+        lng: pos.lng,
+        businessHours: hours,
+        rating: (typeof p.rating === 'number') ? p.rating : null,
+        placeId: p.id || null,
+        businessStatus: p.businessStatus || null,
+        matchedName: dn || null
+      };
+    }
+    return null;
+  } catch (e) {
+    if (e.response && e.response.status === 403) {
+      console.warn('Places API 403：請至 GCP Console 啟用「Places API (New)」。');
+    } else {
+      console.warn(`Places verify error (${name}):`, e.message);
+    }
+    return null;
+  }
+}
+
+// 一次性：用 Places 校正 scenic_points 的座標/營業時間/評分（名稱保留 OpenData 原值），寫回 Firestore。
+// 之後重跑 export:local 即可讓 poi-data.js 達 Places 等級，執行階段仍 0 Places 費用。
+async function verifyPlaces(db) {
+  if (!GOOGLE_KEY) { console.error('需要 GOOGLE_MAPS_API_KEY 才能用 Places 校正。'); return; }
+  console.log(`Verify-places mode: reading collection ${POI_COLLECTION}（force=${FORCE}, near=${VERIFY_NEAR_METERS}m）`);
+  const snap = await db.collection(POI_COLLECTION).get();
+  if (snap.empty) { console.log(`No documents in ${POI_COLLECTION}.`); return; }
+  let scanned = 0, verified = 0, unmatched = 0, skipped = 0, closed = 0;
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
+    if (!FORCE && data.placeVerified === true) { skipped += 1; continue; }
+    if (argv.limit !== undefined && scanned >= LIMIT) break; // --limit N 時只處理前 N 筆（省 Places 額度，便於試跑）
+    scanned += 1;
+    const coord = data.scenicCoordinates || {};
+    const center = {
+      lat: toNumber(coord.lat != null ? coord.lat : data.lat),
+      lng: toNumber(coord.lng != null ? coord.lng : data.lng)
+    };
+    const region = String(data.county || data.city || data.region || CRAWL_REGION || '').replace(/臺/g, '台').trim();
+    const res = await fetchPlaceVerification(data.name, region, center);
+    await new Promise((r) => setTimeout(r, 250)); // 避免觸發速率限制
+    if (!res) {
+      unmatched += 1;
+      console.log(`✗ 無嚴格配對，保留 OpenData：${data.name}`);
+      if (!DRY) await doc.ref.set({ placeVerified: false, placeVerifiedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      continue;
+    }
+    const isClosed = res.businessStatus === 'CLOSED_PERMANENTLY';
+    if (isClosed) closed += 1;
+    verified += 1;
+    const moved = (Number.isFinite(center.lat) && Number.isFinite(center.lng))
+      ? Math.round(measureDistanceMeters(center, { lat: res.lat, lng: res.lng })) : null;
+    console.log(`✓ ${data.name}｜座標位移 ${moved != null ? moved + 'm' : 'n/a'}｜評分 ${res.rating != null ? res.rating : '—'}${isClosed ? '｜⚠ 已永久歇業' : ''}`);
+    if (DRY) continue;
+    const update = {
+      scenicCoordinates: { lat: res.lat, lng: res.lng },
+      lat: res.lat,
+      lng: res.lng,
+      coordinateSource: 'google_places',
+      placeVerified: true,
+      placeVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+      place_id: res.placeId,
+      placesRating: res.rating,
+      placeBusinessStatus: res.businessStatus,
+      placePermanentlyClosed: isClosed
+    };
+    if (res.businessHours) update.placeOpeningHours = res.businessHours;
+    // 首次校正時保留原始 OpenData 座標供追溯
+    if (data.opendataCoordinates === undefined && Number.isFinite(center.lat) && Number.isFinite(center.lng)) {
+      update.opendataCoordinates = { lat: center.lat, lng: center.lng };
+    }
+    await doc.ref.set(update, { merge: true });
+  }
+  console.log('Verify-places summary', { region: CRAWL_REGION, scanned, verified, unmatched, closed, skipped, dryRun: DRY });
 }
 
 async function exportLocal(db) {
@@ -600,6 +811,7 @@ async function exportLocal(db) {
   for (const doc of snap.docs) {
     const data = doc.data();
     if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
+    if (data.placePermanentlyClosed === true) continue; // 跳過 Places 標記已永久歇業者
     const poi = toLocalPoi(data);
     if (!poi) continue;
     const destKey = deriveDestKey(data);
@@ -628,9 +840,124 @@ async function exportLocal(db) {
   console.log('Export-local wrote', EXPORT_LOCAL_PATH);
 }
 
+// 對單一目的地（以形心 center 為中心）用 Places searchText 抓餐廳候選。
+// 名稱/座標/時間/評分皆 Places 來源；不含 reviews 高價 SKU。
+async function fetchRestaurantsNear(region, center) {
+  if (!GOOGLE_KEY) return [];
+  const terms = ['餐廳', '美食', '小吃'];
+  const seen = new Set();
+  const out = [];
+  for (const term of terms) {
+    const body = {
+      textQuery: `${region || ''} ${term}`.trim(),
+      languageCode: 'zh-TW',
+      maxResultCount: 10
+    };
+    if (center && Number.isFinite(center.lat) && Number.isFinite(center.lng)) {
+      body.locationBias = { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 20000 } };
+    }
+    try {
+      const r = await axios.post(
+        'https://places.googleapis.com/v1/places:searchText',
+        body,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': GOOGLE_KEY,
+            'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours,places.rating,places.formattedAddress,places.id,places.businessStatus'
+          },
+          timeout: 15000
+        }
+      );
+      const places = Array.isArray(r.data && r.data.places) ? r.data.places : [];
+      for (const p of places) {
+        if (!p.location) continue;
+        if (p.businessStatus === 'CLOSED_PERMANENTLY') continue;
+        const name = (p.displayName && p.displayName.text) || '';
+        if (!name) continue;
+        const dedupe = normalizeText(name);
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        const hours = (p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
+          ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '';
+        const poi = {
+          name,
+          lat: p.location.latitude,
+          lng: p.location.longitude,
+          businessHours: hours,
+          address: p.formattedAddress || ''
+        };
+        if (typeof p.rating === 'number') poi.rating = p.rating;
+        out.push(poi);
+        if (out.length >= FOOD_PER_DEST) break;
+      }
+    } catch (e) {
+      if (e.response && e.response.status === 403) {
+        console.warn('Places API 403：請至 GCP Console 啟用「Places API (New)」。');
+      } else {
+        console.warn(`Restaurant fetch error (${region}/${term}):`, e.message);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 250)); // 限速
+    if (out.length >= FOOD_PER_DEST) break;
+  }
+  return out;
+}
+
+// 產生獨立的餐廳快取 restaurant-data.js：依 scenic_points 分桶算形心，逐桶抓餐廳。
+async function crawlFood(db) {
+  if (!GOOGLE_KEY) { console.error('需要 GOOGLE_MAPS_API_KEY 才能爬餐廳。'); return; }
+  console.log('Crawl-food mode: reading collection', POI_COLLECTION);
+  const snap = await db.collection(POI_COLLECTION).get();
+  if (snap.empty) { console.log(`No documents in ${POI_COLLECTION}; nothing to crawl.`); return; }
+
+  // 依 deriveDestKey 分桶，累積座標以算形心
+  const agg = {};
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
+    const coord = data.scenicCoordinates || {};
+    const lat = toNumber(coord.lat != null ? coord.lat : data.lat);
+    const lng = toNumber(coord.lng != null ? coord.lng : data.lng);
+    if (lat === null || lng === null) continue;
+    const key = deriveDestKey(data);
+    if (!key) continue;
+    if (!agg[key]) agg[key] = { sumLat: 0, sumLng: 0, count: 0 };
+    agg[key].sumLat += lat; agg[key].sumLng += lng; agg[key].count += 1;
+  }
+
+  const targets = Object.keys(agg).filter((k) => agg[k].count >= MIN_FOOD_POIS);
+  console.log(`Crawl-food targets（POI ≥ ${MIN_FOOD_POIS}）：${targets.map((k) => `${k}(${agg[k].count})`).join(', ') || '(none)'}`);
+
+  const buckets = {};
+  for (const key of targets) {
+    const center = { lat: agg[key].sumLat / agg[key].count, lng: agg[key].sumLng / agg[key].count };
+    const restaurants = await fetchRestaurantsNear(key, center);
+    buckets[key] = restaurants;
+    console.log(`🍽 ${key}：${restaurants.length} 間餐廳`);
+  }
+
+  const total = Object.keys(buckets).reduce((n, k) => n + buckets[k].length, 0);
+  const payload = Object.assign({ __generatedAt: new Date().toISOString() }, buckets);
+  const fileBody = `// Auto-generated by crawler (npm run crawl:food). Do not edit by hand.\n`
+    + `window.WAI_RESTAURANT_DATA = ${JSON.stringify(payload, null, 2)};\n`;
+
+  if (DRY) {
+    console.log(`DRY crawl-food; would write ${RESTAURANT_DATA_PATH}（${total} 間）`);
+    console.log(fileBody.slice(0, 800) + (fileBody.length > 800 ? '\n... (truncated)' : ''));
+    return;
+  }
+  fs.writeFileSync(RESTAURANT_DATA_PATH, fileBody, 'utf8');
+  console.log(`Crawl-food wrote ${RESTAURANT_DATA_PATH}（${total} 間餐廳，跨 ${targets.length} 個目的地）`);
+}
+
 async function main() {
   const db = initFirebase();
-  if (EXPORT_LOCAL_MODE) {
+  if (CRAWL_FOOD_MODE) {
+    await crawlFood(db);
+  } else if (VERIFY_PLACES_MODE) {
+    await verifyPlaces(db);
+  } else if (EXPORT_LOCAL_MODE) {
     await exportLocal(db);
   } else if (IMPORT_MODE) {
     await processImport(db);

@@ -1,0 +1,11 @@
+[週一 2026/06/08 16:48:57.26] crawl:food start
+Google Maps key loaded from: weather.env.js GOOGLE_MAPS_API_KEY (AIzaSyDJ...)
+Crawl-food mode: reading collection scenic_points
+Crawl-food targets（POI ≥ 3）：台東(212), 綠島(59), 蘭嶼(23), 海濱公園(9), 三仙台(5)
+🍽 台東：21 間餐廳
+🍽 綠島：17 間餐廳
+🍽 蘭嶼：17 間餐廳
+🍽 海濱公園：12 間餐廳
+🍽 三仙台：16 間餐廳
+Crawl-food wrote C:\Users\USER\Desktop\UIUX\restaurant-data.js（83 間餐廳，跨 5 個目的地）
+[週一 2026/06/08 16:49:05.60] crawl:food done (exit 0)

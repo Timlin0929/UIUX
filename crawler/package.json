@@ -9,7 +9,11 @@
     "import": "node worker.js --import",
     "import:dry": "node worker.js --import --dry-run",
     "export:local": "node worker.js --export-local",
-    "export:local:dry": "node worker.js --export-local --dry-run"
+    "export:local:dry": "node worker.js --export-local --dry-run",
+    "verify:places": "node worker.js --verify-places",
+    "verify:places:dry": "node worker.js --verify-places --dry-run",
+    "crawl:food": "node worker.js --crawl-food",
+    "crawl:food:dry": "node worker.js --crawl-food --dry-run"
   },
   "author": "",
   "license": "MIT",

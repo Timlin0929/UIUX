@@ -162,6 +162,76 @@ npm run export:local
 - 預設輸出到專案根目錄的 `poi-data.js`；可用 `$env:EXPORT_LOCAL_PATH` 覆寫路徑。
 - 前端兩頁（explore、planner-v8）以 `<script src="poi-data.js">` 載入；檔案為空 `{}` 時自動回退 Firebase / live Maps。
 
+## 用 Places 校正景點座標／時間／評分（verify:places）
+
+OpenData 的座標/營業時間較粗略。這個模式用 Google Places 對每個 `scenic_points` **嚴格比對名稱**，把更精準的**座標、營業時間、評分、place_id** 寫回 Firestore（**保留 OpenData 原名稱**），並把永久歇業者標記起來。校正一次後重跑 `export:local`，`poi-data.js` 即達 Places 等級，而**前端執行階段仍 0 Places 費用**。
+
+先試跑前 5 筆（省額度）：
+
+```powershell
+npm run verify:places:dry -- --limit 5
+```
+
+正式校正（寫回 Firestore）：
+
+```powershell
+npm run verify:places
+```
+
+說明：
+
+- 預設**跳過已驗證**的文件；要全部重新校正加 `-- --force`。
+- 只接受「名稱嚴格比對且落在 OpenData 座標 `VERIFY_NEAR_METERS`(預設 5000m) 內」者，擋掉同名異地；比不到就保留 OpenData。
+- 成本：約 1 次 searchText／景點（一次性 Enterprise SKU，**不含** reviews 高價 SKU）。
+- 校正後記得 `npm run export:local` 才會反映到 `poi-data.js`。
+
+## 餐廳快取（crawl:food → restaurant-data.js）
+
+餐廳變動快、且不在 `poi-data.js` 裡。這個模式依景點形心，用 Places 抓每個目的地的餐廳候選，寫成獨立檔 `..\restaurant-data.js`（`window.WAI_RESTAURANT_DATA`）。前端 `fetchGoogleMapsFoodList` **本地優先**：有快取就用、跳過 Places；命中的餐廳站連執行階段驗證也一併跳過。
+
+先預覽：
+
+```powershell
+npm run crawl:food:dry
+```
+
+正式產檔：
+
+```powershell
+npm run crawl:food
+```
+
+說明：
+
+- 只對景點數 ≥ `MIN_FOOD_POIS`(預設 3) 的目的地產生；每目的地收 `FOOD_PER_DEST`(預設 25) 間。
+- 欄位：`name / lat / lng / businessHours / address / rating`，與前端即時抓的格式一致。
+- 成本：約 3 個目的地 × 3 詞 ≈ 9 次 searchText（~US$0.3）。
+- 由 `..\ai-travel-explore-final.html` 以 `<script src="restaurant-data.js">` 載入；檔案不存在時前端自動回退即時抓。
+
+## 每兩週自動爬餐廳（Windows 工作排程）
+
+由 [`run-food-crawl.bat`](run-food-crawl.bat) + 工作排程執行，工作名稱 **`WanderAI Food Crawl`**，每 2 週週日 03:00，輸出寫到 `crawler/crawl-food.log`。
+
+| 操作 | 指令 |
+|---|---|
+| 查看狀態/下次執行 | `schtasks /query /tn "WanderAI Food Crawl" /v /fo LIST` |
+| 立即手動跑一次 | `schtasks /run /tn "WanderAI Food Crawl"` |
+| 改時間（例 04:00） | `schtasks /change /tn "WanderAI Food Crawl" /st 04:00` |
+| 停用 / 啟用 | `schtasks /change /tn "WanderAI Food Crawl" /disable`（`/enable`） |
+| 刪除 | `schtasks /delete /tn "WanderAI Food Crawl" /f` |
+| 重新建立 | `schtasks /create /tn "WanderAI Food Crawl" /tr "C:\Users\USER\Desktop\UIUX\crawler\run-food-crawl.bat" /sc WEEKLY /mo 2 /d SUN /st 03:00 /f` |
+
+注意：目前為 **Interactive only**（使用者登入時才會跑），不需密碼；需機器開機。服務帳號路徑寫死在 `.bat` 內，搬移專案請同步修改。若要「未登入也跑」，重建時加 `/ru <帳號> /rp <密碼>`。
+
+## 各資料檔與刷新流程
+
+| 檔案 | 全域變數 | 由誰產生 | 何時刷新 |
+|---|---|---|---|
+| `..\poi-data.js` | `window.WAI_POI_DATA` | `export:local`（資料來自 `verify:places`） | 景點/校正有變時：`verify:places -- --force` → `export:local` |
+| `..\restaurant-data.js` | `window.WAI_RESTAURANT_DATA` | `crawl:food` | 每兩週自動；要立即更新就手動 `crawl:food` |
+
+兩份皆為自動產生檔，請勿手動編輯。
+
 ## 可選設定
 
 通常不用改，但需要時可以在 PowerShell 設定：
@@ -181,6 +251,10 @@ $env:IMPORT_LIMIT="500"
 - `CRAWL_LIMIT`：補齊既有文件時最多處理幾筆
 - `CRAWL_FETCH_LIMIT`：補齊模式最多先讀取幾筆候選文件
 - `IMPORT_LIMIT`：匯入模式最多匯入幾筆，預設 `500`
+- `VERIFY_NEAR_METERS`：verify:places 接受 Places 結果與 OpenData 座標的最大距離，預設 `5000`
+- `MIN_FOOD_POIS`：crawl:food 目的地最少景點數門檻，預設 `3`
+- `FOOD_PER_DEST`：crawl:food 每目的地最多收幾間餐廳，預設 `25`
+- `RESTAURANT_DATA_PATH` / `EXPORT_LOCAL_PATH`：覆寫輸出檔路徑
 
 ## 常用流程
 

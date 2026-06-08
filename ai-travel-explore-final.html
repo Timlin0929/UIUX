@@ -12,6 +12,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="weather.env.js"></script>
 <script src="poi-data.js"></script>
+<script src="restaurant-data.js"></script>
 <script src="ferry-config.js"></script>
 <script src="cost-config.js"></script>
 <script src="wheel-picker.js"></script>
@@ -83,29 +84,22 @@
     <div class="lm-title">設定個人喜好 ✨</div>
     <div class="lm-sub">讓我們更了解你，未來建立行程時會優先套用這些設定。</div>
     <div class="wizard-field" style="margin-top:20px;text-align:left">
-      <label>最喜歡的旅遊主題</label>
-      <div class="wizard-choice-grid" id="prefThemeGrid" style="grid-template-columns:repeat(3,1fr)">
-        <button class="wizard-tag active" type="button" onclick="setPrefTheme('經典旅人')" style="background:#dff1ff;border-color:#7db8ee">🗺 經典旅人</button>
-        <button class="wizard-tag" type="button" onclick="setPrefTheme('在地文化')">⛩ 在地文化</button>
-        <button class="wizard-tag" type="button" onclick="setPrefTheme('自然探索')">🌿 自然探索</button>
-      </div>
-    </div>
-    <div class="wizard-field" style="text-align:left">
-      <label>主要興趣（可多選）</label>
+      <label>旅遊興趣方向（可多選）</label>
       <div class="wizard-chips" id="prefInterestsGrid">
-        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'美食')">🍱 美食</button>
-        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'購物')">🛍 購物</button>
-        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'攝影')">📸 攝影</button>
-        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'咖啡')">☕ 咖啡</button>
-        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'戶外')">🏔 戶外</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'美食')">🍜 美食</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'文化')">🏛️ 文化</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'自然')">🌿 自然</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'打卡')">📸 打卡</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'運動')">🏃 運動</button>
+        <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'放鬆')">😌 放鬆</button>
       </div>
     </div>
     <div class="wizard-field" style="text-align:left">
       <label>偏好的行程節奏</label>
       <div class="wizard-chips" id="prefPaceGrid">
-        <button class="wizard-tag" type="button" onclick="setPrefPace('放鬆')">🐢 放鬆</button>
+        <button class="wizard-tag" type="button" onclick="setPrefPace('輕快')">🏃 輕快</button>
         <button class="wizard-tag active" type="button" onclick="setPrefPace('平衡')">🚶 平衡</button>
-        <button class="wizard-tag" type="button" onclick="setPrefPace('緊湊')">🏃 緊湊</button>
+        <button class="wizard-tag" type="button" onclick="setPrefPace('悠閒')">🐢 悠閒</button>
       </div>
     </div>
     <button class="lm-submit" onclick="saveUserPreferences()" style="margin-top:24px">完成設定</button>

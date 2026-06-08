@@ -247,8 +247,7 @@ function getWizardDestination(wizardData) {
 
 // 從本地靜態檔 window.WAI_POI_DATA（由爬蟲 npm run export:local 產生）取某目的地的景點清單。
 // dest 正規化：精確鍵 → 去掉「縣/市」後綴 → 與既有鍵互相包含比對。無資料回 []。
-function getLocalPoiList(destination) {
-  const data = (typeof window !== 'undefined' && window.WAI_POI_DATA) || null;
+function getLocalPoiList(destination, data = (typeof window !== 'undefined' && window.WAI_POI_DATA) || null) {
   // 正規化：臺→台（OpenData 用「臺東」、前端用「台東」，否則比對不到）；去頭尾空白
   const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
   const dest = norm(destination);
@@ -272,6 +271,11 @@ function getLocalPoiList(destination) {
     }
   }
   return out;
+}
+
+// 從獨立的餐廳快取 window.WAI_RESTAURANT_DATA 取某目的地的餐廳清單（重用景點桶比對邏輯）。
+function getLocalFoodList(destination) {
+  return getLocalPoiList(destination, (typeof window !== 'undefined' && window.WAI_RESTAURANT_DATA) || null);
 }
 
 // 用本地景點清單組「【已驗證景點快取】」hint（格式與 buildFirebasePoiHintBlock 一致），交給 AI 只做排序。
@@ -1967,8 +1971,10 @@ function buildLiveMapsPoiHintBlock(places) {
   return `【Google Maps 景點清單】以下景點已直接從 Google Maps 取得，座標均已驗證。你的任務是從此清單中挑選景點並排成行程，禁止自行創造或加入清單以外的景點，景點名稱必須與清單完全一致：\n\n${lines.join('\n\n')}`;
 }
 
-// 餐廳每次生成都即時抓最新（本地 poi-data.js 不含餐廳，僅出現在景點描述文字中）
+// 餐廳本地優先：有 restaurant-data.js 快取就直接用（省 Places），否則即時抓最新。
 async function fetchGoogleMapsFoodList(destination, destCenter = null) {
+  const cached = getLocalFoodList(destination);
+  if (cached.length) return cached;
   return fetchGoogleMapsPoiList(destination, [], destCenter, ['餐廳', '美食', '小吃']);
 }
 
@@ -2103,10 +2109,43 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
   const key = window.TRAVEL_APP_CONFIG?.GOOGLE_MAPS_API_KEY;
   if (!key || !destination || !Array.isArray(stops)) return stops;
 
+  // 先吃本地「已驗證」景點：名稱命中就用本地座標/營業時間，跳過 Places 呼叫
+  // （poi-data.js 的這些景點已由 crawler 的 verify:places 校正成 Places 等級）。
+  const _cleanName = (s) => String(s || '').replace(/[\s（）()[\]「」·\-_\/,.。，、！!？?～~]/g, '').replace(/臺/g, '台').toLowerCase();
+  const _localVerifiedByName = new Map();
+  for (const p of getLocalPoiList(destination)) {
+    if (p && p.placeVerified && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))) {
+      _localVerifiedByName.set(_cleanName(p.name), p);
+    }
+  }
+  // 快取餐廳皆 Places 來源，視為已驗證 → 選中的餐廳站也跳過 Places
+  for (const p of getLocalFoodList(destination)) {
+    if (p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))) {
+      _localVerifiedByName.set(_cleanName(p.name), p);
+    }
+  }
+
   const results = await Promise.all(stops.map(async (stop) => {
     if (stop.type === 'start' || stop.type === 'end') return stop;
     const name = stop.name || stop.title;
     if (!name) return null;
+
+    // 命中本地已驗證景點 → 直接採用本地座標/時間，省一次 Places searchText
+    const _localHit = _localVerifiedByName.get(_cleanName(name));
+    if (_localHit) {
+      stop.lat = Number(_localHit.lat);
+      stop.lng = Number(_localHit.lng);
+      stop.coordinateSource = 'local_verified';
+      if (_localHit.businessHours) {
+        stop.businessHours = _localHit.businessHours;
+        if (wizardData.departureDate) {
+          const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+          if (dayWindow && dayWindow.closed) return null;
+        }
+      }
+      stop.placeVerified = true;
+      return stop;
+    }
 
     try {
       const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
@@ -2909,11 +2948,14 @@ function switchAuthTab(tab) {
   document.getElementById('registerForm').style.display = tab==='register' ? '' : 'none';
 }
 
+function isValidEmail(s){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s); }
+
 async function doLogin() {
   if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
   const email = document.getElementById('loginEmail').value.trim();
   const pwd = document.getElementById('loginPwd').value;
   if (!email || !pwd) { showToast('請填寫帳號和密碼', 'orange'); return; }
+  if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
   try {
     const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
     showToast(`👋 歡迎回來！`, 'green');
@@ -2929,6 +2971,8 @@ async function doRegister() {
   const email = document.getElementById('regEmail').value.trim();
   const pwd = document.getElementById('regPwd').value;
   if (!name || !email || !pwd) { showToast('請填寫所有欄位', 'orange'); return; }
+  if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
+  if (pwd.length < 8) { showToast('密碼至少需要 8 個字元', 'orange'); return; }
   try {
     const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
     const user = userCredential.user;
@@ -2938,7 +2982,7 @@ async function doRegister() {
         email: email,
         name: name,
         emoji: '🌟',
-        preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+        preferences: { interests: [], pace: '平衡' },
         visitedSpots: [],
         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -2972,7 +3016,7 @@ async function doSocialLogin(providerName) {
           email: user.email || '',
           name: user.displayName || '社群用戶',
           emoji: providerName === 'Google' ? '🌐' : '📘',
-          preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+          preferences: { interests: [], pace: '平衡' },
           visitedSpots: [],
           createdAt: firebase.firestore.FieldValue.serverTimestamp(),
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -2994,22 +3038,13 @@ function doLogout() {
 }
 
 // === Preferences Wizard ===
-let tempPrefs = { theme: '經典旅人', interests: [], pace: '平衡' };
+let tempPrefs = { interests: [], pace: '平衡' };
 function openPrefWizard() {
-  tempPrefs = { theme: '經典旅人', interests: [], pace: '平衡' };
+  tempPrefs = { interests: [], pace: '平衡' };
   renderPrefWizard();
   document.getElementById('prefWizardOverlay').classList.add('open');
 }
 function closePrefWizard() { document.getElementById('prefWizardOverlay').classList.remove('open'); }
-function setPrefTheme(theme) {
-  tempPrefs.theme = theme;
-  document.querySelectorAll('#prefThemeGrid .wizard-tag').forEach(btn => {
-    const isAct = btn.textContent.includes(theme);
-    btn.classList.toggle('active', isAct);
-    btn.style.background = isAct ? '#dff1ff' : '';
-    btn.style.borderColor = isAct ? '#7db8ee' : '';
-  });
-}
 function togglePrefInterest(btn, int) {
   const idx = tempPrefs.interests.indexOf(int);
   if (idx > -1) {
@@ -3028,7 +3063,6 @@ function setPrefPace(pace) {
   });
 }
 function renderPrefWizard() {
-  setPrefTheme(tempPrefs.theme);
   setPrefPace(tempPrefs.pace);
   document.querySelectorAll('#prefInterestsGrid .wizard-tag').forEach(btn => {
     const int = btn.textContent.replace(/[^\u4e00-\u9fa5]/g, '').trim();
@@ -3063,7 +3097,7 @@ if (typeof firebase !== 'undefined') {
         name: user.displayName || user.email?.split('@')[0] || '使用者',
         email: user.email,
         emoji: '😊',
-        preferences: { theme: '經典旅人', interests: [], pace: '平衡' },
+        preferences: { interests: [], pace: '平衡' },
         visitedSpots: []
       };
       if (firebaseDb) {
@@ -3364,7 +3398,7 @@ function selectTripMode(mode) {
   wizStep = 0;
   wizData = { days: '8小時', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
   if (currentUser && currentUser.preferences) {
-    if (currentUser.preferences.theme) wizData.theme = currentUser.preferences.theme;
+    // 「旅程風格」persona 改為每趟行程現場選，不再從偏好帶入
     if (currentUser.preferences.interests) wizData.interests = [...currentUser.preferences.interests];
     if (currentUser.preferences.pace) wizData.pace = currentUser.preferences.pace;
   }
