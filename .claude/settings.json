@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/check-edited-js.js",
+            "timeout": 30,
+            "statusMessage": "語法檢查中 (node --check)…"
+          }
+        ]
+      }
+    ]
+  }
+}
