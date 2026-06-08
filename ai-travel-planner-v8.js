@@ -7971,18 +7971,29 @@
 
   // 大景點區塊路徑：成員子景點的凸包（外擴 120m）；成員不足則用方形區塊
   function buildMergedAreaPath(stop, center) {
-    const members = (Array.isArray(stop.mergedMemberCoords) ? stop.mergedMemberCoords : [])
+    const raw = (Array.isArray(stop.mergedMemberCoords) ? stop.mergedMemberCoords : [])
       .map(c => ({ lat: Number(c.lat), lng: Number(c.lng) }))
       .filter(c => Number.isFinite(c.lat) && Number.isFinite(c.lng));
-    const hull = convexHullLatLng(members);
+    // 以 center（marker 代表座標）為基準丟離群點：離島常有子景點被 geocode 到海上/過遠，
+    // 會把凸包拉成指向海面的尖刺。用「中位數×3」門檻（尊重叢集尺度）剔除離群，再保證含 center。
+    let members = raw;
+    if (raw.length >= 2) {
+      const dists = raw.map(c => measureDistanceMeters(center, c));
+      const sorted = [...dists].sort((a, b) => a - b);
+      const med = sorted[Math.floor(sorted.length / 2)] || 0;
+      const thr = Math.min(1200, Math.max(350, med * 3));
+      members = raw.filter((c, i) => dists[i] <= thr);
+    }
+    const hullInput = members.concat([{ lat: center.lat, lng: center.lng }]);
+    const hull = convexHullLatLng(hullInput);
     if (hull.length >= 3) {
       const ref = {
-        lat: members.reduce((s, c) => s + c.lat, 0) / members.length,
-        lng: members.reduce((s, c) => s + c.lng, 0) / members.length
+        lat: hullInput.reduce((s, c) => s + c.lat, 0) / hullInput.length,
+        lng: hullInput.reduce((s, c) => s + c.lng, 0) / hullInput.length
       };
       return padPolygonOutward(hull, ref, 120);
     }
-    const half = Math.min(2500, Math.max(180, Number(stop.mergedRadiusMeters) || 0));
+    const half = Math.min(900, Math.max(180, Number(stop.mergedRadiusMeters) || 0));
     return boxAroundLatLng(center, half);
   }
 
@@ -8004,13 +8015,22 @@
       .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   }
 
-  // 從 Overpass 結果挑出「名稱相符、質心離中心最近」的面狀邊界環
-  function pickOsmBoundary(data, name, center) {
+  // 從 Overpass 結果挑出「名稱相符、面合理、質心離中心最近」的面狀邊界環
+  // 加上標籤黑名單與面積/距離上限：擋掉海灣/水體/海岸線/行政邊界等大型面（覆蓋海面→畸形）
+  const _OSM_BAD_NATURAL = /^(water|bay|strait|coastline|wetland|reef|shoal|cape|peninsula)$/i;
+  function pickOsmBoundary(data, name, center, radiusMeters) {
     const els = data && Array.isArray(data.elements) ? data.elements : [];
+    const R = Number(radiusMeters) || 0;
+    const MAX_CENTROID_DIST = Math.min(2000, Math.max(600, R * 1.5)); // 質心離 center 太遠 → 拒
+    const MAX_RING_RADIUS = Math.min(2500, Math.max(700, R * 2.5));   // 環太大（海灣/島嶼/行政區）→ 拒
     let best = null, bestDist = Infinity;
     for (const el of els) {
-      const elName = el && el.tags && el.tags.name;
+      const tags = (el && el.tags) || {};
+      const elName = tags.name;
       if (!elName || !placeNameMatchesStrict(elName, name)) continue;
+      // 標籤黑名單：水體/海岸/水道/行政邊界/地名點 → 跳過
+      if (tags.boundary || tags.place || tags.waterway || tags.water) continue;
+      if (tags.natural && _OSM_BAD_NATURAL.test(tags.natural)) continue;
       let ring = null;
       if (el.type === 'way' && Array.isArray(el.geometry)) {
         const r = _osmRingFromGeometry(el.geometry);
@@ -8035,6 +8055,9 @@
         lng: ring.reduce((s, p) => s + p.lng, 0) / ring.length
       };
       const dist = measureDistanceMeters(cen, center);
+      if (dist > MAX_CENTROID_DIST) continue; // 質心太遠 → 不是這個景點
+      const ringR = ring.reduce((mx, p) => Math.max(mx, measureDistanceMeters(cen, p)), 0);
+      if (ringR > MAX_RING_RADIUS) continue;  // 環太大 → 海灣/島嶼/行政區，棄
       if (dist < bestDist) { bestDist = dist; best = ring; }
     }
     return best;
@@ -8096,7 +8119,13 @@
       for (let attempt = 0; attempt < _OVERPASS_ENDPOINTS.length * 2; attempt++) {
         const ep = _OVERPASS_ENDPOINTS[attempt % _OVERPASS_ENDPOINTS.length];
         try {
-          const res = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: q });
+          // 每次 fetch 加 client 逾時：慢/掛的端點（如 504）會 fail-fast 換下一個，不卡住佇列
+          const _ctrl = new AbortController();
+          const _to = setTimeout(() => _ctrl.abort(), 12000);
+          let res;
+          try {
+            res = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: q, signal: _ctrl.signal });
+          } finally { clearTimeout(_to); }
           if (res.status === 429) { await _osmSleep(1500 * (attempt + 1)); continue; }
           const text = await res.text();
           if (!res.ok || /rate_limited|Too Many Requests/i.test(text)) { await _osmSleep(1500 * (attempt + 1)); continue; }
@@ -8141,7 +8170,7 @@
     }
     batch.forEach(b => {
       if (_osmBoundaryCache.has(b.key)) { b.resolve(_osmBoundaryCache.get(b.key)); return; }
-      if (data) { const path = pickOsmBoundary(data, b.name, b.center); _persistOsmEntry(b.key, path || null); b.resolve(path || null); }
+      if (data) { const path = pickOsmBoundary(data, b.name, b.center, b.radius); _persistOsmEntry(b.key, path || null); b.resolve(path || null); }
       else { b.resolve(null); } // 查詢失敗（限流/網路）→ 不快取、回 null（維持近似區塊、下次可重試）
     });
   }
