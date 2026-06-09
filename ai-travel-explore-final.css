@@ -332,6 +332,12 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-check-pill:has(input:checked){background:linear-gradient(135deg,#dff1ff,#c5e4ff);border-color:#5aaae8;box-shadow:0 4px 14px rgba(17,118,201,.2);}
 .wizard-check-pill:has(input:checked) .pill-label{color:#0f4c81;}
 .wizard-check-pill:has(input:checked) .pill-emoji{filter:drop-shadow(0 2px 4px rgba(17,118,201,.25));}
+/* Step 1「本趟想偏重」折疊區 */
+.wiz-focus-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
+.wiz-focus-toggle{flex:none;border:1px solid #bfe0d9;background:#e7f6f2;color:#11796b;border-radius:999px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.wiz-focus-toggle:hover{background:#d3efe8;border-color:#8fcdc1;}
+.wiz-focus-summary{margin-top:8px;padding:10px 12px;background:#eef6ff;border:1px solid #cfe3fb;border-radius:10px;font-size:13px;color:#2f6aa8;line-height:1.5;}
+.wiz-focus-avoid{margin-top:8px;padding:8px 12px;background:#fff4ec;border:1px solid #ffd9c6;border-radius:10px;font-size:12px;color:#9a4f2d;line-height:1.5;}
 .wizard-hint-box{background:#fff4ec;border:1px solid #ffd9c6;border-radius:12px;padding:10px;font-size:13px;color:#9a4f2d;margin-bottom:10px;}
 .wizard-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
 .wizard-tag{border:1px solid #d8e2ef;background:#f7fbff;color:#2b4c6b;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;}

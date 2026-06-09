@@ -1863,6 +1863,16 @@
               }
             }
 
+            // 載入後若超出設定時長 → 平均壓縮（餐廳例外）並寫回存檔；
+            // 否則合併大景點停留會被 enrich「只加長不縮短」回脹，導致重載又變回未壓縮。
+            currentTripWindow.start = (trip.wizardData && trip.wizardData.startTime)
+              || (replanStops[0] && replanStops[0].time)
+              || '09:00';
+            try {
+              const _loadFit = fitScheduleToTimeLimit();
+              if (_loadFit.changed) persistCurrentTripStops();
+            } catch (_e) { console.warn('[load] 超時壓縮略過：', _e); }
+
             const durationSum = replanStops.reduce((sum, s, idx) => {
               const stay = s.stayMin || 0;
               const transit = idx < replanStops.length - 1
@@ -3007,6 +3017,7 @@
     }
 
     if (activeTravelToolTab === 'export') {
+      applyExportTimeFit(); // 進入匯出分頁先檢查並壓縮超時行程，摘要與後續生成皆用壓縮後排程
       bodyEl.innerHTML = `
         <div class="travel-panel soft">
           <div class="travel-panel-title">行程摘要</div>
@@ -3146,7 +3157,111 @@
     window.alert(`邀請碼：${code}`);
   }
 
+  // 行程超出設定時長時，把需縮短的時間「平均分攤」到各景點（餐廳/用餐站例外，不扣），
+  // 每站最多只縮原本的 35%（保底 65%），以水位填平方式反覆均攤直到符合或已無可縮空間。
+  function fitScheduleToTimeLimit() {
+    const prefs = currentTripPreferences || {};
+    if (!prefs.days) return { changed: false, fits: true, limitEndMin: null };
+    const limitMin = parseDurationMinutes(prefs.days);
+    if (!Number.isFinite(limitMin) || limitMin <= 0) return { changed: false, fits: true, limitEndMin: null };
+    const startMin = getReplanStartMinutes();
+    const limitEndMin = startMin + limitMin;
+
+    const scheduleEnd = () => {
+      const sch = buildReplanSchedule();
+      return { sch, end: sch.length ? sch[sch.length - 1].end : startMin };
+    };
+    const curStayOf = (sch, i, stop) => Math.round((sch[i] && sch[i].computedStayMin) || (stop && stop.stayMin) || 0);
+
+    let { sch, end } = scheduleEnd();
+    if (end <= limitEndMin) return { changed: false, fits: true, limitEndMin };
+
+    // 以首次排程的有效停留為「原本」，算 35% 下限（最多減 35% → 保底 65%）；
+    // 端點（起點/終點）與餐廳/用餐站皆為例外，不參與扣時。
+    const MIN_RATIO = 0.65;
+    const info = replanStops.map((s, i) => {
+      const eligible = !(s.type === 'start' || s.type === 'end') && !isFoodStop(s);
+      const orig = Math.max(0, curStayOf(sch, i, s));
+      return { stop: s, i, eligible, orig, floor: Math.ceil(orig * MIN_RATIO) };
+    });
+
+    let changed = false;
+    let guard = 0;
+    while (guard++ < 4000) {
+      const r = scheduleEnd(); sch = r.sch; end = r.end;
+      const overflow = end - limitEndMin;
+      if (overflow <= 0) break;
+      // 候選：可扣、且目前有效停留仍高於 35% 下限
+      const cands = info.filter(t => t.eligible && curStayOf(sch, t.i, t.stop) > t.floor);
+      if (!cands.length) break; // 已無可縮，盡力而為
+      // 平均分攤：本輪每站各扣約 overflow/N（至少 1 分），但不超過各自剩餘可縮空間；
+      // 部分站碰到下限後，剩餘量在下一輪由其餘站再均攤（水位填平）。
+      const share = Math.max(1, Math.floor(overflow / cands.length));
+      let applied = 0;
+      for (const t of cands) {
+        const remain = overflow - applied;
+        if (remain <= 0) break;
+        const curStay = curStayOf(sch, t.i, t.stop);
+        const room = curStay - t.floor;
+        if (room <= 0) continue;
+        const cut = Math.min(room, share, remain);
+        if (cut <= 0) continue;
+        t.stop.stayMin = curStay - cut;
+        // 讓新的 stayMin 生效：清除手動時間覆寫
+        t.stop.manualStartMin = null;
+        t.stop.manualEndMin = null;
+        applied += cut;
+        changed = true;
+      }
+      if (applied <= 0) break; // 安全：本輪無法再扣則停止
+    }
+
+    // 殘量收尾（精準落點優先）：主迴圈守 35% 後若仍超出（額度用罄），允許從「停留最久」的景點
+    // 再多扣（可略超過 35%，但每站至少保留 HARD_MIN 分），把剩餘分鐘扣到剛好落在設定時間。餐廳仍不扣。
+    const HARD_MIN = 5;
+    guard = 0;
+    while (guard++ < 4000) {
+      const r = scheduleEnd(); sch = r.sch; end = r.end;
+      const overflow = end - limitEndMin;
+      if (overflow <= 0) break;
+      const cands = info.filter(t => t.eligible && curStayOf(sch, t.i, t.stop) > HARD_MIN);
+      if (!cands.length) break; // 連硬下限都到了，真的無法再扣
+      cands.sort((a, b) => curStayOf(sch, b.i, b.stop) - curStayOf(sch, a.i, a.stop));
+      const t = cands[0];
+      const curStay = curStayOf(sch, t.i, t.stop);
+      const cut = Math.min(curStay - HARD_MIN, overflow);
+      if (cut <= 0) break;
+      t.stop.stayMin = curStay - cut;
+      t.stop.manualStartMin = null;
+      t.stop.manualEndMin = null;
+      changed = true;
+    }
+
+    const final = scheduleEnd();
+    return { changed, fits: final.end <= limitEndMin, limitEndMin };
+  }
+
+  // 套用匯出前壓縮並同步畫面/儲存/提示（回傳 fit 結果，無變動時為 no-op）
+  function applyExportTimeFit() {
+    const fit = fitScheduleToTimeLimit();
+    if (fit.changed) {
+      renderItineraryDisplay();
+      if (isReplanning) renderReplanBoard();
+      refreshRouteDirections();
+      schedulePersistTrip();
+      const endStr = fit.limitEndMin != null ? minutesToClock(fit.limitEndMin) : '';
+      if (typeof showToast === 'function') {
+        showToast(fit.fits
+          ? `⏱ 已自動壓縮超時行程，調整至 ${endStr} 前結束再匯出`
+          : `⏱ 已盡量壓縮行程（每站最多縮 35%），仍略超出 ${endStr}`,
+          fit.fits ? 'green' : 'orange');
+      }
+    }
+    return fit;
+  }
+
   function downloadItineraryImage() {
+    applyExportTimeFit(); // 匯出前先壓縮超時行程
     const svg = buildItineraryPosterSvg();
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -6214,6 +6329,18 @@
       // 對齊描述「（含 …）」與 mergedSubSpots，並清掉累加的重複括號
       reconcileMergedSubSpots(replanStops);
 
+      // 重新規劃結果若仍超出設定時長，套用與匯出相同的壓縮（停留最久優先、每站最多縮 35%）
+      try {
+        const _rgFit = fitScheduleToTimeLimit();
+        if (_rgFit.changed && typeof showToast === 'function') {
+          const _endStr = _rgFit.limitEndMin != null ? minutesToClock(_rgFit.limitEndMin) : '';
+          showToast(_rgFit.fits
+            ? `⏱ 重新規劃已壓縮超時行程，調整至 ${_endStr} 前結束`
+            : `⏱ 已盡量壓縮行程（每站最多縮 35%），仍略超出 ${_endStr}`,
+            _rgFit.fits ? 'green' : 'orange');
+        }
+      } catch (fitErr) { console.warn('[replanWithAI] 超時壓縮略過：', fitErr); }
+
       if (_rgOverlay) _rgOverlay.style.display = 'none';
       renderReplanBoard();
       refreshRouteDirections();
@@ -7209,6 +7336,27 @@
     };
   }
 
+  // 大景點內的小景點：紫色水滴大頭針（與主站點青綠、路線藍/橘明顯區隔）
+  function createSubSpotPinIcon() {
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="30" height="40" viewBox="0 0 30 40">
+        <defs>
+          <filter id="ssh" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.2"/>
+          </filter>
+        </defs>
+        <g filter="url(#ssh)">
+          <path d="M15 38C15 38 4 25.5 4 14.5C4 8.7 8.9 4 15 4C21.1 4 26 8.7 26 14.5C26 25.5 15 38 15 38Z" fill="#7C3AED" stroke="#ffffff" stroke-width="2.2"/>
+          <circle cx="15" cy="14.5" r="5" fill="#ffffff"/>
+        </g>
+      </svg>`;
+    return {
+      url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+      scaledSize: new google.maps.Size(30, 40),
+      anchor: new google.maps.Point(15, 38)
+    };
+  }
+
   function createRouteMidLabelIcon(modeIcon, destName, color) {
     const truncated = (destName || '').length > 7 ? destName.substring(0, 7) + '…' : (destName || '目的地');
     const charCount = [...truncated].length;
@@ -7558,9 +7706,36 @@
     }];
   }
 
-  // ── 大景點子景點（小景點）小圓點：只在選取該階段時顯示、不畫路線 ──────────────
+  // ── 大景點子景點（小景點）大頭針：只在選取該階段時顯示、不畫路線 ──────────────
   function isSubSpotMarkerId(id) {
     return String(id || '').startsWith('subspot-');
+  }
+
+  // 子景點描述：依名稱關鍵字產生較具體的介紹，取代生硬的「xxx 的子景點」
+  function describeSubSpot(subName, parentName) {
+    const nm = String(subName || '').trim();
+    const parent = String(parentName || '').trim();
+    const within = parent ? `位於「${parent}」一帶，` : '';
+    const table = [
+      [/燈塔/, '是醒目的燈塔地標，適合眺望海景、拍照打卡。'],
+      [/涼亭|觀景亭|休憩/, '是可歇腳的休憩涼亭，能放慢腳步欣賞周邊風景。'],
+      [/步道|棧道|步行|健行/, '是一段適合散步慢行、親近自然的步道。'],
+      [/拱橋|吊橋|橋/, '是別具特色的橋樑地標，是取景拍照的好位置。'],
+      [/沙灘|海灘|礫石|海岸|潮間帶|岬/, '是親海的海岸據點，可賞浪、踏水、看海景。'],
+      [/觀景|景觀|眺望|平台|瞭望|制高/, '是視野開闊的觀景點，適合遠眺與拍照。'],
+      [/部落|聚落/, '是充滿在地人文風情的部落聚落，值得放慢腳步感受。'],
+      [/廟|宮|寺|教堂/, '是在地信仰中心，可感受傳統文化氛圍。'],
+      [/漁港|碼頭|港/, '是充滿生活感的港邊據點，可欣賞漁港風情。'],
+      [/公園|廣場|綠地/, '是適合放鬆走逛的休憩空間。'],
+      [/沙漠|草原|濕地|生態|地質|岩|火山/, '是別具特色的自然地景，值得細細觀察。'],
+      [/博物館|文化館|展館|故事館|紀念館/, '是了解在地故事與文化的展覽空間。']
+    ];
+    for (const [re, tail] of table) {
+      if (re.test(nm)) return `「${nm}」${within}${tail}`;
+    }
+    return parent
+      ? `「${nm}」是「${parent}」周邊值得順遊的據點，可一併安排停留、細細探索。`
+      : `「${nm}」是周邊值得順遊的據點，可一併安排停留。`;
   }
 
   function clearSubSpotMarkers() {
@@ -7637,12 +7812,12 @@
         if (!coord) continue;
         const pinId = `subspot-${stop.id}-${i}`;
         if (typeof pinData !== 'undefined') {
-          pinData[pinId] = { title: `📍 ${subName}`, desc: `${stop.name} 的子景點。`, notice: '', lat: coord.lat, lng: coord.lng };
+          pinData[pinId] = { title: `📍 ${subName}`, desc: describeSubSpot(subName, stop.name), notice: '', lat: coord.lat, lng: coord.lng };
         }
         const marker = new google.maps.Marker({
           position: coord, map,
           title: subName,
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: '#1f5f9e', fillOpacity: 0.95, strokeColor: '#ffffff', strokeWeight: 1.5 },
+          icon: createSubSpotPinIcon(),
           zIndex: 3
         });
         rememberMarkerBasePosition(marker, coord);

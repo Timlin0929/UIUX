@@ -632,7 +632,7 @@ function closeStartModal() {
 
 function switchTab(tab) {
   const isLogin = tab === 'login';
-  document.getElementById('formLogin').style.display = isLogin ? 'flex' : 'none';
+  document.getElementById('formLogin').style.display = isLogin ? 'block' : 'none';
   document.getElementById('formReg').style.display  = isLogin ? 'none' : 'flex';
   document.getElementById('tabLogin').style.color        = isLogin ? '#2a6b5e' : '#9a9590';
   document.getElementById('tabLogin').style.borderBottomColor = isLogin ? '#2a6b5e' : 'transparent';

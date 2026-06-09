@@ -560,6 +560,45 @@ function getPromptRuleLines(wizardData, mode) {
   return lines;
 }
 
+// 帳號長期偏好（註冊時設定）與本趟精靈選擇的合併規則：
+// - 本趟選擇（wizData.interests / pace）為「這趟行程」的權威值，主導景點安排與時間節奏。
+// - 帳號長期偏好（profilePrefs，來自 selectTripMode 快照，否則退回 currentUser.preferences）
+//   作為「次要口味參考」與「跨行程硬性禁忌（avoid）」注入 prompt，不與本趟選擇衝突。
+function getEffectivePrefs(wizardData) {
+  const wd = wizardData || {};
+  const profile = wd.profilePrefs
+    || (typeof currentUser !== 'undefined' && currentUser && currentUser.preferences)
+    || null;
+  const tripInterests = Array.isArray(wd.interests) ? wd.interests.filter(Boolean) : [];
+  const longInterests = (profile && Array.isArray(profile.interests)) ? profile.interests.filter(Boolean) : [];
+  const tripPace = wd.pace || (profile && profile.pace) || '平衡';
+  const longPace = (profile && profile.pace) || '';
+  const avoid = (profile && typeof profile.avoid === 'string') ? profile.avoid.trim() : '';
+  // 長期興趣中、本趟未涵蓋的部分（差異 = 衝突來源）→ 降為次要參考
+  const extraLong = longInterests.filter(i => !tripInterests.includes(i));
+  return { tripInterests, longInterests, extraLong, tripPace, longPace, avoid, hasProfile: !!profile };
+}
+
+// 產生 prompt 的「個人偏好」段落：本趟優先、長期次要、禁忌硬性遵守，三者層級分明不衝突
+function buildPreferenceLines(wizardData) {
+  const p = getEffectivePrefs(wizardData);
+  const lines = [];
+  if (p.longPace && p.longPace !== p.tripPace) {
+    lines.push(`行程節奏：${p.tripPace}（本趟指定，以此為準；使用者長期偏好節奏為「${p.longPace}」，僅供參考）`);
+  } else {
+    lines.push(`行程節奏：${p.tripPace}`);
+  }
+  const tripInt = p.tripInterests.length ? p.tripInterests.join('、') : '多元體驗';
+  lines.push(`本趟興趣方向：${tripInt}（規劃景點類型以此為主）`);
+  if (p.extraLong.length) {
+    lines.push(`使用者長期興趣偏好：${p.extraLong.join('、')}（次要參考；可在不影響本趟興趣的前提下適度融入，若與本趟方向衝突一律以本趟為準）`);
+  }
+  if (p.avoid) {
+    lines.push(`⚠️ 個人禁忌／需避免（此為帳號設定，所有行程務必全程遵守，包含餐廳與景點挑選）：${p.avoid}`);
+  }
+  return lines;
+}
+
 function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const destination = wizardData.dest || wizardData.destCustom || '台東';
   const win = getTripDayWindows(wizardData);
@@ -574,9 +613,8 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
       ? `時間長度：兩天一夜（第一天 ${win.start}–${win.day1End} 約 ${win.day1Hours} 小時並過夜；第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程）`
       : `時間長度：${wizardData.days || '1天'}（${win.start} ～ ${win.end}，請安排景點填滿此時段）`,
     isSolo ? '旅行方式：獨旅' : `同行人數：${wizardData.people || '2人'}`,
-    `行程節奏：${wizardData.pace || '平衡'}`,
     `主要交通工具：${({ taxi: '計程車', scooter: '機車', car: '汽車' }[wizardData.transportMode]) || '汽車'}（各段移動以此工具為主，短程可步行）`,
-    `興趣點：${(wizardData.interests || []).join('、') || '多元體驗'}`,
+    ...buildPreferenceLines(wizardData),
     `旅程風格：${wizardData.theme || '經典旅人'}`,
     wizardData.budget ? `預算：${(describeBudget(wizardData.budget, wizardData.people) || {}).promptText || wizardData.budget}` : null,
     wizardData.budget ? (() => {
@@ -2589,6 +2627,72 @@ function estimateTripMinutes(stops) {
   return total;
 }
 
+// 建立行程時：若總時長超出設定時長，把要縮短的時間「平均分攤」到各景點（餐廳/用餐站例外，不扣），
+// 每站最多只縮原本的 35%（保底 65%），以水位填平方式反覆均攤直到符合或已無可縮空間。回傳是否有調整。
+function fitGeneratedStopsToTimeLimit(stops, wizardData = {}) {
+  if (!Array.isArray(stops) || !stops.length) return false;
+  const targetMin = parseDurationMinutes(wizardData.days || '1天');
+  if (!Number.isFinite(targetMin) || targetMin <= 0) return false;
+  if (estimateTripMinutes(stops) <= targetMin) return false;
+
+  const MIN_RATIO = 0.65; // 每站最多縮 35%
+  const stayOf = (s) => Math.max(0, Math.round(Number(s.duration) || Number(s.stayMin) || 0));
+  const isEndpoint = (s) => s && (s.type === 'start' || s.type === 'end');
+  const info = stops.map((s) => {
+    const eligible = !isEndpoint(s) && !isFoodStop(s); // 端點與餐廳例外
+    const orig = stayOf(s);
+    return { stop: s, eligible, orig, floor: Math.ceil(orig * MIN_RATIO) };
+  });
+
+  let changed = false;
+  let guard = 0;
+  while (guard++ < 4000) {
+    const overflow = estimateTripMinutes(stops) - targetMin;
+    if (overflow <= 0) break;
+    const cands = info.filter(t => t.eligible && stayOf(t.stop) > t.floor);
+    if (!cands.length) break; // 已無可縮，盡力而為
+    // 平均分攤：本輪每站各扣約 overflow/N（至少 1 分），不超過各自剩餘可縮空間；碰到下限者由其餘站再均攤
+    const share = Math.max(1, Math.floor(overflow / cands.length));
+    let applied = 0;
+    for (const t of cands) {
+      const remain = overflow - applied;
+      if (remain <= 0) break;
+      const cur = stayOf(t.stop);
+      const room = cur - t.floor;
+      if (room <= 0) continue;
+      const cut = Math.min(room, share, remain);
+      if (cut <= 0) continue;
+      const nv = cur - cut;
+      t.stop.duration = nv;
+      t.stop.stayMin = nv;
+      applied += cut;
+      changed = true;
+    }
+    if (applied <= 0) break;
+  }
+
+  // 殘量收尾（精準落點優先）：守 35% 後若仍超出（額度用罄），允許從「停留最久」的景點再多扣
+  // （可略超過 35%，但每站至少保留 HARD_MIN 分），把剩餘分鐘扣到剛好落在設定時長。餐廳仍不扣。
+  const HARD_MIN = 5;
+  guard = 0;
+  while (guard++ < 4000) {
+    const overflow = estimateTripMinutes(stops) - targetMin;
+    if (overflow <= 0) break;
+    const cands = info.filter(t => t.eligible && stayOf(t.stop) > HARD_MIN);
+    if (!cands.length) break;
+    cands.sort((a, b) => stayOf(b.stop) - stayOf(a.stop));
+    const t = cands[0];
+    const cur = stayOf(t.stop);
+    const cut = Math.min(cur - HARD_MIN, overflow);
+    if (cut <= 0) break;
+    const nv = cur - cut;
+    t.stop.duration = nv;
+    t.stop.stayMin = nv;
+    changed = true;
+  }
+  return changed;
+}
+
 // 合併後時間偏短時：沿路線補景點填滿剩餘時段（不要集中同一點）
 function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardData = {}) {
   const interests = (wizardData.interests || []).join('、') || '多元體驗';
@@ -2596,15 +2700,17 @@ function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardDa
   const startLoc = (wizardData.startLocation || '').trim();
   const endLoc = (wizardData.endLocation || '').trim();
   const excluded = (excludedNames || []).slice(0, 40).join('、');
+  const _avoid = getEffectivePrefs(wizardData).avoid;
   return [
     `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 1} 個景點（多補 1 個備用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
+    _avoid ? `⚠️ 個人禁忌／需避免（務必遵守）：${_avoid}` : null,
     `已使用景點（絕對禁止重複）：${excluded || '（無）'}`,
     (startLoc || endLoc)
       ? `景點請沿「${startLoc || dest}」→「${dest}」→「${endLoc || dest}」路線廊道分散（距路線 10 公里內），不要全部集中在同一點`
       : '景點沿行程路線分散，不要集中在同一點',
     `景點須為 ${dest} 周邊真實存在、能在 Google Maps 搜尋到的正式名稱；duration 為停留分鐘（15–90）；風格 ${theme}、興趣 ${interests}`,
     '請勿輸出 lat/lng（座標由系統查詢）。只回傳 JSON：{"stops":[{"name":"景點正式名稱","emoji":"📍","duration":45,"desc":"推薦理由","businessHours":"週一至週日 09:00-17:00"}]}'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 // 合併後若行程縮水超過 45 分，沿路線補景點填回目標時段（含回終點交通、不超時）。傳入/回傳「中段站」。
@@ -2733,7 +2839,10 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     endCoords:     _endCoords    || null,
   };
   const withEndpoints = injectEndpointStops(withTransport, enrichedWizardData);
-  return assignTransportModes(withEndpoints, enrichedWizardData.transportMode);
+  const finalStops = assignTransportModes(withEndpoints, enrichedWizardData.transportMode);
+  // 建立行程：若仍超出設定時長，平均分攤縮短各景點停留（餐廳例外、每站最多縮 35%）
+  fitGeneratedStopsToTimeLimit(finalStops, wizardData);
+  return finalStops;
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -2909,6 +3018,9 @@ function renderUserMenu() {
     wrap.innerHTML = `<button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>`;
   } else {
     const u = currentUser || {};
+    // 僅 Email/密碼帳號顯示「修改密碼」（社群登入無密碼）
+    const _fu = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+    const _hasPwd = !!(_fu && (_fu.providerData || []).some(p => p && p.providerId === 'password'));
     wrap.innerHTML = `
       <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${u.name}">
         ${u.emoji||'😊'}
@@ -2921,7 +3033,9 @@ function renderUserMenu() {
         <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:11px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
         <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
         <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>
-        <div class="user-dd-item" onclick="openJourneyJoin();toggleUserDropdown()">📱 手機流程碼進入</div>
+        <div class="user-dd-sep"></div>
+        <div class="user-dd-item" onclick="openPrefWizard();toggleUserDropdown()">🎯 修改個人喜好</div>
+        ${_hasPwd ? `<div class="user-dd-item" onclick="openChangePwd();toggleUserDropdown()">🔒 修改密碼</div>` : ''}
         <div class="user-dd-sep"></div>
         <div class="user-dd-item danger" onclick="doLogout()">👋 登出</div>
       </div>`;
@@ -2982,7 +3096,7 @@ async function doRegister() {
         email: email,
         name: name,
         emoji: '🌟',
-        preferences: { interests: [], pace: '平衡' },
+        preferences: { interests: [], pace: '平衡', avoid: '' },
         visitedSpots: [],
         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -2993,6 +3107,44 @@ async function doRegister() {
     openPrefWizard(); // 引導設定偏好
   } catch(e) {
     showToast(`註冊失敗: ${e.message}`, 'red');
+  }
+}
+
+// === 修改密碼（僅 Email/密碼帳號） ===
+function openChangePwd() {
+  const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+  if (!u) return showToast('請先登入', 'orange');
+  const hasPwd = (u.providerData || []).some(p => p && p.providerId === 'password');
+  if (!hasPwd) return showToast('你以社群帳號登入，請至 Google／Facebook 修改密碼', 'orange');
+  ['cpwCurrent', 'cpwNew', 'cpwConfirm'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  document.getElementById('changePwdOverlay').classList.add('open');
+}
+function closeChangePwd() { document.getElementById('changePwdOverlay').classList.remove('open'); }
+async function doChangePassword() {
+  if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
+  const u = firebaseAuth.currentUser;
+  if (!u) return showToast('請先登入', 'orange');
+  const cur = document.getElementById('cpwCurrent').value;
+  const np = document.getElementById('cpwNew').value;
+  const cf = document.getElementById('cpwConfirm').value;
+  if (!cur || !np || !cf) { showToast('請填寫所有欄位', 'orange'); return; }
+  if (np.length < 8) { showToast('新密碼至少需要 8 個字元', 'orange'); return; }
+  if (np !== cf) { showToast('兩次輸入的新密碼不一致', 'orange'); return; }
+  if (np === cur) { showToast('新密碼不可與目前密碼相同', 'orange'); return; }
+  try {
+    const cred = firebase.auth.EmailAuthProvider.credential(u.email, cur);
+    await u.reauthenticateWithCredential(cred);
+    await u.updatePassword(np);
+    showToast('🔒 密碼已更新', 'green');
+    closeChangePwd();
+  } catch(e) {
+    const code = e && e.code;
+    let msg;
+    if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') msg = '目前密碼不正確';
+    else if (code === 'auth/weak-password') msg = '新密碼強度不足';
+    else if (code === 'auth/too-many-requests') msg = '嘗試次數過多，請稍後再試';
+    else msg = '密碼更新失敗：' + ((e && e.message) || '未知錯誤');
+    showToast(msg, 'red');
   }
 }
 
@@ -3016,7 +3168,7 @@ async function doSocialLogin(providerName) {
           email: user.email || '',
           name: user.displayName || '社群用戶',
           emoji: providerName === 'Google' ? '🌐' : '📘',
-          preferences: { interests: [], pace: '平衡' },
+          preferences: { interests: [], pace: '平衡', avoid: '' },
           visitedSpots: [],
           createdAt: firebase.firestore.FieldValue.serverTimestamp(),
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -3038,9 +3190,15 @@ function doLogout() {
 }
 
 // === Preferences Wizard ===
-let tempPrefs = { interests: [], pace: '平衡' };
+let tempPrefs = { interests: [], pace: '平衡', avoid: '' };
 function openPrefWizard() {
-  tempPrefs = { interests: [], pace: '平衡' };
+  // 編輯時帶入既有偏好（之前每次開啟都會清空，導致無法修改）
+  const src = (currentUser && currentUser.preferences) || {};
+  tempPrefs = {
+    interests: Array.isArray(src.interests) ? [...src.interests] : [],
+    pace: src.pace || '平衡',
+    avoid: typeof src.avoid === 'string' ? src.avoid : ''
+  };
   renderPrefWizard();
   document.getElementById('prefWizardOverlay').classList.add('open');
 }
@@ -3068,6 +3226,8 @@ function renderPrefWizard() {
     const int = btn.textContent.replace(/[^\u4e00-\u9fa5]/g, '').trim();
     btn.classList.toggle('active', tempPrefs.interests.includes(int));
   });
+  const av = document.getElementById('prefAvoid');
+  if (av) av.value = tempPrefs.avoid || '';
 }
 async function saveUserPreferences() {
   if (!isLoggedIn || !currentUser || !firebaseDb) return closePrefWizard();
@@ -3097,7 +3257,7 @@ if (typeof firebase !== 'undefined') {
         name: user.displayName || user.email?.split('@')[0] || '使用者',
         email: user.email,
         emoji: '😊',
-        preferences: { interests: [], pace: '平衡' },
+        preferences: { interests: [], pace: '平衡', avoid: '' },
         visitedSpots: []
       };
       if (firebaseDb) {
@@ -3401,6 +3561,12 @@ function selectTripMode(mode) {
     // 「旅程風格」persona 改為每趟行程現場選，不再從偏好帶入
     if (currentUser.preferences.interests) wizData.interests = [...currentUser.preferences.interests];
     if (currentUser.preferences.pace) wizData.pace = currentUser.preferences.pace;
+    // 快照長期偏好供 buildPrompt 分層使用（本趟覆寫 interests/pace 後仍保有原始長期值與禁忌）
+    wizData.profilePrefs = {
+      interests: Array.isArray(currentUser.preferences.interests) ? [...currentUser.preferences.interests] : [],
+      pace: currentUser.preferences.pace || '',
+      avoid: typeof currentUser.preferences.avoid === 'string' ? currentUser.preferences.avoid : ''
+    };
   }
   clearWizardPrefetchState();
   renderWizard();
@@ -3520,8 +3686,13 @@ function renderWizard() {
     const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
     const startHint = autoHub ? `留空則自動使用「${autoHub}」` : '可填車站名、停車場或民宿名稱';
     const endHint = autoHub ? `留空則自動使用「${autoHub}」` : (isLongTrip(wizData.days) ? '可填飯店或車站名稱' : '可填停車場或車站名稱');
+    // 「本趟想偏重」折疊區：有設過個人興趣 → 預設折疊成摘要，可展開微調；禁忌一律以小提示呈現
+    const _pf = (currentUser && currentUser.preferences) || null;
+    const _hasProfileFocus = !!(_pf && Array.isArray(_pf.interests) && _pf.interests.length);
+    const _avoid = (_pf && typeof _pf.avoid === 'string') ? _pf.avoid.trim() : '';
+    const _focusExpanded = (wizData._focusExpanded === undefined) ? !_hasProfileFocus : !!wizData._focusExpanded;
     body.innerHTML = `<h3 class="wizard-block-title">🚆 交通 & 旅遊偏好</h3>
-      <p class="wizard-block-help">設定交通安排，並選擇興趣方向與風格</p>
+      <p class="wizard-block-help">設定交通安排，並調整本趟想偏重的方向與風格</p>
       <div class="wizard-field">
         <label>出發站點 / 集合地點</label>
         <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
@@ -3540,29 +3711,36 @@ function renderWizard() {
           `).join('')}
         </div>
       </div>
-      <div class="wizard-field" style="margin-top:16px">
-        <label>興趣方向（可複選 2-4 項）<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重，例：選「美食」會多安排餐廳體驗</span></label>
-        <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;">
-          ${(()=>{
-            const emojiMap={'美食':'🍜','文化':'🏛️','自然':'🌿','打卡':'📸','運動':'🏃','放鬆':'😌'};
-            return ['美食','文化','自然','打卡','運動','放鬆'].map(item=>`
-              <label class="wizard-check-pill">
-                <input type="checkbox" value="${item}" ${wizData.interests&&wizData.interests.includes(item)?'checked':''}>
-                <span class="pill-emoji">${emojiMap[item]}</span>
-                <span class="pill-label">${item}</span>
-              </label>
-            `).join('');
-          })()}
+      <div class="wizard-field" id="wizTripFocusBlock" style="margin-top:16px">
+        <div class="wiz-focus-head">
+          <label style="margin:0;">本趟想偏重<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重與行程節奏</span></label>
+          ${_hasProfileFocus ? `<button type="button" class="wiz-focus-toggle" id="wizFocusToggle" onclick="toggleTripFocus()">${_focusExpanded ? '收合 ▴' : '本趟調整 ▾'}</button>` : ''}
+        </div>
+        ${_hasProfileFocus ? `<div class="wiz-focus-summary" id="wizFocusSummary" style="${_focusExpanded ? 'display:none' : ''}">${_tripFocusSummary()}</div>` : ''}
+        ${_avoid ? `<div class="wiz-focus-avoid">🚫 你的禁忌「${_avoid}」會自動套用於每趟行程</div>` : ''}
+        <div id="wizFocusPickers" style="${(_hasProfileFocus && !_focusExpanded) ? 'display:none' : ''}">
+          <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr);gap:10px;">
+            ${(()=>{
+              const emojiMap={'美食':'🍜','文化':'🏛️','自然':'🌿','打卡':'📸','運動':'🏃','放鬆':'😌'};
+              return ['美食','文化','自然','打卡','運動','放鬆'].map(item=>`
+                <label class="wizard-check-pill">
+                  <input type="checkbox" value="${item}" ${wizData.interests&&wizData.interests.includes(item)?'checked':''}>
+                  <span class="pill-emoji">${emojiMap[item]}</span>
+                  <span class="pill-label">${item}</span>
+                </label>
+              `).join('');
+            })()}
+          </div>
+          <div class="wizard-field" style="margin-top:14px;margin-bottom:0;">
+            <label>本趟節奏</label>
+            <select id="wizPace" onchange="updateWizardPace(this.value)">
+              ${['輕快','平衡','悠閒'].map(p=>`<option ${wizData.pace===p?'selected':''}>${p}</option>`).join('')}
+            </select>
+          </div>
         </div>
       </div>
       <div class="wizard-field">
-        <label>行程節奏</label>
-        <select id="wizPace" onchange="updateWizardPace(this.value)">
-          ${['輕快','平衡','悠閒'].map(p=>`<option ${wizData.pace===p?'selected':''}>${p}</option>`).join('')}
-        </select>
-      </div>
-      <div class="wizard-field">
-        <label>旅程風格<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與上方興趣方向互補，各有作用</span></label>
+        <label>旅程風格<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與本趟想偏重互補，各有作用</span></label>
         <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-theme')">${wizData.theme||''}</textarea>
       </div>
       <div class="wizard-chips">
@@ -3796,6 +3974,38 @@ function updateWizardPace(value) {
   wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '', value, wizData.people);
   scheduleWizardPreviewRequest('step2-pace');
   renderWizard();
+}
+
+// Step 1 折疊摘要文字：本趟值與個人喜好相同 → 「沿用」；被改過 → 「本趟偏重」
+function _tripFocusSummary() {
+  const pf = (currentUser && currentUser.preferences) || null;
+  const ints = (wizData.interests && wizData.interests.length) ? wizData.interests.join('、') : '多元體驗';
+  const txt = `${ints}｜${wizData.pace || '平衡'}節奏`;
+  const inherited = pf && Array.isArray(pf.interests)
+    && wizData.interests && wizData.interests.length === pf.interests.length
+    && wizData.interests.every(i => pf.interests.includes(i))
+    && (wizData.pace || '平衡') === (pf.pace || '平衡');
+  return (inherited ? '✨ 沿用你的個人喜好：' : '✏️ 本趟偏重：') + txt;
+}
+
+// Step 1「本趟想偏重」折疊/展開：純 DOM 切換，不重繪（保留現有 checkbox 監聽）
+function toggleTripFocus() {
+  const pickers = document.getElementById('wizFocusPickers');
+  if (!pickers) return;
+  const expanded = !wizData._focusExpanded;
+  wizData._focusExpanded = expanded;
+  pickers.style.display = expanded ? '' : 'none';
+  const btn = document.getElementById('wizFocusToggle');
+  if (btn) btn.textContent = expanded ? '收合 ▴' : '本趟調整 ▾';
+  const summary = document.getElementById('wizFocusSummary');
+  if (summary) {
+    if (expanded) {
+      summary.style.display = 'none';
+    } else {
+      summary.textContent = _tripFocusSummary();
+      summary.style.display = '';
+    }
+  }
 }
 
 function syncWizardTimeOptionAvailability() {

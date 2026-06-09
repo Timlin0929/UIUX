@@ -82,9 +82,9 @@
   <div class="login-modal" style="position:relative;max-width:500px">
     <button class="lm-close" onclick="closePrefWizard()">✕</button>
     <div class="lm-title">設定個人喜好 ✨</div>
-    <div class="lm-sub">讓我們更了解你，未來建立行程時會優先套用這些設定。</div>
+    <div class="lm-sub">這些長期偏好會成為每趟行程的預設值與 AI 規劃的參考；飲食禁忌則會套用到所有行程。建立行程時仍可為單趟自由調整。</div>
     <div class="wizard-field" style="margin-top:20px;text-align:left">
-      <label>旅遊興趣方向（可多選）</label>
+      <label>平常偏好的旅遊興趣（可多選）</label>
       <div class="wizard-chips" id="prefInterestsGrid">
         <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'美食')">🍜 美食</button>
         <button class="wizard-tag" type="button" onclick="togglePrefInterest(this,'文化')">🏛️ 文化</button>
@@ -95,12 +95,16 @@
       </div>
     </div>
     <div class="wizard-field" style="text-align:left">
-      <label>偏好的行程節奏</label>
+      <label>平常偏好的行程節奏</label>
       <div class="wizard-chips" id="prefPaceGrid">
         <button class="wizard-tag" type="button" onclick="setPrefPace('輕快')">🏃 輕快</button>
         <button class="wizard-tag active" type="button" onclick="setPrefPace('平衡')">🚶 平衡</button>
         <button class="wizard-tag" type="button" onclick="setPrefPace('悠閒')">🐢 悠閒</button>
       </div>
+    </div>
+    <div class="wizard-field" style="text-align:left">
+      <label>飲食禁忌 / 想避免的事物 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（選填，每趟行程都會自動套用）</span></label>
+      <textarea id="prefAvoid" rows="2" placeholder="例：素食、不吃辣、海鮮過敏、想避開人潮與高消費景點…" oninput="tempPrefs.avoid=this.value" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d8e2ef;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;background:#f7fbff"></textarea>
     </div>
     <button class="lm-submit" onclick="saveUserPreferences()" style="margin-top:24px">完成設定</button>
     <div style="text-align:center;margin-top:12px">
@@ -183,6 +187,19 @@
       <input type="text" id="inviteCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:18px; text-align:center;">
     </div>
     <button class="lm-submit" onclick="submitInviteCode()">確認加入</button>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: CHANGE PASSWORD ─── -->
+<div class="overlay" id="changePwdOverlay" onclick="if(event.target===this)closeChangePwd()" style="z-index:300">
+  <div class="login-modal" style="position:relative">
+    <button class="lm-close" onclick="closeChangePwd()">✕</button>
+    <div class="lm-title">修改密碼 🔒</div>
+    <div class="lm-sub">為了安全，請先輸入目前的密碼</div>
+    <div class="lm-field"><label>目前密碼</label><input type="password" id="cpwCurrent" placeholder="目前的密碼"></div>
+    <div class="lm-field"><label>新密碼</label><input type="password" id="cpwNew" placeholder="至少 8 個字元"></div>
+    <div class="lm-field"><label>確認新密碼</label><input type="password" id="cpwConfirm" placeholder="再次輸入新密碼"></div>
+    <button class="lm-submit" onclick="doChangePassword()">更新密碼</button>
   </div>
 </div>
 
