@@ -39,6 +39,10 @@ const FOOD_PER_DEST = parseInt(process.env.FOOD_PER_DEST || '25', 10);
 const LIMIT = parseInt(argv.limit || process.env.CRAWL_LIMIT || '50', 10);
 const IMPORT_LIMIT = parseInt(argv.importLimit || process.env.IMPORT_LIMIT || '500', 10);
 const FETCH_LIMIT = parseInt(argv.fetchLimit || process.env.CRAWL_FETCH_LIMIT || String(LIMIT * 5), 10);
+// 「免費額度用完前停止」：單次執行最多打幾次 Google API（geocode / Places searchText）。0 = 不限。
+const MAX_CALLS = parseInt(argv['max-calls'] || process.env.CRAWL_MAX_CALLS || '0', 10);
+// 「平均分散在一週」：把工作切成 N 份只跑第 K 份，形如 --slice 3/7（K 從 1 起算）。空 = 不切。
+const SLICE_RAW = String(argv.slice || process.env.CRAWL_SLICE || '').trim();
 const POI_COLLECTION = process.env.POI_COLLECTION || 'scenic_points';
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || LOCAL_APP_CONFIG.GOOGLE_MAPS_API_KEY || null;
 if (GOOGLE_KEY) {
@@ -56,6 +60,40 @@ const REGION_ALIASES = {
   '\u53f0\u6771\u7e23': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc'],
   '\u81fa\u6771\u7e23': ['\u53f0\u6771', '\u81fa\u6771', '\u53f0\u6771\u7e23', '\u81fa\u6771\u7e23', '\u7da0\u5cf6', '\u862d\u5dbc']
 };
+
+// === 額度守門 + 一週分散切片 ===
+let apiCallsUsed = 0;
+function noteApiCall(n) { apiCallsUsed += (n || 1); }
+function callBudgetExhausted() { return MAX_CALLS > 0 && apiCallsUsed >= MAX_CALLS; }
+function parseSlice(raw) {
+  const m = /^(\d+)\s*\/\s*(\d+)$/.exec(raw || '');
+  if (!m) return null;
+  const idx = parseInt(m[1], 10);
+  const total = parseInt(m[2], 10);
+  if (!(total > 0) || idx < 1 || idx > total) {
+    console.warn(`--slice 格式無效（${raw}），需為 K/N 且 1 ≤ K ≤ N，本次忽略切片。`);
+    return null;
+  }
+  return { idx: idx - 1, total }; // idx 轉為 0 起算
+}
+function inSlice(i, slice) { return !slice || (i % slice.total) === slice.idx; }
+const WORK_SLICE = parseSlice(SLICE_RAW);
+if (WORK_SLICE) console.log(`Slice 模式：只處理第 ${WORK_SLICE.idx + 1}/${WORK_SLICE.total} 份（依文件順序均分）。`);
+if (MAX_CALLS > 0) console.log(`API 預算：本次最多 ${MAX_CALLS} 次 Google 呼叫，達上限即停止。`);
+
+// 讀取既有的自動產生檔（window.<globalName> = {...}），給「部分更新」時合併用；失敗則回傳 {}。
+function loadExistingGlobalFile(filePath, globalName) {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    const sandbox = { window: {} };
+    vm.runInNewContext(fs.readFileSync(filePath, 'utf8'), sandbox, { filename: filePath, timeout: 2000 });
+    const obj = sandbox.window[globalName];
+    return (obj && typeof obj === 'object') ? obj : {};
+  } catch (e) {
+    console.warn(`讀取既有 ${path.basename(filePath)} 失敗，改以全新檔案產生：`, e.message);
+    return {};
+  }
+}
 
 function initFirebase() {
   if (!admin.apps.length) {
@@ -79,6 +117,7 @@ async function geocodeAddress(address) {
   if (!GOOGLE_KEY) return null;
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`;
+    noteApiCall();
     const r = await axios.get(url, { timeout: 15000 });
     if (r.data && r.data.results && r.data.results.length) return r.data.results[0];
   } catch (e) {
@@ -111,6 +150,7 @@ async function fetchNearbyToiletsGoogle(lat, lng) {
   if (!GOOGLE_KEY) return [];
   try {
     // 使用新版 Places API (v1)，避免 legacy nearbysearch 被拒
+    noteApiCall();
     const r = await axios.post(
       'https://places.googleapis.com/v1/places:searchText',
       {
@@ -478,6 +518,8 @@ async function processBatch(db) {
   }
   let processed = 0;
   let skippedByRegion = 0;
+  let eligibleIdx = -1;
+  let slicedCount = 0;
   for (const doc of snap.docs) {
     const data = doc.data();
     if (!docMatchesRegion(data, CRAWL_REGION)) {
@@ -485,6 +527,9 @@ async function processBatch(db) {
       console.log('Skipping', doc.id, 'outside region filter', CRAWL_REGION);
       continue;
     }
+    eligibleIdx += 1; // 分片 / 預算守門（geocode 補齊也算 Google 呼叫）
+    if (!inSlice(eligibleIdx, WORK_SLICE)) { slicedCount += 1; continue; }
+    if (callBudgetExhausted()) { console.log(`已達 API 預算（${MAX_CALLS} 次），提前停止補齊（未處理者下次續跑）。`); break; }
     const name = data.name || doc.id;
     const region = data.region || data.city || '';
     const regionCenter = data.destination_center || data.region_center || null;
@@ -546,7 +591,7 @@ async function processBatch(db) {
     if (processed >= LIMIT) break;
   }
   if (CRAWL_REGION) {
-    console.log('Region filter summary', { region: CRAWL_REGION, processed, skippedByRegion });
+    console.log('Region filter summary', { region: CRAWL_REGION, processed, skippedByRegion, sliced: slicedCount, apiCalls: apiCallsUsed, slice: SLICE_RAW || 'all', maxCalls: MAX_CALLS || 'none' });
   }
 }
 
@@ -697,6 +742,7 @@ async function fetchPlaceVerification(name, region, center) {
     body.locationBias = { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 30000 } };
   }
   try {
+    noteApiCall();
     const r = await axios.post(
       'https://places.googleapis.com/v1/places:searchText',
       body,
@@ -748,11 +794,14 @@ async function verifyPlaces(db) {
   console.log(`Verify-places mode: reading collection ${POI_COLLECTION}（force=${FORCE}, near=${VERIFY_NEAR_METERS}m）`);
   const snap = await db.collection(POI_COLLECTION).get();
   if (snap.empty) { console.log(`No documents in ${POI_COLLECTION}.`); return; }
-  let scanned = 0, verified = 0, unmatched = 0, skipped = 0, closed = 0;
+  let scanned = 0, verified = 0, unmatched = 0, skipped = 0, closed = 0, sliced = 0, eligibleIdx = -1;
   for (const doc of snap.docs) {
     const data = doc.data();
     if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
     if (!FORCE && data.placeVerified === true) { skipped += 1; continue; }
+    eligibleIdx += 1; // 只對「真正待校正」的文件分片，讓一週各天工作量平均
+    if (!inSlice(eligibleIdx, WORK_SLICE)) { sliced += 1; continue; }
+    if (callBudgetExhausted()) { console.log(`已達 API 預算（${MAX_CALLS} 次），提前停止 verify-places（未處理者下次續跑）。`); break; }
     if (argv.limit !== undefined && scanned >= LIMIT) break; // --limit N 時只處理前 N 筆（省 Places 額度，便於試跑）
     scanned += 1;
     const coord = data.scenicCoordinates || {};
@@ -795,7 +844,7 @@ async function verifyPlaces(db) {
     }
     await doc.ref.set(update, { merge: true });
   }
-  console.log('Verify-places summary', { region: CRAWL_REGION, scanned, verified, unmatched, closed, skipped, dryRun: DRY });
+  console.log('Verify-places summary', { region: CRAWL_REGION, scanned, verified, unmatched, closed, skipped, sliced, apiCalls: apiCallsUsed, slice: SLICE_RAW || 'all', maxCalls: MAX_CALLS || 'none', dryRun: DRY });
 }
 
 async function exportLocal(db) {
@@ -857,6 +906,7 @@ async function fetchRestaurantsNear(region, center) {
       body.locationBias = { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 20000 } };
     }
     try {
+      noteApiCall();
       const r = await axios.post(
         'https://places.googleapis.com/v1/places:searchText',
         body,
@@ -929,13 +979,25 @@ async function crawlFood(db) {
   const targets = Object.keys(agg).filter((k) => agg[k].count >= MIN_FOOD_POIS);
   console.log(`Crawl-food targets（POI ≥ ${MIN_FOOD_POIS}）：${targets.map((k) => `${k}(${agg[k].count})`).join(', ') || '(none)'}`);
 
+  // 切片或預算模式為「部分更新」：先載入既有檔，只覆寫本次處理到的目的地，避免清掉其他天已爬的資料。
+  const partial = !!(WORK_SLICE || MAX_CALLS > 0);
   const buckets = {};
-  for (const key of targets) {
+  if (partial) {
+    const existing = loadExistingGlobalFile(RESTAURANT_DATA_PATH, 'WAI_RESTAURANT_DATA');
+    Object.keys(existing).forEach((k) => { if (k !== '__generatedAt') buckets[k] = existing[k]; });
+  }
+  let processedTargets = 0, slicedTargets = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const key = targets[i];
+    if (!inSlice(i, WORK_SLICE)) { slicedTargets += 1; continue; }
+    if (callBudgetExhausted()) { console.log(`已達 API 預算（${MAX_CALLS} 次），提前停止 crawl-food（其餘目的地保留既有資料）。`); break; }
     const center = { lat: agg[key].sumLat / agg[key].count, lng: agg[key].sumLng / agg[key].count };
     const restaurants = await fetchRestaurantsNear(key, center);
     buckets[key] = restaurants;
+    processedTargets += 1;
     console.log(`🍽 ${key}：${restaurants.length} 間餐廳`);
   }
+  if (partial) console.log(`Crawl-food 部分更新：本次更新 ${processedTargets} 個目的地，略過 ${slicedTargets} 個（切片），API 呼叫 ${apiCallsUsed} 次。`);
 
   const total = Object.keys(buckets).reduce((n, k) => n + buckets[k].length, 0);
   const payload = Object.assign({ __generatedAt: new Date().toISOString() }, buckets);

@@ -379,6 +379,7 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-node-title{margin:0;font-size:19px;font-weight:900;color:#1e2940;}
 .wizard-node-desc{margin:3px 0 0;font-size:16px;color:#5f6876;}
 .wizard-summary{background:#e8fff5;border:1px solid #c4f0d8;color:#1a6f49;border-radius:12px;padding:10px;margin-top:12px;font-size:16px;}
+.wizard-flow-note{background:var(--accent2-light);border:1px solid var(--accent2);color:var(--accent2-dark);border-radius:12px;padding:10px 12px;margin-top:10px;font-size:14px;line-height:1.55;}
 /* ── 建立行程：分段步驟進度條（取代舊 CLI 面板）── */
 .wiz-gen-progress{margin-top:14px;padding-top:14px;border-top:1px dashed #d9e2ee;animation:fadeNode .3s ease both;}
 .wgp-title{font-size:14px;font-weight:800;color:#1176c9;text-align:center;margin-bottom:14px;letter-spacing:.3px;}

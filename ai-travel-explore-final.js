@@ -554,6 +554,10 @@ function getPromptRuleLines(wizardData, mode) {
       const _to   = _rawEndLoc   || dest;
       lines.push(`${lines.length + 1}. 景點請沿「${_from}」→「${dest}」→「${_to}」路線廊道分布（各景點距此路線盡量在 5 公里內，景點不足時可擴展至 10 公里），行程方向由起點往目的地核心再往終點收尾，不要安排需要大幅折返的景點，避免景點全部集中在${dest}核心而忽略沿途地點`);
     }
+    if (wizardData.transportMode === 'car' || wizardData.transportMode === 'scooter') {
+      const _vehicle = wizardData.transportMode === 'scooter' ? '機車' : '汽車';
+      lines.push(`${lines.length + 1}. 本行程以${_vehicle}自駕為主：挑選景點時請一併考量停車可行性，盡量避開停車極度困難的點；對停車較不易的景點（如熱門老街、夜市、假日海灘、市區廟宇），請在該站 desc 末尾用一句話提醒停車狀況與建議（例如改停就近付費停車場、預留找車位的時間）。`);
+    }
   } else {
     lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
   }
@@ -4207,6 +4211,20 @@ function buildInterestDrivenStops(dest, interests = [], pace = '平衡', startLo
   return [firstStop, ...middleStops, lastStop];
 }
 
+// 自駕（汽車／機車）才提醒：本地資料沒有即時車位，誠實告知未涵蓋停車，請使用者預留找車位時間。
+function parkingAdvisoryText(mode) {
+  if (mode !== 'car' && mode !== 'scooter') return '';
+  const vehicle = mode === 'scooter' ? '機車' : '汽車';
+  return `🅿️ ${vehicle}自駕提醒：此行程未包含各景點的即時停車位資訊。熱門景點、老街、夜市與假日海灘的車位可能有限，請預留找車位與步行的時間，並留意現場停車規定與收費。`;
+}
+function updateFlowParkingNote() {
+  const el = document.getElementById('flowParkingNote');
+  if (!el) return;
+  const text = parkingAdvisoryText(wizData.transportMode || 'car');
+  if (text) { el.textContent = text; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
 function renderFlowPreview() {
   const dest = wizData.dest || wizData.destCustom || '台東';
   const days = wizData.days || '1天';
@@ -4269,6 +4287,7 @@ function renderFlowPreview() {
   const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
   const peopleStr = wizData.people === '1人' ? '獨旅' : `${wizData.people || '2人'}人同行`;
   document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${peopleStr}，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
+  updateFlowParkingNote();
 }
 
 function onDestInput(val) {

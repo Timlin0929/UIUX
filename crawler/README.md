@@ -223,6 +223,44 @@ npm run crawl:food
 
 注意：目前為 **Interactive only**（使用者登入時才會跑），不需密碼；需機器開機。服務帳號路徑寫死在 `.bat` 內，搬移專案請同步修改。若要「未登入也跑」，重建時加 `/ru <帳號> /rp <密碼>`。
 
+## 每日分散爬蟲（一週平均跑完 + 免費額度用完前停止）
+
+`verify:places` 對全部 `scenic_points` 逐筆打 Places（可能上百次），一次跑完容易吃掉免費額度。改用兩個旗標把它**平均分散在一週**、並在**預算內停止**：
+
+| 旗標 | 作用 |
+|---|---|
+| `--slice K/N` | 把待處理文件均分成 N 份，只跑第 K 份（K 從 1 起算）。例：`--slice 3/7` |
+| `--max-calls N` | 本次最多打 N 次 Google API（geocode／Places searchText），達上限即停，**未處理者下次續跑**。`0`＝不限 |
+
+- `verify:places` 會自動**跳過已驗證**的文件，所以同一片隔天重跑只會處理還沒做的；7 天跑完整輪後就閒置（每天 0 工作量）。
+- `--slice` / `--max-calls` 也可用環境變數 `CRAWL_SLICE` / `CRAWL_MAX_CALLS` 設定。
+- `crawl:food` 在切片／預算模式下改為**部分更新**：先讀既有 `restaurant-data.js`，只覆寫本次處理到的目的地，不會清掉其他天已爬的資料。
+
+手動試一片（含預算上限）：
+
+```powershell
+npm run verify:places -- --slice 2/7 --max-calls 120
+```
+
+### 用工作排程每天自動分散
+
+[`run-weekly-crawl.bat`](run-weekly-crawl.bat) 會**依星期幾**自動算出今天要跑哪一片（週日=1…週六=7），以 `CRAWL_MAX_CALLS`（預設 120）為當日上限跑 `verify:places`，再重產 `poi-data.js`（`export:local` 零 API 費用）。輸出寫到 `crawler\weekly-crawl.log`。
+
+建立每天 03:00 執行的工作：
+
+```powershell
+schtasks /create /tn "WanderAI Weekly Crawl" /tr "C:\Users\USER\Desktop\UIUX\crawler\run-weekly-crawl.bat" /sc DAILY /st 03:00 /f
+```
+
+| 操作 | 指令 |
+|---|---|
+| 立即手動跑今天這一片 | `schtasks /run /tn "WanderAI Weekly Crawl"` |
+| 改每日上限（例 80） | 設環境變數 `CRAWL_MAX_CALLS`，或直接改 `.bat` 內的預設值 |
+| 停用 / 啟用 | `schtasks /change /tn "WanderAI Weekly Crawl" /disable`（`/enable`） |
+| 刪除 | `schtasks /delete /tn "WanderAI Weekly Crawl" /f` |
+
+**`CRAWL_MAX_CALLS` 怎麼定？** 取決於你的免費額度：Google Maps Platform 每月約 US$200 免額，這個 `verify:places` 的 searchText（含座標／營業時間／評分欄位）約 Enterprise 等級，**每月免費額度約可換 5,000–6,000 次**。預設 120/天 × 30 ≈ 3,600/月，落在免額內。若你已有其他用途在吃同一份額度，請把每日上限調低。
+
 ## 各資料檔與刷新流程
 
 | 檔案 | 全域變數 | 由誰產生 | 何時刷新 |
@@ -254,6 +292,8 @@ $env:IMPORT_LIMIT="500"
 - `VERIFY_NEAR_METERS`：verify:places 接受 Places 結果與 OpenData 座標的最大距離，預設 `5000`
 - `MIN_FOOD_POIS`：crawl:food 目的地最少景點數門檻，預設 `3`
 - `FOOD_PER_DEST`：crawl:food 每目的地最多收幾間餐廳，預設 `25`
+- `CRAWL_MAX_CALLS`：單次執行最多打幾次 Google API，達上限即停（免費額度守門），`0`＝不限
+- `CRAWL_SLICE`：把工作均分成 N 份只跑第 K 份，形如 `3/7`（等同 `--slice`，用於一週分散）
 - `RESTAURANT_DATA_PATH` / `EXPORT_LOCAL_PATH`：覆寫輸出檔路徑
 
 ## 常用流程
