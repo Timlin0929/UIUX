@@ -607,6 +607,48 @@ function buildPreferenceLines(wizardData) {
   return lines;
 }
 
+// === 希望景點 ↔ 個人禁忌衝突偵測（純 UI 警告用）===
+// 從帳號偏好的 avoidTags（去 #）與 avoid 自由文字取出可比對的關鍵字，去除常見前後綴。
+function getAvoidKeywords() {
+  const pf = (typeof currentUser !== 'undefined' && currentUser && currentUser.preferences) || {};
+  const tags = Array.isArray(pf.avoidTags) ? pf.avoidTags : [];
+  const free = typeof pf.avoid === 'string' ? pf.avoid : '';
+  const raw = [
+    ...tags.map(t => String(t).replace(/^#/, '')),
+    ...free.split(/[、,，;；。\s/|]+/)
+  ];
+  const seen = new Set();
+  const out = [];
+  raw.forEach(s => {
+    const k = String(s || '')
+      .replace(/^(不吃|不喝|避開|避免|想避開|想避免|別|拒)/, '')
+      .replace(/(過敏|類)$/, '')
+      .trim();
+    if (k && !seen.has(k)) { seen.add(k); out.push(k); }
+  });
+  return out;
+}
+// 回傳 text 中命中的禁忌關鍵字（去重）
+function findDesiredSpotConflicts(text) {
+  const t = String(text || '');
+  if (!t.trim()) return [];
+  return getAvoidKeywords().filter(k => t.includes(k));
+}
+// 有命中時回傳警告 div；否則空字串
+function desiredSpotsWarningHtml(text) {
+  const hits = findDesiredSpotConflicts(text);
+  if (!hits.length) return '';
+  return `<div style="margin-top:8px;padding:10px 12px;border:1px solid var(--accent2);background:var(--accent2-light);border-radius:10px;font-size:13px;line-height:1.5;color:var(--accent2-dark);">`
+    + `ⓘ 你填的景點文字提到你想避免的：<b>${hits.join('、')}</b>。AI 生成時會自動改用不衝突的鄰近替代並在摘要說明，你也可自行調整。</div>`;
+}
+// 供 textarea oninput 即時更新警告
+function updateDesiredSpotsWarning() {
+  const ta = document.getElementById('wizDesiredSpots');
+  const box = document.getElementById('wizDesiredWarn');
+  if (!ta || !box) return;
+  box.innerHTML = desiredSpotsWarningHtml(ta.value);
+}
+
 function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const destination = wizardData.dest || wizardData.destCustom || '台東';
   const win = getTripDayWindows(wizardData);
@@ -661,6 +703,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
 
   const desiredNote = wizardData.desiredSpots
     ? `\n\n⚠️ 用戶特別希望前往：${wizardData.desiredSpots}。請優先安排這些景點（時間不足時選最重要的），並圍繞它們規劃行程。`
+      + `\n但若其中某個景點與上方「個人禁忌／需避免」衝突（例如使用者對海鮮過敏卻指定海鮮餐廳、吃素卻指定燒肉店），一律以禁忌為最高優先：請勿安排該景點，改以附近、性質相近且不違反禁忌的替代景點取代；並在 reply 以一句話說明「哪個希望景點因禁忌被替換、換成了什麼」。`
     : '';
 
   const visitedPlaces = (() => {
@@ -3829,6 +3872,7 @@ function renderWizard() {
               <span style="font-weight:600;">${t.key}</span><span style="font-size:13px;color:#5f6876;">${per}</span></button>`;
           }).join('')}
         </div>
+        <p style="margin-top:8px;font-size:13px;color:#8fa4b8;line-height:1.5;">ℹ️ 此預算為當地餐飲與付費體驗的花費，<b>不含往返目的地的車票／機票等交通旅費</b>（站間移動與離島船票會另行估算）。</p>
         ${(()=>{ const d=describeBudget(wizData.budget, wizData.people); return d?`<p style="margin-top:8px;font-size:14px;color:#4a7fad;">👥 ${d.groupLabel}</p>`:''; })()}
       </div>
       ${isLongTrip(wizData.days)?`
@@ -3840,7 +3884,8 @@ function renderWizard() {
       </div>`:''}
       <div class="wizard-field">
         <label>希望去的景點 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
-        <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value">${wizData.desiredSpots||''}</textarea>
+        <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value;updateDesiredSpotsWarning()">${wizData.desiredSpots||''}</textarea>
+        <div id="wizDesiredWarn">${desiredSpotsWarningHtml(wizData.desiredSpots||'')}</div>
       </div>`;
   }
 
