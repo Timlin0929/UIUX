@@ -15,6 +15,7 @@
 <script src="restaurant-data.js"></script>
 <script src="ferry-config.js"></script>
 <script src="cost-config.js"></script>
+<script src="avoid-tags.js"></script>
 <script src="wheel-picker.js"></script>
 <link rel="stylesheet" href="./ai-travel-explore-final.css">
 </head>
@@ -97,14 +98,15 @@
     <div class="wizard-field" style="text-align:left">
       <label>平常偏好的行程節奏</label>
       <div class="wizard-chips" id="prefPaceGrid">
-        <button class="wizard-tag" type="button" onclick="setPrefPace('輕快')">🏃 輕快</button>
-        <button class="wizard-tag active" type="button" onclick="setPrefPace('平衡')">🚶 平衡</button>
-        <button class="wizard-tag" type="button" onclick="setPrefPace('悠閒')">🐢 悠閒</button>
+        <button class="wizard-tag" type="button" data-pace="輕快" onclick="setPrefPace('輕快')">🏃 緊湊充實</button>
+        <button class="wizard-tag active" type="button" data-pace="平衡" onclick="setPrefPace('平衡')">🚶 標準步調</button>
+        <button class="wizard-tag" type="button" data-pace="悠閒" onclick="setPrefPace('悠閒')">🐢 放鬆慢遊</button>
       </div>
     </div>
     <div class="wizard-field" style="text-align:left">
-      <label>飲食禁忌 / 想避免的事物 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（選填，每趟行程都會自動套用）</span></label>
-      <textarea id="prefAvoid" rows="2" placeholder="例：素食、不吃辣、海鮮過敏、想避開人潮與高消費景點…" oninput="tempPrefs.avoid=this.value" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d8e2ef;border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;background:#f7fbff"></textarea>
+      <label>飲食禁忌 / 想避免的事物 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，每趟行程都會自動套用）</span></label>
+      <div id="prefAvoidTags" style="margin-bottom:8px"></div>
+      <textarea id="prefAvoid" rows="2" placeholder="其他想避免的（自由填寫）…例：想避開夜市、不愛人擠人…" oninput="tempPrefs.avoid=this.value" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d8e2ef;border-radius:10px;font-size:17px;font-family:inherit;resize:vertical;background:#f7fbff"></textarea>
     </div>
     <button class="lm-submit" onclick="saveUserPreferences()" style="margin-top:24px">完成設定</button>
     <div style="text-align:center;margin-top:12px">
@@ -184,7 +186,7 @@
     <div class="lm-title">加入共編行程 🔑</div>
     <div class="lm-sub">請輸入朋友分享的 8 碼邀請碼</div>
     <div class="lm-field">
-      <input type="text" id="inviteCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:18px; text-align:center;">
+      <input type="text" id="inviteCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:22px; text-align:center;">
     </div>
     <button class="lm-submit" onclick="submitInviteCode()">確認加入</button>
   </div>
@@ -248,7 +250,7 @@
     </div>
     <div class="lm-field" style="margin-bottom:0;">
       <label for="journeyCodeInput">流程碼</label>
-      <input type="text" id="journeyCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:18px; text-align:center;">
+      <input type="text" id="journeyCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:22px; text-align:center;">
     </div>
     <div class="journey-actions">
       <button class="lm-submit" onclick="submitJourneyCode()">進入旅遊</button>

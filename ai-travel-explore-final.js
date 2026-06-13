@@ -560,6 +560,11 @@ function getPromptRuleLines(wizardData, mode) {
   return lines;
 }
 
+// 節奏顯示名稱：UI 顯示更直白，但內部值維持 輕快/平衡/悠閒（slotMinutes 等邏輯依賴）
+const PACE_LABELS = { '輕快': '緊湊充實', '平衡': '標準步調', '悠閒': '放鬆慢遊' };
+const PACE_EMOJI = { '輕快': '🏃', '平衡': '🚶', '悠閒': '🐢' };
+function paceLabel(v) { return PACE_LABELS[v] || v || '標準步調'; }
+
 // 帳號長期偏好（註冊時設定）與本趟精靈選擇的合併規則：
 // - 本趟選擇（wizData.interests / pace）為「這趟行程」的權威值，主導景點安排與時間節奏。
 // - 帳號長期偏好（profilePrefs，來自 selectTripMode 快照，否則退回 currentUser.preferences）
@@ -574,9 +579,10 @@ function getEffectivePrefs(wizardData) {
   const tripPace = wd.pace || (profile && profile.pace) || '平衡';
   const longPace = (profile && profile.pace) || '';
   const avoid = (profile && typeof profile.avoid === 'string') ? profile.avoid.trim() : '';
+  const avoidTags = (profile && Array.isArray(profile.avoidTags)) ? profile.avoidTags.filter(Boolean) : [];
   // 長期興趣中、本趟未涵蓋的部分（差異 = 衝突來源）→ 降為次要參考
   const extraLong = longInterests.filter(i => !tripInterests.includes(i));
-  return { tripInterests, longInterests, extraLong, tripPace, longPace, avoid, hasProfile: !!profile };
+  return { tripInterests, longInterests, extraLong, tripPace, longPace, avoid, avoidTags, hasProfile: !!profile };
 }
 
 // 產生 prompt 的「個人偏好」段落：本趟優先、長期次要、禁忌硬性遵守，三者層級分明不衝突
@@ -584,17 +590,19 @@ function buildPreferenceLines(wizardData) {
   const p = getEffectivePrefs(wizardData);
   const lines = [];
   if (p.longPace && p.longPace !== p.tripPace) {
-    lines.push(`行程節奏：${p.tripPace}（本趟指定，以此為準；使用者長期偏好節奏為「${p.longPace}」，僅供參考）`);
+    lines.push(`行程節奏：${paceLabel(p.tripPace)}（${p.tripPace}）（本趟指定，以此為準；使用者長期偏好節奏為「${paceLabel(p.longPace)}（${p.longPace}）」，僅供參考）`);
   } else {
-    lines.push(`行程節奏：${p.tripPace}`);
+    lines.push(`行程節奏：${paceLabel(p.tripPace)}（${p.tripPace}）`);
   }
   const tripInt = p.tripInterests.length ? p.tripInterests.join('、') : '多元體驗';
   lines.push(`本趟興趣方向：${tripInt}（規劃景點類型以此為主）`);
   if (p.extraLong.length) {
     lines.push(`使用者長期興趣偏好：${p.extraLong.join('、')}（次要參考；可在不影響本趟興趣的前提下適度融入，若與本趟方向衝突一律以本趟為準）`);
   }
-  if (p.avoid) {
-    lines.push(`⚠️ 個人禁忌／需避免（此為帳號設定，所有行程務必全程遵守，包含餐廳與景點挑選）：${p.avoid}`);
+  const avoidTagStr = (p.avoidTags || []).join(' ');
+  const avoidBoth = [avoidTagStr, p.avoid].filter(Boolean).join('；其他：');
+  if (avoidBoth) {
+    lines.push(`⚠️ 個人禁忌／需避免（此為帳號設定，所有行程務必全程遵守，包含餐廳與景點挑選）：${avoidBoth}`);
   }
   return lines;
 }
@@ -814,7 +822,7 @@ function renderAiSkeletonPreview(plan) {
     <div class="wizard-node">
       <div class="wizard-node-top">
         <h4 class="wizard-node-title">🧭 ${name}</h4>
-        <span style="font-size:12px;color:#4e6b87;">${time}</span>
+        <span style="font-size:14px;color:#4e6b87;">${time}</span>
       </div>
       <p class="wizard-node-desc">${desc}</p>
     </div>`;
@@ -3030,7 +3038,7 @@ function renderUserMenu() {
           <div class="user-dropdown-name">${u.name}</div>
           <div class="user-dropdown-email">${u.email}</div>
         </div>
-        <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:11px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
+        <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:13px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
         <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
         <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>
         <div class="user-dd-sep"></div>
@@ -3096,7 +3104,7 @@ async function doRegister() {
         email: email,
         name: name,
         emoji: '🌟',
-        preferences: { interests: [], pace: '平衡', avoid: '' },
+        preferences: { interests: [], pace: '平衡', avoid: '', avoidTags: [] },
         visitedSpots: [],
         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -3168,7 +3176,7 @@ async function doSocialLogin(providerName) {
           email: user.email || '',
           name: user.displayName || '社群用戶',
           emoji: providerName === 'Google' ? '🌐' : '📘',
-          preferences: { interests: [], pace: '平衡', avoid: '' },
+          preferences: { interests: [], pace: '平衡', avoid: '', avoidTags: [] },
           visitedSpots: [],
           createdAt: firebase.firestore.FieldValue.serverTimestamp(),
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -3190,14 +3198,15 @@ function doLogout() {
 }
 
 // === Preferences Wizard ===
-let tempPrefs = { interests: [], pace: '平衡', avoid: '' };
+let tempPrefs = { interests: [], pace: '平衡', avoid: '', avoidTags: [] };
 function openPrefWizard() {
   // 編輯時帶入既有偏好（之前每次開啟都會清空，導致無法修改）
   const src = (currentUser && currentUser.preferences) || {};
   tempPrefs = {
     interests: Array.isArray(src.interests) ? [...src.interests] : [],
     pace: src.pace || '平衡',
-    avoid: typeof src.avoid === 'string' ? src.avoid : ''
+    avoid: typeof src.avoid === 'string' ? src.avoid : '',
+    avoidTags: Array.isArray(src.avoidTags) ? [...src.avoidTags] : []
   };
   renderPrefWizard();
   document.getElementById('prefWizardOverlay').classList.add('open');
@@ -3217,8 +3226,37 @@ function togglePrefInterest(btn, int) {
 function setPrefPace(pace) {
   tempPrefs.pace = pace;
   document.querySelectorAll('#prefPaceGrid .wizard-tag').forEach(btn => {
-    btn.classList.toggle('active', btn.textContent.includes(pace));
+    btn.classList.toggle('active', btn.dataset.pace === pace);
   });
+}
+function togglePrefAvoidTag(btn, tag) {
+  if (!Array.isArray(tempPrefs.avoidTags)) tempPrefs.avoidTags = [];
+  const idx = tempPrefs.avoidTags.indexOf(tag);
+  if (idx > -1) {
+    tempPrefs.avoidTags.splice(idx, 1);
+    btn.classList.remove('active');
+  } else {
+    tempPrefs.avoidTags.push(tag);
+    btn.classList.add('active');
+  }
+}
+// \u4f9d\u56fa\u5b9a\u6a19\u7c64\u5b57\u5178\uff08avoid-tags.js\uff09\u6e32\u67d3\u53ef\u9ede\u9078\u7684\u7981\u5fcc chip\uff0c\u4e26\u4f9d\u76ee\u524d\u9078\u53d6\u72c0\u614b\u6a19 active
+function renderAvoidTagChips() {
+  const host = document.getElementById('prefAvoidTags');
+  if (!host) return;
+  const groups = Array.isArray(window.WAI_AVOID_TAGS) ? window.WAI_AVOID_TAGS : [];
+  const selected = Array.isArray(tempPrefs.avoidTags) ? tempPrefs.avoidTags : [];
+  host.innerHTML = groups.map(g => `
+    <div style="margin-bottom:6px">
+      <div style="font-size:13px;color:#8fa4b8;font-weight:700;margin-bottom:4px">${g.group}</div>
+      <div class="wizard-chips">
+        ${(g.items || []).map(it => `
+          <button class="wizard-tag${selected.includes(it.tag) ? ' active' : ''}" type="button"
+            onclick="togglePrefAvoidTag(this, '${it.tag}')">${it.label}</button>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
 }
 function renderPrefWizard() {
   setPrefPace(tempPrefs.pace);
@@ -3226,6 +3264,7 @@ function renderPrefWizard() {
     const int = btn.textContent.replace(/[^\u4e00-\u9fa5]/g, '').trim();
     btn.classList.toggle('active', tempPrefs.interests.includes(int));
   });
+  renderAvoidTagChips();
   const av = document.getElementById('prefAvoid');
   if (av) av.value = tempPrefs.avoid || '';
 }
@@ -3257,7 +3296,7 @@ if (typeof firebase !== 'undefined') {
         name: user.displayName || user.email?.split('@')[0] || '使用者',
         email: user.email,
         emoji: '😊',
-        preferences: { interests: [], pace: '平衡', avoid: '' },
+        preferences: { interests: [], pace: '平衡', avoid: '', avoidTags: [] },
         visitedSpots: []
       };
       if (firebaseDb) {
@@ -3325,7 +3364,7 @@ function renderGrid() {
   const grid = document.getElementById('tripsGrid');
   const list = getFiltered();
   if (!list.length) {
-    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--ink3)"><div style="font-size:40px;margin-bottom:12px">🔍</div><div>找不到符合的行程</div></div>`;
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--ink3)"><div style="font-size:48px;margin-bottom:12px">🔍</div><div>找不到符合的行程</div></div>`;
     return;
   }
   grid.innerHTML = list.map(t => {
@@ -3430,7 +3469,7 @@ function closePreview() {
 }
 function renderPmStars(my) {
   const row = document.getElementById('pmStars');
-  row.innerHTML = `<span style="font-size:11px;color:rgba(255,255,255,.7);margin-right:4px">${my?'你給了 '+my+'星':'為行程評分'}</span>
+  row.innerHTML = `<span style="font-size:13px;color:rgba(255,255,255,.7);margin-right:4px">${my?'你給了 '+my+'星':'為行程評分'}</span>
     ${[1,2,3,4,5].map(i=>`
       <button class="pm-star" onclick="rateTrip(${i})" style="color:${i<=my?'#f5c842':'rgba(255,255,255,.35)'}">★</button>`).join('')}`;
 }
@@ -3533,7 +3572,7 @@ function renderSideMyTrips() {
   const el = document.getElementById('sideMyTrips');
   if (!el) return;
   if (!myTrips.length) {
-    el.innerHTML = `<div style="font-size:13px;color:var(--ink3);text-align:center;padding:10px 0">還沒有行程，點上方建立</div>`;
+    el.innerHTML = `<div style="font-size:16px;color:var(--ink3);text-align:center;padding:10px 0">還沒有行程，點上方建立</div>`;
     return;
   }
   el.innerHTML = `<div class="my-trips-list">${myTrips.slice(0,4).map(t=>`
@@ -3541,7 +3580,7 @@ function renderSideMyTrips() {
       <span class="my-trip-emoji">${t.emoji}</span>
       <div><div class="my-trip-name">${t.title}</div><div class="my-trip-sub">${t.days}天 · ${t.region}</div></div>
     </div>`).join('')}</div>
-    ${myTrips.length>4?`<div style="font-size:12px;color:var(--accent);text-align:center;padding:8px 0;cursor:pointer" onclick="showMainView('mytrips')">查看全部 ${myTrips.length} 個行程 →</div>`:''}`;
+    ${myTrips.length>4?`<div style="font-size:14px;color:var(--accent);text-align:center;padding:8px 0;cursor:pointer" onclick="showMainView('mytrips')">查看全部 ${myTrips.length} 個行程 →</div>`:''}`;
 }
 
 // ══════════════════════════════════════════════════
@@ -3565,7 +3604,8 @@ function selectTripMode(mode) {
     wizData.profilePrefs = {
       interests: Array.isArray(currentUser.preferences.interests) ? [...currentUser.preferences.interests] : [],
       pace: currentUser.preferences.pace || '',
-      avoid: typeof currentUser.preferences.avoid === 'string' ? currentUser.preferences.avoid : ''
+      avoid: typeof currentUser.preferences.avoid === 'string' ? currentUser.preferences.avoid : '',
+      avoidTags: Array.isArray(currentUser.preferences.avoidTags) ? [...currentUser.preferences.avoidTags] : []
     };
   }
   clearWizardPrefetchState();
@@ -3618,11 +3658,11 @@ function renderWizard() {
         <label>旅行人數</label>
         ${(() => {
           const people = Math.min(20, Math.max(1, parseInt(wizData.people, 10) || 2));
-          const pBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:22px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+          const pBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:26px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
           return `
             <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
               ${pBtn('−', 'adjustTripPeople(-1)', people <= 1)}
-              <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">👥 ${people} 人</div>
+              <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">👥 ${people} 人</div>
               ${pBtn('＋', 'adjustTripPeople(1)', people >= 20)}
             </div>
             <div class="wizard-chips" style="justify-content:center;margin-top:10px">
@@ -3641,7 +3681,7 @@ function renderWizard() {
           const day1Hours = Math.min(12, Math.max(1, Math.round(Number(wizData.day1Hours) || 8)));
           const day1End = minutesToTimeString(timeStringToMinutes(startT) + day1Hours * 60);
           const day2End = normalizeClockInput(wizData.day2EndTime, '12:00');
-          const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:22px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+          const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:26px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
           return `
             <div class="wizard-chips" style="margin-bottom:12px">
               <button class="wizard-tag${!isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('single')">☀️ 單日</button>
@@ -3650,32 +3690,32 @@ function renderWizard() {
             ${isMulti ? `
               <div style="display:flex;flex-direction:column;gap:14px;">
                 <div>
-                  <div style="font-size:13px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第一天遊玩時數</div>
+                  <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第一天遊玩時數</div>
                   <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
                     ${stepBtn('−', 'adjustDay1Hours(-1)', day1Hours <= 1)}
-                    <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">${day1Hours} 小時</div>
+                    <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${day1Hours} 小時</div>
                     ${stepBtn('＋', 'adjustDay1Hours(1)', day1Hours >= 12)}
                   </div>
                 </div>
                 <div>
-                  <div style="font-size:13px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
+                  <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
                   <div class="wai-dt-field" onclick="pickWizDay2EndTime('${day2End}')">
                     <span>${day2End}</span>
                     <span class="wai-dt-ic">🕒</span>
                   </div>
                 </div>
               </div>
-              <p style="margin-top:10px;font-size:12px;color:#5f6876;text-align:center;">🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）</p>
+              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）</p>
             ` : `
               <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
                 ${stepBtn('−', 'adjustTripHours(-1)', hours <= 1)}
-                <div style="min-width:96px;text-align:center;font-size:20px;font-weight:800;color:#1f3a52;">${hours} 小時</div>
+                <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${hours} 小時</div>
                 ${stepBtn('＋', 'adjustTripHours(1)', hours >= 12)}
               </div>
               <div class="wizard-chips" style="justify-content:center;margin-top:10px">
                 ${[2,4,6,8,10].map(n => `<button class="wizard-tag${hours === n ? ' active' : ''}" type="button" onclick="setTripHours(${n})">${n}h</button>`).join('')}
               </div>
-              <p style="margin-top:10px;font-size:12px;color:#5f6876;text-align:center;">🕘 預計 ${startT} – ${endT}・約 ${hours} 小時<span style="color:#8fa4b8;">（出發時間可於下一步調整）</span></p>
+              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">🕘 預計 ${startT} – ${endT}・約 ${hours} 小時<span style="color:#8fa4b8;">（出發時間可於下一步調整）</span></p>
             `}
           `;
         })()}
@@ -3696,15 +3736,15 @@ function renderWizard() {
       <div class="wizard-field">
         <label>出發站點 / 集合地點</label>
         <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">可填車站、停車場或民宿；留空自動使用目的地最近的交通樞紐</p>
+        <p style="margin-top:5px;font-size:14px;color:#5f6876;">可填車站、停車場或民宿；留空自動使用目的地最近的交通樞紐</p>
       </div>
       <div class="wizard-field">
         <label>回程站點 / 返回地點</label>
         <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
-        <p style="margin-top:5px;font-size:12px;color:#5f6876;">旅程結束的返回地點；留空則與出發站點相同</p>
+        <p style="margin-top:5px;font-size:14px;color:#5f6876;">旅程結束的返回地點；留空則與出發站點相同</p>
       </div>
       <div class="wizard-field" style="margin-top:16px">
-        <label>主要交通工具<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">生成行程時各段移動會以此工具為主，短程則步行</span></label>
+        <label>主要交通工具<span style="font-size:13px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">生成行程時各段移動會以此工具為主，短程則步行</span></label>
         <div class="wizard-chips">
           ${[{v:'taxi',t:'🚕 計程車'},{v:'scooter',t:'🛵 機車'},{v:'car',t:'🚗 汽車'}].map(o=>`
             <button class="wizard-tag${(wizData.transportMode||'car')===o.v?' active':''}" type="button" data-transport="${o.v}" onclick="selectTransport('${o.v}')">${o.t}</button>
@@ -3713,7 +3753,7 @@ function renderWizard() {
       </div>
       <div class="wizard-field" id="wizTripFocusBlock" style="margin-top:16px">
         <div class="wiz-focus-head">
-          <label style="margin:0;">本趟想偏重<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重與行程節奏</span></label>
+          <label style="margin:0;">本趟想偏重<span style="font-size:13px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重與行程節奏</span></label>
           ${_hasProfileFocus ? `<button type="button" class="wiz-focus-toggle" id="wizFocusToggle" onclick="toggleTripFocus()">${_focusExpanded ? '收合 ▴' : '本趟調整 ▾'}</button>` : ''}
         </div>
         ${_hasProfileFocus ? `<div class="wiz-focus-summary" id="wizFocusSummary" style="${_focusExpanded ? 'display:none' : ''}">${_tripFocusSummary()}</div>` : ''}
@@ -3733,14 +3773,14 @@ function renderWizard() {
           </div>
           <div class="wizard-field" style="margin-top:14px;margin-bottom:0;">
             <label>本趟節奏</label>
-            <select id="wizPace" onchange="updateWizardPace(this.value)">
-              ${['輕快','平衡','悠閒'].map(p=>`<option ${wizData.pace===p?'selected':''}>${p}</option>`).join('')}
-            </select>
+            <div class="wizard-chips" id="wizPaceGrid">
+              ${['輕快','平衡','悠閒'].map(p=>`<button class="wizard-tag${wizData.pace===p?' active':''}" type="button" data-pace="${p}" onclick="updateWizardPace('${p}')">${PACE_EMOJI[p]} ${paceLabel(p)}</button>`).join('')}
+            </div>
           </div>
         </div>
       </div>
       <div class="wizard-field">
-        <label>旅程風格<span style="font-size:11px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與本趟想偏重互補，各有作用</span></label>
+        <label>旅程風格<span style="font-size:13px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與本趟想偏重互補，各有作用</span></label>
         <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-theme')">${wizData.theme||''}</textarea>
       </div>
       <div class="wizard-chips">
@@ -3759,7 +3799,7 @@ function renderWizard() {
           <span class="${wizData.departureDate?'':'wai-dt-ph'}">${wizData.departureDate ? wizData.departureDate.replace(/-/g,'/') : '請選擇出發日期'}</span>
           <span class="wai-dt-ic">📅</span>
         </div>
-        ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:12px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${ wizData.returnDate !== wizData.departureDate ? '（隔日）' : '（當天）'}</p>` : ''}
+        ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:14px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${ wizData.returnDate !== wizData.departureDate ? '（隔日）' : '（當天）'}</p>` : ''}
       </div>
 
       <div class="wizard-field">
@@ -3768,7 +3808,7 @@ function renderWizard() {
           <span>${wizData.startTime||'09:00'}</span>
           <span class="wai-dt-ic">🕒</span>
         </div>
-        <p style="margin-top:8px;font-size:12px;color:#5f6876;">行程將依「${wizData.pace||'平衡'}」節奏自動計算每站間距</p>
+        <p style="margin-top:8px;font-size:14px;color:#5f6876;">行程將依「${paceLabel(wizData.pace||'平衡')}」節奏自動計算每站間距</p>
       </div>`;
 
   } else if (wizStep===3) {
@@ -3776,7 +3816,7 @@ function renderWizard() {
     body.innerHTML = `<h3 class="wizard-block-title">💰 預算 & 其他</h3>
       <p class="wizard-block-help">設定旅行預算，並可選填希望拜訪的景點</p>
       <div class="wizard-field">
-        <label>預算 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（每人預算，下方自動換算 ${getPeopleCount(wizData.people)} 人總額）</span></label>
+        <label>預算 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（每人預算，下方自動換算 ${getPeopleCount(wizData.people)} 人總額）</span></label>
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(2,1fr)">
           ${BUDGET_TIERS.map(t=>{
             const open=t.perMax==null;
@@ -3786,10 +3826,10 @@ function renderWizard() {
             return `<button class="wizard-tag${on?' active':''}" type="button"
               onclick="wizData.budget='${token}';renderWizard()"
               style="display:flex;flex-direction:column;gap:2px;align-items:center;line-height:1.3;background:${on?'#dff1ff':'#f7fbff'};border-color:${on?'#7db8ee':'#d8e2ef'}">
-              <span style="font-weight:600;">${t.key}</span><span style="font-size:11px;color:#5f6876;">${per}</span></button>`;
+              <span style="font-weight:600;">${t.key}</span><span style="font-size:13px;color:#5f6876;">${per}</span></button>`;
           }).join('')}
         </div>
-        ${(()=>{ const d=describeBudget(wizData.budget, wizData.people); return d?`<p style="margin-top:8px;font-size:12px;color:#4a7fad;">👥 ${d.groupLabel}</p>`:''; })()}
+        ${(()=>{ const d=describeBudget(wizData.budget, wizData.people); return d?`<p style="margin-top:8px;font-size:14px;color:#4a7fad;">👥 ${d.groupLabel}</p>`:''; })()}
       </div>
       ${isLongTrip(wizData.days)?`
       <div class="wizard-field">
@@ -3799,7 +3839,7 @@ function renderWizard() {
         </select>
       </div>`:''}
       <div class="wizard-field">
-        <label>希望去的景點 <span style="font-size:11px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
+        <label>希望去的景點 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
         <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value">${wizData.desiredSpots||''}</textarea>
       </div>`;
   }
@@ -3980,7 +4020,7 @@ function updateWizardPace(value) {
 function _tripFocusSummary() {
   const pf = (currentUser && currentUser.preferences) || null;
   const ints = (wizData.interests && wizData.interests.length) ? wizData.interests.join('、') : '多元體驗';
-  const txt = `${ints}｜${wizData.pace || '平衡'}節奏`;
+  const txt = `${ints}｜${paceLabel(wizData.pace || '平衡')}節奏`;
   const inherited = pf && Array.isArray(pf.interests)
     && wizData.interests && wizData.interests.length === pf.interests.length
     && wizData.interests.every(i => pf.interests.includes(i))
@@ -4168,7 +4208,7 @@ function renderFlowPreview() {
     <div class="wizard-node">
       <div class="wizard-node-top">
         <h4 class="wizard-node-title">🧭 ${spot.title}</h4>
-        <div class="wizard-node-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickPreviewNodeTime(${i}, '${times[i]}')">${times[i]}<span style="font-size:11px;opacity:.6;">🕒</span></div>
+        <div class="wizard-node-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickPreviewNodeTime(${i}, '${times[i]}')">${times[i]}<span style="font-size:13px;opacity:.6;">🕒</span></div>
       </div>
       <p class="wizard-node-desc">${spot.desc}</p>
     </div>
