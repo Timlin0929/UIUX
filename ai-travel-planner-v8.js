@@ -4,6 +4,8 @@
   let currentTripWindow = { start: '', end: '' };
   let currentTripRegion = '';
   let currentInviteCode = '';
+  let collabReadOnly = false; // 多人共作：viewer / 訪客唯讀模式（變更不寫回共用行程）
+  let collabRole = '';
   const isPrototypeMode = true;
   let isReplanning = false;
   let draggingStopId = null;
@@ -1595,7 +1597,8 @@
   async function initFromUrl() {
     try {
       const params = new URLSearchParams(window.location.search);
-      const explicitTripId = params.get('id');
+      const explicitTripId = params.get('id') || params.get('sharedId');
+      const isGuestView = params.get('guest') === '1';
       const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
       const rememberedTripId = localStorage.getItem(ACTIVE_TRIP_LOCAL_KEY) || '';
       const fallbackTripId = rememberedTripId || (myTrips[0] && myTrips[0].id) || '';
@@ -1606,10 +1609,23 @@
         if (!trip && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
-             if (doc.exists) trip = doc.data();
+             if (doc.exists) { trip = doc.data(); if (!trip.id) trip.id = doc.id; }
            } catch (err) {
              console.warn('Failed to fetch trip from Firebase:', err);
            }
+        }
+
+        // 多人共作：依角色決定唯讀。訪客一律唯讀；登入者非 owner/editor 也唯讀。
+        if (trip && trip.collab) {
+          let myEmail = '';
+          try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (_e) {}
+          const ekey = String(myEmail || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+          const mem = trip.members && trip.members[ekey];
+          // 優先用本機 trip.role（?id= 從 localStorage 載入時沒有 members map，owner 不能被誤判成 viewer）；
+          // Firebase 載入（?sharedId= 無本機檔）才退回 members 裡的角色。
+          collabRole = isGuestView ? 'guest' : (trip.role || (mem && mem.role) || 'viewer');
+          collabReadOnly = isGuestView || !(collabRole === 'owner' || collabRole === 'editor');
+          if (collabReadOnly) showCollabReadOnlyBanner(collabRole);
         }
 
         if (trip) {
@@ -4099,7 +4115,23 @@
     }
   }
 
+  // 多人共作唯讀提示橫幅（viewer / 訪客）
+  function showCollabReadOnlyBanner(role) {
+    if (document.getElementById('collabRoBanner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'collabRoBanner';
+    bar.textContent = role === 'guest'
+      ? '👁 訪客唯讀檢視：你可以瀏覽這份共編行程，但無法編輯或儲存。'
+      : '👁 唯讀模式：你目前是「唯讀」角色，變更不會被儲存。請擁有者把你調為「可編輯」。';
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#37506e;color:#fff;'
+      + 'font-size:13px;text-align:center;padding:8px 12px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.18);';
+    document.body.appendChild(bar);
+    document.body.style.paddingTop = '38px';
+  }
+
   async function persistCurrentTripStops() {
+    if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
+
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
 
     const stopsSnapshot = replanStops.map((stop) => ({
@@ -4576,6 +4608,10 @@
         // 下拉只提供：所選交通工具 + 走路（並保留目前值以相容舊行程）
         const allowedModes = new Set(['walk', getPreferredVehicleMode(), transitMode]);
         const segmentModeOptions = TRANSIT_MODE_OPTIONS.filter((modeOption) => allowedModes.has(modeOption.value));
+        // 開車段但目的地找不到鄰近停車場 → 提醒使用者（停車狀態於畫路線時寫入 routeStageCache）
+        const noParkingWarn = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
+          ? `<div class="transit-parking-warn" style="margin-top:6px;font-size:12px;line-height:1.45;color:#C2410C;background:#FFF4ED;border:1px solid #FED7AA;border-radius:8px;padding:6px 8px;">⚠️ 此段目的地找不到鄰近停車場，請預留路邊或付費停車的時間。</div>`
+          : '';
         html += `<div class="transit-block">
           <div class="transit-block-main">${transitText}</div>
           <label class="transit-mode-wrap">交通工具
@@ -4583,6 +4619,7 @@
               ${segmentModeOptions.map((modeOption) => `<option value="${modeOption.value}" ${transitMode === modeOption.value ? 'selected' : ''}>${modeOption.icon} ${modeOption.label}</option>`).join('')}
             </select>
           </label>
+          ${noParkingWarn}
         </div>`;
       }
     });
@@ -4995,6 +5032,8 @@
         firebase.initializeApp(config);
       }
       firebaseDb = firebase.firestore();
+      // 改用 long-polling 自動偵測：解掉某些網路/瀏覽器/擴充環境下 Firestore Listen 通道 400 Bad Request
+      try { firebaseDb.settings({ experimentalAutoDetectLongPolling: true }); } catch (e) { /* 已啟動則略過 */ }
       if (firebase.storage && config.storageBucket) {
         firebaseStorage = firebase.storage();
       }
@@ -8836,6 +8875,30 @@
     renderItineraryDisplay();
   }
 
+  // 桌機「路線階段」面板的邊緣收合把手（slide-to-edge）
+  function toggleDirectionsPanel() {
+    const panel = document.getElementById('directionsPanel');
+    const handle = document.getElementById('directionsPanelHandle');
+    if (!panel || !handle) return;
+    const collapsed = panel.classList.toggle('collapsed');
+    handle.classList.toggle('collapsed', collapsed);
+    handle.textContent = collapsed ? '階段 ▸' : '階段 ◂';
+  }
+  function setDirectionsPanelHandleVisible(visible) {
+    const handle = document.getElementById('directionsPanelHandle');
+    if (!handle) return;
+    if (visible) {
+      handle.hidden = false;
+    } else {
+      // 隱藏時還原為展開狀態，下次顯示是展開的
+      handle.hidden = true;
+      const panel = document.getElementById('directionsPanel');
+      if (panel) panel.classList.remove('collapsed');
+      handle.classList.remove('collapsed');
+      handle.textContent = '階段 ◂';
+    }
+  }
+
   function toggleMobileRouteSheet(forceExpanded = null) {
     if (!isMobileLayout()) return;
     if (typeof forceExpanded === 'boolean') {
@@ -8955,6 +9018,7 @@
       if (panel) {
         panel.innerHTML = '';
       }
+      setDirectionsPanelHandleVisible(false); // 無路線：收起把手
       renderMobileRouteSheet();
       renderItineraryDisplay();
       return;
@@ -8990,6 +9054,7 @@
       panel.innerHTML = '';
       panel.style.display = isMobileLayout() ? 'none' : 'block';
     }
+    setDirectionsPanelHandleVisible(!isMobileLayout()); // 桌機有路線才顯示收合把手
 
     const routeBounds = new google.maps.LatLngBounds();
     locations.forEach((location) => {
@@ -9011,6 +9076,11 @@
       const isParkingMode = (stageMode === 'car' || stageMode === 'scooter');
       const destParking = isParkingMode ? (parkingByStopIndex[destination.stopIndex] || null) : null;
       const originParking = (isParkingMode && i >= 1) ? (parkingByStopIndex[origin.stopIndex] || null) : null;
+      // 記錄此開車段的目的地有沒有搜到鄰近停車場，供左側交通列 / 右側階段卡顯示警示
+      if (routeStageCache[i]) {
+        routeStageCache[i].parkingSearched = isParkingMode;
+        routeStageCache[i].parkingFound = !!destParking;
+      }
       const driveOrigin = originParking || origin;
       const driveDest = destParking || destination;
       const directionRequest = buildGoogleRouteRequest(stageMode, driveOrigin, driveDest);
@@ -9128,6 +9198,7 @@
               <div style="font-size: 12px; color: var(--ink2);">
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
+                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
               </div>
             `;
 

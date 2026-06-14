@@ -30,6 +30,8 @@ const IMPORT_MODE = !!(argv.import || argv.mode === 'import');
 const EXPORT_LOCAL_MODE = !!(argv['export-local'] || argv.export || argv.mode === 'export-local');
 const VERIFY_PLACES_MODE = !!(argv['verify-places'] || argv.mode === 'verify-places');
 const CRAWL_FOOD_MODE = !!(argv['crawl-food'] || argv.mode === 'crawl-food');
+const CLEANUP_COLLAB_MODE = !!(argv['cleanup-collab'] || argv.mode === 'cleanup-collab');
+const CLEANUP_DAYS = parseInt(argv.days || process.env.CLEANUP_COLLAB_DAYS || '7', 10);
 const FORCE = !!argv.force;
 const VERIFY_NEAR_METERS = parseInt(process.env.VERIFY_NEAR_METERS || '5000', 10);
 const EXPORT_LOCAL_PATH = process.env.EXPORT_LOCAL_PATH || path.resolve(__dirname, '..', 'poi-data.js');
@@ -1013,9 +1015,45 @@ async function crawlFood(db) {
   console.log(`Crawl-food wrote ${RESTAURANT_DATA_PATH}（${total} 間餐廳，跨 ${targets.length} 個目的地）`);
 }
 
+// 清理「孤兒共編行程」：collab 空殼（只開了 lobby、從沒進精靈規劃 → 無 wizardData.dest）
+// 且超過 N 天沒更新者，刪 micro_trips doc + 對應 invites（admin 繞過規則可硬刪）。
+function tsToMillis(ts) {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === 'function') return ts.toMillis();
+  if (typeof ts.seconds === 'number') return ts.seconds * 1000;
+  const n = Date.parse(ts);
+  return Number.isFinite(n) ? n : 0;
+}
+async function cleanupCollab(db) {
+  console.log(`Cleanup-collab mode：刪除「無 wizardData.dest 且 ${CLEANUP_DAYS} 天未更新」的共編空殼（dryRun=${DRY}）`);
+  const snap = await db.collection('micro_trips').where('collab', '==', true).get();
+  if (snap.empty) { console.log('沒有 collab 行程。'); return; }
+  const cutoff = Date.now() - CLEANUP_DAYS * 24 * 60 * 60 * 1000;
+  let scanned = 0, deleted = 0, kept = 0;
+  for (const doc of snap.docs) {
+    scanned += 1;
+    const data = doc.data();
+    const planned = !!(data.wizardData && data.wizardData.dest);
+    const lastTouch = Math.max(tsToMillis(data.updatedAt), tsToMillis(data.collabCreatedAt));
+    const stale = lastTouch > 0 ? lastTouch < cutoff : true; // 無時間戳視為舊資料，也清
+    if (planned || !stale) { kept += 1; continue; }
+    console.log(`🗑 孤兒空殼：${doc.id}（owner=${data.ownerEmail || '?'}，invite=${data.inviteCode || '-'}）`);
+    if (!DRY) {
+      if (data.inviteCode) {
+        try { await db.collection('invites').doc(String(data.inviteCode).toUpperCase().replace(/[^A-Z0-9]/g, '')).delete(); } catch (e) { /* ignore */ }
+      }
+      await doc.ref.delete();
+    }
+    deleted += 1;
+  }
+  console.log('Cleanup-collab summary', { scanned, deleted, kept, days: CLEANUP_DAYS, dryRun: DRY });
+}
+
 async function main() {
   const db = initFirebase();
-  if (CRAWL_FOOD_MODE) {
+  if (CLEANUP_COLLAB_MODE) {
+    await cleanupCollab(db);
+  } else if (CRAWL_FOOD_MODE) {
     await crawlFood(db);
   } else if (VERIFY_PLACES_MODE) {
     await verifyPlaces(db);

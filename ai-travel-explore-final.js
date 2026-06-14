@@ -66,6 +66,7 @@ const currentJourneyPreviewStops = [
 let pendingJourneyEntry = null;
 let wizStep = 0;
 let wizData = {};
+let collabState = null; // 多人協作面板的即時狀態：{ tripId, data, unsub, myEmail, myPrefsDraft }
 
 // ── GEMINI & FIREBASE CONFIG ──
 const GEMINI_MODEL = 'gemini-3-flash-preview';
@@ -131,6 +132,8 @@ function initFirebaseIfConfigured() {
       firebase.initializeApp(config);
     }
     firebaseDb = firebase.firestore();
+    // 改用 long-polling 自動偵測：解掉某些網路/瀏覽器/擴充環境下 Firestore Listen 通道 400 Bad Request
+    try { firebaseDb.settings({ experimentalAutoDetectLongPolling: true }); } catch (e) { /* 已啟動則略過 */ }
     firebaseAuth = firebase.auth();
     firebaseEnabled = true;
     return true;
@@ -591,6 +594,10 @@ function getEffectivePrefs(wizardData) {
 
 // 產生 prompt 的「個人偏好」段落：本趟優先、長期次要、禁忌硬性遵守，三者層級分明不衝突
 function buildPreferenceLines(wizardData) {
+  // 多人共作：以團體彙整偏好（興趣聯集/節奏多數決/預算平均/禁忌聯集）取代單人偏好
+  if (wizardData && wizardData.groupProfile && window.WAI_COLLAB) {
+    return WAI_COLLAB.buildGroupPreferenceLines(wizardData.groupProfile);
+  }
   const p = getEffectivePrefs(wizardData);
   const lines = [];
   if (p.longPace && p.longPace !== p.tripPace) {
@@ -2906,13 +2913,15 @@ async function saveMicroTripToFirebase(trip) {
     const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
     // 剝除暫存旗標 __saving，避免把 UI 狀態寫進 Firestore
     const cleanTrip = serializeTripForStorage(trip);
+    // merge:true：共編行程的協作欄位（members / inviteCode / memberEmails…）由 collab.js 另外維護，
+    // 這裡只更新行程內容，不可整份覆寫把它們清掉。
     await tripRef.set({
       ...cleanTrip,
       stops: trip.stops || [],
       userEmail: currentUser && currentUser.email ? currentUser.email : 'unknown',
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    });
+    }, { merge: true });
     console.log('微旅行已保存到 Firebase:', trip.id);
     return true;
   } catch (error) {
@@ -3019,12 +3028,17 @@ async function loadState() {
     
     if (isLoggedIn && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb && currentUser && currentUser.email) {
       try {
+        // 不用 .orderBy('createdAt')：等式查詢 + 不同欄位排序會要求複合索引（就是 console 那個 "requires an index" 錯誤）。
+        // 改成只用等式查詢（單欄位自動索引），抓回來後在前端依 createdAt 排序。
         const snapshot = await firebaseDb.collection('micro_trips')
           .where('userEmail', '==', currentUser.email)
-          .orderBy('createdAt', 'desc')
           .get();
         if (!snapshot.empty) {
-           const fbTrips = snapshot.docs.map(doc => {
+           const _ms = (c) => (c && typeof c.toMillis === 'function') ? c.toMillis() : (c && c.seconds ? c.seconds * 1000 : 0);
+           const fbTrips = snapshot.docs
+             .slice()
+             .sort((a, b) => _ms(b.data().createdAt) - _ms(a.data().createdAt))
+             .map(doc => {
                const data = doc.data();
                if (data.createdAt && typeof data.createdAt.toDate === 'function') {
                  data.createdAt = data.createdAt.toDate().toLocaleDateString('zh-TW');
@@ -3048,6 +3062,19 @@ async function loadState() {
         }
       } catch(err) {
         console.warn('Failed to sync trips from Firebase:', err);
+      }
+      // 載入「我以成員身分加入」的共編行程（owner 的查詢以 userEmail 為準，抓不到別人的行程）
+      try {
+        if (window.WAI_COLLAB) {
+          const collabTrips = await WAI_COLLAB.fetchMyCollabTrips(currentUser.email);
+          collabTrips.forEach(t => upsertCollabTripLocal(t));
+          localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+          renderSideMyTrips();
+          const mtv = document.getElementById('myTripsView');
+          if (mtv && mtv.style.display !== 'none') renderMyTrips();
+        }
+      } catch(err) {
+        console.warn('Failed to load collab trips:', err);
       }
     }
   } catch(e){}
@@ -3595,8 +3622,9 @@ function renderMyTrips() {
         <div class="mt-title">${t.title}</div>
         <div class="mt-meta">${t.days}天 · ${t.region} · ${t.budget} · ${t.createdAt}</div>
         <div class="mt-actions">
-          ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn primary" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
-          <button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>
+          ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
+          ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
+          ${t.collab ? '' : `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>`}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
           <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
         </div>
@@ -3608,9 +3636,15 @@ function renderMyTrips() {
       <div class="new-trip-card-label">建立微旅行</div>
     </div>`;
 }
-function deleteMyTrip(id) {
-  myTrips = myTrips.filter(t=>t.id!==id);
+async function deleteMyTrip(id) {
+  const t = myTrips.find(x => x.id === id);
+  myTrips = myTrips.filter(x => x.id !== id);
+  if (collabState && collabState.tripId === id) closeCollabPanel(); // 刪到正在看的就先關面板
   saveState(); renderMyTrips(); renderSideMyTrips();
+  // 共編行程：owner 刪除時連遠端一起清（避免孤兒佔 Firestore）；成員只移除本機（等同離開）
+  if (t && t.collab && t.role === 'owner' && firebaseEnabled && firebaseDb && window.WAI_COLLAB) {
+    try { await WAI_COLLAB.deleteSharedTrip(id, t.inviteCode); } catch (e) { console.warn('刪除共用行程失敗：', e); }
+  }
   showToast('🗑 已刪除行程', 'red');
 }
 function shareTrip(id) { showToast('🔗 分享連結已複製！', 'green'); }
@@ -3641,20 +3675,82 @@ function closeModeChoice() {
 }
 function selectTripMode(mode) {
   closeModeChoice();
+  // 多人共作：先進「成員 + 邀請碼」lobby，確認有人加入後，才由 owner 開始規劃行程內容
+  if (mode === 'collab') { startCollabLobby(); return; }
   wizStep = 0;
-  wizData = { days: '8小時', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人' };
+  wizData = buildInitialWizData(mode);
+  clearWizardPrefetchState();
+  renderWizard();
+  document.getElementById('wizardOverlay').classList.add('open');
+}
+
+// 以帳號偏好初始化 wizData（solo 與 collab 共用）
+function buildInitialWizData(mode, extra) {
+  const wd = { days: '8小時', pace: '平衡', tripMode: mode, people: mode === 'solo' ? '1人' : '2人', ...(extra || {}) };
   if (currentUser && currentUser.preferences) {
     // 「旅程風格」persona 改為每趟行程現場選，不再從偏好帶入
-    if (currentUser.preferences.interests) wizData.interests = [...currentUser.preferences.interests];
-    if (currentUser.preferences.pace) wizData.pace = currentUser.preferences.pace;
+    if (currentUser.preferences.interests) wd.interests = [...currentUser.preferences.interests];
+    if (currentUser.preferences.pace) wd.pace = currentUser.preferences.pace;
     // 快照長期偏好供 buildPrompt 分層使用（本趟覆寫 interests/pace 後仍保有原始長期值與禁忌）
-    wizData.profilePrefs = {
+    wd.profilePrefs = {
       interests: Array.isArray(currentUser.preferences.interests) ? [...currentUser.preferences.interests] : [],
       pace: currentUser.preferences.pace || '',
       avoid: typeof currentUser.preferences.avoid === 'string' ? currentUser.preferences.avoid : '',
       avoidTags: Array.isArray(currentUser.preferences.avoidTags) ? [...currentUser.preferences.avoidTags] : []
     };
   }
+  return wd;
+}
+
+// 建立共用行程「空殼」並開成員面板（lobby）——行程內容稍後由 owner 從面板開精靈填寫
+async function startCollabLobby() {
+  if (!isLoggedIn) { openLogin(); return; }
+  if (!firebaseEnabled || !firebaseDb || !window.WAI_COLLAB) {
+    showToast('多人共作需要登入並連線 Firebase，請稍後再試。', 'orange');
+    return;
+  }
+  const newTrip = {
+    id: 'my_' + Date.now(),
+    title: '未命名共編行程',
+    emoji: '👥',
+    cc: 'c2',
+    days: '8小時',
+    region: '',
+    budget: '',
+    people: '2人',
+    status: 'planning',
+    createdAt: new Date().toLocaleDateString('zh-TW'),
+    tripMode: 'collab',
+    collab: true,
+    role: 'owner',
+    wizardData: {},
+    stops: []
+  };
+  myTrips.unshift(newTrip);
+  saveState(); renderSideMyTrips(); renderMyTrips();
+  try {
+    const owner = {
+      uid: (firebaseAuth && firebaseAuth.currentUser) ? firebaseAuth.currentUser.uid : null,
+      email: currentUser && currentUser.email ? currentUser.email : null,
+      name: currentUser && currentUser.name ? currentUser.name : (currentUser && currentUser.email) || '擁有者',
+      prefs: (typeof currentUser !== 'undefined' && currentUser && currentUser.preferences) || {}
+    };
+    const res = await WAI_COLLAB.createSharedTrip(newTrip, owner);
+    newTrip.inviteCode = res.code;
+    newTrip.shareToken = res.shareToken;
+    saveState();
+    openCollabPanel(newTrip.id);
+  } catch (err) {
+    console.warn('建立共用行程失敗：', err);
+    showToast('建立共用行程失敗：' + (err && err.message || err), 'red');
+  }
+}
+
+// 從 lobby 進四步精靈規劃行程內容（行程已存在，finishWizard 走「更新」分支）
+function startCollabPlanning(tripId) {
+  wizStep = 0;
+  wizData = buildInitialWizData('collab', { collabTripId: tripId });
+  closeCollabPanel();
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
@@ -3798,6 +3894,7 @@ function renderWizard() {
           `).join('')}
         </div>
       </div>
+      ${wizData.collabTripId ? `<div class="wizard-field" style="margin-top:16px"><div class="wiz-focus-avoid" style="background:#eef4ff;border-color:#cfe0f7;color:#2b4c6b">🧑‍🤝‍🧑 興趣與節奏已在「成員偏好」設定，生成時會綜合所有成員，這裡不再重複填寫。</div></div>` : `
       <div class="wizard-field" id="wizTripFocusBlock" style="margin-top:16px">
         <div class="wiz-focus-head">
           <label style="margin:0;">本趟想偏重<span style="font-size:13px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定 AI 選擇的景點類型比重與行程節奏</span></label>
@@ -3825,7 +3922,7 @@ function renderWizard() {
             </div>
           </div>
         </div>
-      </div>
+      </div>`}
       <div class="wizard-field">
         <label>旅程風格<span style="font-size:13px;color:#8fa4b8;font-weight:normal;display:block;margin-top:2px;">決定整體旅行氛圍與 AI 敘述感，與本趟想偏重互補，各有作用</span></label>
         <textarea id="theme" placeholder="例：想要輕鬆散步、品嚐在地美食、發現隱藏景點…" oninput="wizData.theme=this.value;renderFlowPreview();scheduleWizardPreviewRequest('step2-theme')">${wizData.theme||''}</textarea>
@@ -3862,6 +3959,7 @@ function renderWizard() {
     // Step 3：預算、住宿、希望景點
     body.innerHTML = `<h3 class="wizard-block-title">💰 預算 & 其他</h3>
       <p class="wizard-block-help">設定旅行預算，並可選填希望拜訪的景點</p>
+      ${wizData.collabTripId ? `<div class="wizard-field"><div class="wiz-focus-avoid" style="background:#eef4ff;border-color:#cfe0f7;color:#2b4c6b">💰 預算已在「成員偏好」設定（取全員平均），這裡不再重複填寫。</div></div>` : `
       <div class="wizard-field">
         <label>預算 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（每人預算，下方自動換算 ${getPeopleCount(wizData.people)} 人總額）</span></label>
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(2,1fr)">
@@ -3878,7 +3976,7 @@ function renderWizard() {
         </div>
         <p style="margin-top:8px;font-size:13px;color:#8fa4b8;line-height:1.5;">ℹ️ 此預算為當地餐飲與付費體驗的花費，<b>不含往返目的地的車票／機票等交通旅費</b>（站間移動與離島船票會另行估算）。</p>
         ${(()=>{ const d=describeBudget(wizData.budget, wizData.people); return d?`<p style="margin-top:8px;font-size:14px;color:#4a7fad;">👥 ${d.groupLabel}</p>`:''; })()}
-      </div>
+      </div>`}
       ${isLongTrip(wizData.days)?`
       <div class="wizard-field">
         <label>住宿安排</label>
@@ -3886,11 +3984,12 @@ function renderWizard() {
           ${['飯店','民宿','背包客棧','露營','自備住宿'].map(a=>`<option ${wizData.accommodation===a?'selected':''}>${a}</option>`).join('')}
         </select>
       </div>`:''}
+      ${wizData.collabTripId ? `<div class="wizard-field"><div class="wiz-focus-avoid" style="background:#eef4ff;border-color:#cfe0f7;color:#2b4c6b">📍 想去的景點已在「成員偏好」設定（會綜合所有成員），這裡不再重複填寫。</div></div>` : `
       <div class="wizard-field">
         <label>希望去的景點 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
         <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value;updateDesiredSpotsWarning()">${wizData.desiredSpots||''}</textarea>
         <div id="wizDesiredWarn">${desiredSpotsWarningHtml(wizData.desiredSpots||'')}</div>
-      </div>`;
+      </div>`}`;
   }
 
   // 興趣勾選事件（Step 1，交通 & 偏好合併頁）
@@ -4581,9 +4680,6 @@ async function finishWizard() {
   const _durM = parseDurationMinutes(days);
   const defaultBudget = _durM <= 120 ? '$300' : _durM <= 240 ? '$800' : _durM <= 480 ? '$1,500' : '$3,000';
   const tripMode = wizData.tripMode || 'solo';
-  const inviteCode = tripMode === 'collab'
-    ? 'WNDR-' + Math.random().toString(36).substring(2, 6).toUpperCase()
-    : null;
   const emojiMap = {'台東':'🌊','花蓮':'🏔','台北':'🏙','日本':'⛩️','韓國':'🌸','歐洲':'🏛'};
   const newTrip = {
     id: 'my_' + Date.now(), title: `${dest} ${days}微旅行`,
@@ -4593,7 +4689,6 @@ async function finishWizard() {
     people: wizData.people || (wizData.tripMode === 'solo' ? '1人' : '2人'), status: 'planning',
     createdAt: new Date().toLocaleDateString('zh-TW'),
     tripMode,
-    ...(inviteCode ? { inviteCode } : {}),
     wizardData: {
       dest, days,
       people: wizData.people || (wizData.tripMode === 'solo' ? '1人' : '2人'),
@@ -4612,6 +4707,40 @@ async function finishWizard() {
     stops: []
   };
 
+  // ── 多人共作：共用行程已在 lobby 建立，這裡只「更新」行程參數，再回成員面板由 owner 隨時生成 ──
+  if (tripMode === 'collab') {
+    if (!firebaseEnabled || !firebaseDb || !window.WAI_COLLAB) {
+      showToast('多人共作需要登入並連線 Firebase，請稍後再試。', 'orange');
+      return;
+    }
+    const collabTripId = wizData.collabTripId;
+    if (!collabTripId) { showToast('找不到共編行程，請從「多人共作」重新建立。', 'orange'); return; }
+    try {
+      const patch = {
+        title: newTrip.title,
+        emoji: newTrip.emoji,
+        region: dest,
+        days,
+        budget: newTrip.budget,
+        people: newTrip.people,
+        wizardData: newTrip.wizardData
+      };
+      await WAI_COLLAB.updateSharedTripParams(collabTripId, patch);
+      // 同步本機 myTrips 該筆（lobby 建立時已 unshift 過）
+      const idx = myTrips.findIndex(t => t.id === collabTripId);
+      if (idx !== -1) myTrips[idx] = { ...myTrips[idx], ...patch };
+      saveState(); renderSideMyTrips(); renderMyTrips();
+      // 像單人一樣：按下建立行程就直接生成（用當下成員的偏好彙整），精靈保持開啟顯示進度
+      showWizGenProgress();
+      await runCollabGeneration(collabTripId);
+    } catch (err) {
+      console.warn('更新共用行程失敗：', err);
+      showToast('更新共用行程失敗：' + (err && err.message || err), 'red');
+    }
+    return;
+  }
+
+  // ── 單人：立即生成（維持原行為）──
   // 立即存入 localStorage，切換頁面後資料不消失
   myTrips.unshift(newTrip);
   saveState(); renderSideMyTrips(); renderMyTrips();
@@ -4620,12 +4749,21 @@ async function finishWizard() {
   localStorage.setItem('wai_pending_gen', JSON.stringify({ tripId: newTrip.id, wData: { ...wizData } }));
 
   showWizGenProgress(); // 精靈保持開啟，進度顯示在行程預覽下方
-  if (inviteCode) {
-    document.getElementById('collabCodeDisplay').textContent = inviteCode;
-    document.getElementById('collabCodeOverlay').classList.add('open');
-  }
 
   await _doGeneration(newTrip, wizData);
+}
+
+// 從 wizData 抽出「成員偏好」（用於團體彙整）；avoid 來自帳號設定。
+function collabPrefsFromWizData(wd) {
+  const prof = (typeof currentUser !== 'undefined' && currentUser && currentUser.preferences) || {};
+  return WAI_COLLAB.normalizePrefs({
+    interests: Array.isArray(wd.interests) ? wd.interests : [],
+    pace: wd.pace || prof.pace || '平衡',
+    budget: wd.budget || '',
+    desiredSpots: (wd.desiredSpots || '').trim(),
+    avoid: typeof prof.avoid === 'string' ? prof.avoid : '',
+    avoidTags: Array.isArray(prof.avoidTags) ? prof.avoidTags : []
+  });
 }
 
 async function _doGeneration(trip, wData) {
@@ -4709,54 +4847,286 @@ function openInvite() {
   document.getElementById('inviteOverlay').classList.add('open');
 }
 function closeInvite() { document.getElementById('inviteOverlay').classList.remove('open'); }
-function submitInviteCode() {
-  const code = document.getElementById('inviteCodeInput').value.trim();
+async function submitInviteCode() {
+  const code = document.getElementById('inviteCodeInput').value;
+  await joinSharedTripByCode(code, closeInvite);
+}
+
+// 共用：以邀請碼／流程碼「真實加入」共編行程（「🔑 輸入邀請碼」與「📱 流程碼進入」共用）
+async function joinSharedTripByCode(rawCode, closeFn) {
+  const code = String(rawCode || '').trim();
   if (!code) { showToast('請輸入邀請碼', 'orange'); return; }
-  closeInvite();
-  myTrips.unshift({
-    id: 'my_'+Date.now(), title: '高雄左營微旅行 (共編)', emoji: '🎒', cc: 'c2',
-    days: 1, region: '高雄', budget: '$500', people: '2人',
-    status: 'planning', createdAt: new Date().toLocaleDateString('zh-TW')
+  if (!isLoggedIn) { if (closeFn) closeFn(); openLogin(); return; }
+  if (!firebaseEnabled || !firebaseDb || !window.WAI_COLLAB) {
+    showToast('加入共編需要連線 Firebase，請稍後再試。', 'orange'); return;
+  }
+  try {
+    const user = {
+      uid: (firebaseAuth && firebaseAuth.currentUser) ? firebaseAuth.currentUser.uid : null,
+      email: currentUser && currentUser.email ? currentUser.email : null,
+      name: currentUser && currentUser.name ? currentUser.name : (currentUser && currentUser.email) || '旅伴',
+      prefs: (typeof currentUser !== 'undefined' && currentUser && currentUser.preferences) || {}
+    };
+    const trip = await WAI_COLLAB.joinByCode(code, user);
+    upsertCollabTripLocal(trip, 'viewer');
+    saveState(); renderSideMyTrips(); renderMyTrips();
+    if (closeFn) closeFn();
+    showToast(trip.alreadyMember
+      ? `你已在「${trip.title || '共編行程'}」中`
+      : `✅ 已加入「${trip.title || '共編行程'}」！`, 'green');
+    openCollabPanel(trip.id); // 開成員面板：owner 端透過 onSnapshot 即時看到人數 +1
+  } catch (err) {
+    console.warn('加入共編失敗：', err);
+    showToast((err && err.message) || '加入失敗，請確認邀請碼。', 'red');
+  }
+}
+
+// 把共用行程 doc 併入本機 myTrips（成員端只存精簡指標 + 內容快取）
+function upsertCollabTripLocal(trip, fallbackRole) {
+  const myEmail = (currentUser && currentUser.email) || '';
+  const myKey = WAI_COLLAB.emailKey(myEmail);
+  const myMember = trip.members && trip.members[myKey];
+  const role = (myMember && myMember.role) || fallbackRole || 'viewer';
+  const entry = {
+    id: trip.id,
+    title: trip.title || (trip.region ? `${trip.region} 共編行程` : '共編行程'),
+    emoji: trip.emoji || '👥',
+    cc: trip.cc || 'c2',
+    days: trip.days || 1,
+    region: trip.region || (trip.wizardData && trip.wizardData.dest) || '',
+    budget: trip.budget || '',
+    people: trip.people || `${(trip.memberEmails || []).length}人`,
+    status: trip.status || 'planning',
+    createdAt: trip.createdAt && typeof trip.createdAt === 'string' ? trip.createdAt : new Date().toLocaleDateString('zh-TW'),
+    tripMode: 'collab',
+    collab: true,
+    role: role,
+    inviteCode: trip.inviteCode || '',
+    shareToken: trip.shareToken || '',
+    wizardData: trip.wizardData || {},
+    stops: trip.stops || []
+  };
+  const idx = myTrips.findIndex(t => t.id === trip.id);
+  if (idx !== -1) myTrips[idx] = { ...myTrips[idx], ...entry };
+  else myTrips.unshift(entry);
+}
+
+// ════════════════════════════════════════════════════
+// COLLAB PANEL（多人共作：成員清單 + 偏好 + 團體生成）
+// ════════════════════════════════════════════════════
+const COLLAB_INTERESTS = [
+  { v: '美食', t: '🍜 美食' }, { v: '文化', t: '🏛️ 文化' }, { v: '自然', t: '🌿 自然' },
+  { v: '打卡', t: '📸 打卡' }, { v: '運動', t: '🏃 運動' }, { v: '放鬆', t: '😌 放鬆' }
+];
+
+function openCollabPanel(tripId) {
+  if (!window.WAI_COLLAB || !firebaseDb) { showToast('多人協作需連線 Firebase', 'orange'); return; }
+  if (collabState && collabState.unsub) collabState.unsub();
+  collabState = { tripId, data: null, unsub: null, myEmail: (currentUser && currentUser.email) || '', myPrefsDraft: null };
+  const ov = document.getElementById('collabPanelOverlay');
+  if (ov) ov.classList.add('open');
+  const body = document.getElementById('collabPanelBody');
+  if (body) body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--ink3)">載入中…</div>';
+  collabState.unsub = WAI_COLLAB.subscribeSharedTrip(tripId, (data) => {
+    collabState.data = data;
+    upsertCollabTripLocal(data);
+    saveState(); renderSideMyTrips();
+    renderCollabPanel();
+  }, (err) => {
+    showToast('讀取共編行程失敗：' + (err && err.message || err), 'red');
   });
-  saveState(); renderSideMyTrips(); renderMyTrips();
-  showToast(`✅ 成功使用邀請碼「${code.toUpperCase()}」加入行程！`, 'green');
-  if (document.getElementById('myTripsView').style.display === 'none') showMainView('mytrips');
+}
+function closeCollabPanel() {
+  if (collabState && collabState.unsub) collabState.unsub();
+  collabState = null;
+  const ov = document.getElementById('collabPanelOverlay');
+  if (ov) ov.classList.remove('open');
+}
+function collabMyRole() {
+  if (!collabState || !collabState.data) return 'viewer';
+  const m = collabState.data.members && collabState.data.members[WAI_COLLAB.emailKey(collabState.myEmail)];
+  return (m && m.role) || 'viewer';
+}
+function collabSetBudget(v) { if (collabState && collabState.myPrefsDraft) collabState.myPrefsDraft.budget = v; }
+function collabPickBudget(token) { if (collabState && collabState.myPrefsDraft) { collabState.myPrefsDraft.budget = token; renderCollabPanel(); } }
+function collabSetDesired(v) { if (collabState && collabState.myPrefsDraft) collabState.myPrefsDraft.desiredSpots = v; }
+
+function renderCollabPanel() {
+  const body = document.getElementById('collabPanelBody');
+  if (!body || !collabState || !collabState.data) return;
+  const d = collabState.data;
+  const isOwner = collabMyRole() === 'owner';
+  const members = d.members || {};
+  const memberList = Object.keys(members).map(k => members[k]);
+  const link = WAI_COLLAB.buildShareLink(d.id, d.shareToken);
+  const profile = WAI_COLLAB.aggregateGroupProfile(members);
+  const myKey = WAI_COLLAB.emailKey(collabState.myEmail);
+  if (!collabState.myPrefsDraft) {
+    collabState.myPrefsDraft = WAI_COLLAB.normalizePrefs((members[myKey] && members[myKey].prefs) || {});
+  }
+  const myPrefs = collabState.myPrefsDraft;
+  const hasStops = Array.isArray(d.stops) && d.stops.length;
+  const isPlanned = !!(d.wizardData && d.wizardData.dest); // owner 是否已用精靈填過行程內容
+  const myAvoidStr = [...(myPrefs.avoidTags || []).map(t => t.replace(/^#/, '')), myPrefs.avoid].filter(Boolean).join('、');
+
+  body.innerHTML = `
+    <div class="collab-trip-head">
+      <div class="collab-trip-title">${d.emoji || '👥'} ${d.title || '共編行程'}</div>
+      <div class="collab-trip-sub">${d.region || ''} · ${d.days || ''} · ${memberList.length}/${d.maxMembers || 10} 人</div>
+    </div>
+    <div class="collab-section">
+      <div class="collab-section-title">邀請朋友（上限 ${d.maxMembers || 10} 人）</div>
+      <div class="collab-invite-row">
+        <span class="collab-code">${d.inviteCode || '—'}</span>
+        <button class="collab-mini-btn" onclick="collabCopy('${d.inviteCode || ''}','邀請碼')">📋 複製碼</button>
+      </div>
+      <div class="collab-invite-row">
+        <input class="collab-link-input" id="collabShareLink" readonly value="${link}">
+        <button class="collab-mini-btn" onclick="collabCopy(document.getElementById('collabShareLink').value,'唯讀分享連結')">🔗 複製唯讀連結</button>
+      </div>
+      ${isOwner ? `<button class="collab-mini-btn ghost" onclick="collabRevoke()">停用邀請碼</button>` : ''}
+    </div>
+    <div class="collab-section">
+      <div class="collab-section-title">成員（${memberList.length}）${isOwner ? '<span style="font-weight:normal;color:#8fa4b8;"> · 擁有者可調整每位成員的權限</span>' : ''}</div>
+      ${memberList.map(m => collabMemberRowHtml(m, isOwner)).join('')}
+    </div>
+    <div class="collab-section">
+      <div class="collab-section-title">我的偏好（會納入團體生成）</div>
+      <div class="collab-pref-label">興趣（最多 3）</div>
+      <div class="wizard-chips">
+        ${COLLAB_INTERESTS.map(o => `<button class="wizard-tag${(myPrefs.interests || []).includes(o.v) ? ' active' : ''}" type="button" onclick="collabToggleInterest('${o.v}')">${o.t}</button>`).join('')}
+      </div>
+      <div class="collab-pref-label">節奏</div>
+      <div class="wizard-chips">
+        ${['輕快', '平衡', '悠閒'].map(p => `<button class="wizard-tag${myPrefs.pace === p ? ' active' : ''}" type="button" onclick="collabSetPace('${p}')">${PACE_EMOJI[p]} ${paceLabel(p)}</button>`).join('')}
+      </div>
+      <div class="collab-pref-label">每人預算（當地餐飲與付費體驗）</div>
+      <div class="wizard-choice-grid" style="grid-template-columns:repeat(2,1fr)">
+        ${BUDGET_TIERS.map(t => {
+          const open = t.perMax == null;
+          const per = open ? `每人 ${formatMoney(t.perMin)} 以上` : (t.perMin > 0 ? `每人 ${formatMoney(t.perMin)}–${formatMoney(t.perMax)}` : `每人 ${formatMoney(t.perMax)} 內`);
+          const token = `${t.key}（${per}）`;
+          const on = myPrefs.budget === token;
+          return `<button class="wizard-tag${on ? ' active' : ''}" type="button" onclick="collabPickBudget('${token}')">${t.key}<br><span style="font-size:12px;opacity:.7">${per}</span></button>`;
+        }).join('')}
+      </div>
+      <div class="collab-pref-label">想去的景點（選填）</div>
+      <input class="collab-text-input" placeholder="例如 三仙台、伯朗大道" value="${(myPrefs.desiredSpots || '').replace(/"/g, '&quot;')}" oninput="collabSetDesired(this.value)">
+      ${myAvoidStr ? `<div class="collab-pref-note">你的帳號禁忌會自動納入全團硬限制：${myAvoidStr}</div>` : ''}
+      <button class="collab-save-btn" onclick="collabSaveMyPrefs()">儲存我的偏好</button>
+    </div>
+    <div class="collab-section">
+      <div class="collab-section-title">團體綜合（即時）</div>
+      <div class="collab-agg">
+        <div>節奏：<b>${profile.pace}</b>（多數決）</div>
+        <div>興趣：<b>${profile.interests.join('、') || '—'}</b></div>
+        <div>預算：<b>${profile.budget || '—'}</b>（平均）</div>
+        ${profile.avoid.length ? `<div>避免：${profile.avoid.map(a => a.term.replace(/^#/, '')).join('、')}</div>` : ''}
+      </div>
+    </div>
+    <div class="collab-actions">
+      ${isOwner
+        ? (!isPlanned
+            ? `<button class="collab-primary" onclick="startCollabPlanning('${d.id}')">🧭 開始規劃行程內容</button>
+               <div class="collab-wait">先邀請朋友加入、各自填好偏好，再開始規劃。</div>`
+            : `<button class="collab-primary" onclick="collabGenerate()">🚀 生成團體行程</button>
+               <button class="collab-secondary" onclick="startCollabPlanning('${d.id}')">✏️ 修改行程設定</button>`)
+        : `<div class="collab-wait">由擁有者規劃與生成行程；你可先填好偏好。</div>`}
+      ${hasStops ? `<button class="collab-secondary" onclick="collabOpenInEditor()">${WAI_COLLAB.canEdit(collabMyRole()) ? '✏️ 在編輯器開啟' : '👁 唯讀檢視'}</button>` : ''}
+    </div>`;
+}
+
+function collabMemberRowHtml(m, ownerControls) {
+  const isMe = WAI_COLLAB.emailKey(m.email) === WAI_COLLAB.emailKey(collabState.myEmail);
+  const readyDot = m.ready ? '<span class="collab-ready on" title="已填偏好">●</span>' : '<span class="collab-ready" title="未填偏好">○</span>';
+  let roleCell;
+  if (ownerControls && m.role !== 'owner') {
+    roleCell = `<select class="collab-role-sel" onchange="collabSetRole('${m.email}', this.value)">
+        ${['viewer', 'editor'].map(r => `<option value="${r}" ${m.role === r ? 'selected' : ''}>${WAI_COLLAB.roleLabel(r)}</option>`).join('')}
+      </select>`;
+  } else {
+    roleCell = `<span class="collab-role-badge ${m.role}">${WAI_COLLAB.roleLabel(m.role)}</span>`;
+  }
+  return `<div class="collab-member-row">${readyDot}<span class="collab-member-name">${m.name || m.email}${isMe ? '（你）' : ''}</span>${roleCell}</div>`;
+}
+
+function collabCopy(text, label) {
+  navigator.clipboard.writeText(text).then(() => showToast((label || '內容') + '已複製！', 'green')).catch(() => showToast(text, 'green'));
+}
+function collabToggleInterest(v) {
+  if (!collabState || !collabState.myPrefsDraft) return;
+  const arr = collabState.myPrefsDraft.interests = collabState.myPrefsDraft.interests || [];
+  const i = arr.indexOf(v);
+  if (i > -1) arr.splice(i, 1);
+  else { if (arr.length >= 3) return showToast('最多選擇三個興趣', 'orange'); arr.push(v); }
+  renderCollabPanel();
+}
+function collabSetPace(p) { if (collabState && collabState.myPrefsDraft) { collabState.myPrefsDraft.pace = p; renderCollabPanel(); } }
+async function collabSaveMyPrefs() {
+  if (!collabState || !collabState.data) return;
+  try {
+    await WAI_COLLAB.setMemberPrefs(collabState.tripId, collabState.myEmail, collabState.myPrefsDraft);
+    showToast('已儲存你的偏好', 'green');
+  } catch (e) { showToast('儲存失敗：' + (e && e.message || e), 'red'); }
+}
+async function collabSetRole(email, role) {
+  try { await WAI_COLLAB.setMemberRole(collabState.tripId, email, role); showToast('已更新角色', 'green'); }
+  catch (e) { showToast('更新角色失敗：' + (e && e.message || e), 'red'); }
+}
+async function collabRevoke() {
+  if (!collabState || !collabState.data) return;
+  try { await WAI_COLLAB.revokeInvite(collabState.tripId, collabState.data.inviteCode); showToast('邀請碼已停用', 'green'); }
+  catch (e) { showToast('停用失敗', 'red'); }
+}
+function collabOpenInEditor() {
+  if (!collabState) return;
+  const guest = WAI_COLLAB.canEdit(collabMyRole()) ? '' : '&guest=1';
+  window.location = 'ai-travel-planner-v8.html?sharedId=' + encodeURIComponent(collabState.tripId) + guest;
+}
+// 共用：彙整當下成員偏好 → 直接生成團體行程（「精靈建立完」與「面板再生成」共用）
+async function runCollabGeneration(tripId) {
+  const d = await WAI_COLLAB.getSharedTrip(tripId);
+  if (!d) { showToast('找不到共編行程', 'red'); return; }
+  const profile = WAI_COLLAB.aggregateGroupProfile(d.members || {});
+  const wData = { ...(d.wizardData || {}) };
+  wData.groupProfile = profile;            // 觸發 buildPreferenceLines 團體分支
+  wData.interests = profile.interests.slice(0, 4);
+  wData.pace = profile.pace;
+  if (profile.budget) wData.budget = profile.budget;
+  if (profile.desired && profile.desired.length) wData.desiredSpots = profile.desired.map(x => x.text).join('、');
+  let trip = myTrips.find(t => t.id === d.id);
+  if (!trip) { trip = { id: d.id, title: d.title, region: d.region, days: d.days, collab: true, role: 'owner', wizardData: wData, stops: [] }; myTrips.unshift(trip); }
+  trip.wizardData = wData;
+  await _doGeneration(trip, wData);
+}
+
+async function collabGenerate() {
+  if (!collabState || !collabState.data) return;
+  if (collabMyRole() !== 'owner') { showToast('只有擁有者可以生成', 'orange'); return; }
+  const tripId = collabState.tripId;
+  closeCollabPanel();
+  showGenMiniBar(); // 面板再生成時精靈未開，改用右下角浮動進度卡顯示
+  await runCollabGeneration(tripId);
 }
 
 function openJourneyJoin() {
   if (!isLoggedIn) { openLogin(); return; }
   const input = document.getElementById('journeyCodeInput');
-  if (input) input.value = currentInviteCode;
+  if (input) input.value = ''; // 不再預填寫死的示範碼
   const title = document.getElementById('journeyPreviewTitle');
   const meta = document.getElementById('journeyPreviewMeta');
-  if (title) title.textContent = currentTripTitle;
-  if (meta) meta.textContent = `${currentTripWindow.start} - ${currentTripWindow.end} · 邀請碼 ${currentInviteCode}`;
+  if (title) title.textContent = '加入朋友的共編行程';
+  if (meta) meta.textContent = '輸入朋友分享的邀請碼即可加入並查看行程';
   document.getElementById('journeyOverlay').classList.add('open');
 }
 
 function closeJourneyJoin() { document.getElementById('journeyOverlay').classList.remove('open'); }
 
-function submitJourneyCode() {
+async function submitJourneyCode() {
   const input = document.getElementById('journeyCodeInput');
-  const code = input ? input.value.trim() : '';
-  const normalizedCode = normalizeInviteCode(code);
-  const validInviteCode = normalizeInviteCode(currentInviteCode);
-  const validItineraryCode = normalizeInviteCode(currentItineraryId);
-
-  if (!normalizedCode) { showToast('請輸入流程碼', 'orange'); return; }
-  if (normalizedCode !== validInviteCode && normalizedCode !== validItineraryCode) {
-    showToast('流程碼不正確', 'orange');
-    return;
-  }
-
-  closeJourneyJoin();
-  pendingJourneyEntry = {
-    inviteCode: currentInviteCode,
-    itineraryId: currentItineraryId,
-    normalizedCode
-  };
-  openJourneyItineraryPreview();
-  showToast(`✅ 已確認流程碼「${normalizedCode}」`, 'green');
+  const code = input ? input.value : '';
+  // 改走真實加入：輸入朋友分享的邀請碼即可加入共編行程（不再比對寫死的 prototype 碼）
+  await joinSharedTripByCode(code, closeJourneyJoin);
 }
 
 function openJourneyItineraryPreview() {

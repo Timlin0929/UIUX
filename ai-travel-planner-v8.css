@@ -2781,3 +2781,18 @@ body.prototype-mode .prototype-id-chip {
   .desktop-only-content, .desktop-only-title, .desktop-only-meta { display: none !important; }
 }
 
+/* ── 路線階段面板：邊緣收合把手（slide-to-edge）── */
+#directionsPanel { transition: transform .28s ease, opacity .22s ease; }
+#directionsPanel.collapsed { transform: translateX(-360px); opacity: 0; pointer-events: none; }
+#directionsPanelHandle {
+  position: absolute; top: 16px; left: 336px; z-index: 91;
+  writing-mode: vertical-rl; text-orientation: upright; letter-spacing: 2px;
+  font-size: 13px; font-weight: 700; color: var(--ink);
+  background: rgba(255, 255, 255, 0.95); border: 1px solid var(--border);
+  border-radius: 0 12px 12px 0; box-shadow: var(--shadow-lg);
+  padding: 12px 7px; cursor: pointer; transition: left .28s ease, background-color .15s ease;
+}
+#directionsPanelHandle:hover { background: var(--accent-light); }
+#directionsPanelHandle.collapsed { left: 0; }
+@media (max-width: 1024px) { #directionsPanelHandle { display: none !important; } }
+

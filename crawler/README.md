@@ -261,6 +261,29 @@ schtasks /create /tn "WanderAI Weekly Crawl" /tr "C:\Users\USER\Desktop\UIUX\cra
 
 **`CRAWL_MAX_CALLS` 怎麼定？** 取決於你的免費額度：Google Maps Platform 每月約 US$200 免額，這個 `verify:places` 的 searchText（含座標／營業時間／評分欄位）約 Enterprise 等級，**每月免費額度約可換 5,000–6,000 次**。預設 120/天 × 30 ≈ 3,600/月，落在免額內。若你已有其他用途在吃同一份額度，請把每日上限調低。
 
+## 清理孤兒共編行程（cleanup:collab）
+
+多人共作一開 lobby 就會在 `micro_trips` 建一筆「空殼」讓人加入；若 owner 放棄、從沒進精靈規劃，就會留下孤兒文件佔空間。這個模式會刪掉**從未規劃**（無 `wizardData.dest`）且**超過 N 天沒更新**（預設 7，可用 `--days` 或 `CLEANUP_COLLAB_DAYS` 調整）的 collab 空殼，連同對應的 `invites` 一併硬刪。已規劃／已生成的行程不會被碰。
+
+先預覽（只列不刪）：
+
+```powershell
+npm run cleanup:collab:dry
+npm run cleanup:collab:dry -- --days 14
+```
+
+正式清理：
+
+```powershell
+npm run cleanup:collab
+```
+
+說明：
+
+- 偵測準則：`collab==true` 且 `!wizardData.dest`（只開 lobby 沒進精靈）且 `updatedAt/collabCreatedAt` 早於 N 天（無時間戳者視為舊資料一併清）。
+- 前端面：owner 在「我的微旅行」刪除共編行程時，已會連 Firestore 文件一起刪、邀請碼停用；這個模式是補掃沒手動刪掉的殘留。
+- 可選擇排進工作排程（如每週一次），與 `crawl:food` 同樣方式建立。
+
 ## 各資料檔與刷新流程
 
 | 檔案 | 全域變數 | 由誰產生 | 何時刷新 |

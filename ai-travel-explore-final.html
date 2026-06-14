@@ -16,6 +16,7 @@
 <script src="ferry-config.js"></script>
 <script src="cost-config.js"></script>
 <script src="avoid-tags.js"></script>
+<script src="collab.js"></script>
 <script src="wheel-picker.js"></script>
 <link rel="stylesheet" href="./ai-travel-explore-final.css">
 </head>
@@ -235,6 +236,16 @@
     <div class="lm-sub">分享以下邀請碼，讓朋友加入共作</div>
     <div class="collab-code-box" id="collabCodeDisplay">WNDR-XXXX</div>
     <button class="lm-submit" onclick="copyCollabCode()">📋 複製邀請碼</button>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: COLLAB PANEL (members + prefs + group generate) ─── -->
+<div class="overlay" id="collabPanelOverlay" style="z-index:360">
+  <div class="login-modal collab-panel" style="position:relative">
+    <button class="lm-close" onclick="closeCollabPanel()">✕</button>
+    <div class="lm-title">👥 多人共作</div>
+    <div class="lm-sub">分享邀請碼、填好各自偏好，擁有者隨時可生成團體行程</div>
+    <div id="collabPanelBody"></div>
   </div>
 </div>
 

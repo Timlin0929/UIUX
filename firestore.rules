@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// WanderAI — Firestore 安全規則（含多人共作 collab.js 所需）
+// 部署：Firebase Console → Firestore → 規則，或 `firebase deploy --only firestore:rules`
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function myEmail() { return request.auth.token.email; }
+
+    // ── 使用者帳號／偏好：只能讀寫自己的 ──
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // ── 行程（單人 + 多人共作共用同一集合）──
+    match /micro_trips/{tripId} {
+      // 讀：訪客唯讀（guestReadable）｜擁有者（userEmail）｜成員（email 在 memberEmails）
+      allow read: if
+        (resource.data.guestReadable == true)
+        || (signedIn() && myEmail() == resource.data.userEmail)
+        || (signedIn() && resource.data.memberEmails is list && myEmail() in resource.data.memberEmails);
+
+      // 建立：登入即可（owner 建立自己的行程 / 共用行程）
+      allow create: if signedIn();
+
+      // 更新：擁有者、既有成員，或「登入者加入共編行程」。
+      //   - 新成員第一次加入時還不在 memberEmails，故需 collab 這條才寫得進去（否則人數永遠不會增加）。
+      //   - viewer 不可改「行程內容」＝由前端 / v8 唯讀鎖把關，見 COLLAB.md 的限制說明。
+      allow update: if signedIn() && (
+        myEmail() == resource.data.userEmail
+        || myEmail() == resource.data.ownerEmail
+        || (resource.data.memberEmails is list && myEmail() in resource.data.memberEmails)
+        || (resource.data.collab == true)
+      );
+
+      // 刪除：僅擁有者
+      allow delete: if signedIn() && (myEmail() == resource.data.userEmail || myEmail() == resource.data.ownerEmail);
+    }
+
+    // ── 邀請碼 → 行程對應 ──
+    match /invites/{code} {
+      allow read:   if signedIn();          // 憑碼查 tripId 才能加入
+      allow create: if signedIn();          // 建立共用行程時寫入
+      allow update: if signedIn();          // 停用邀請碼（active=false）；細分由 App 控管
+      allow delete: if false;
+    }
+
+    // ── 既有快取集合（沿用）──
+    match /poi_cache/{doc} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+    match /scenic_points/{doc} {
+      allow read: if true;
+      allow write: if false;                // 只由後端 crawler（service account）寫入
+    }
+  }
+}

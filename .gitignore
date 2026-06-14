@@ -1,9 +1,22 @@
 # Local environment files
 weather.env
 weather.env.js
+.env
+.env.*
+
+# Secrets / service accounts (Firebase 私鑰等，絕不可進版控)
+serviceAccount.json
+**/serviceAccount.json
 
 # Node modules
 node_modules/
 
+# Logs
+*.log
+
 # VS Code settings
 .vscode/
+
+# OS cruft
+.DS_Store
+Thumbs.db

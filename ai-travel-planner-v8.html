@@ -352,6 +352,8 @@
 
     <!-- ── 路線文字導航面板 (預設隱藏) ── -->
     <div id="directionsPanel" style="position: absolute; top: 16px; left: 16px; max-height: calc(100vh - 200px); width: 320px; background: rgba(255, 255, 255, 0.95); border-radius: 16px; overflow-y: auto; box-shadow: var(--shadow-lg); font-size: 13px; z-index: 90; display: none; padding: 12px; border: 1px solid var(--border);"></div>
+    <!-- 階段面板的邊緣收合把手（slide-to-edge）；面板內容會被清空重建，故把手獨立於面板之外 -->
+    <button id="directionsPanelHandle" type="button" onclick="toggleDirectionsPanel()" hidden>階段 ◂</button>
 
     <div class="mobile-route-sheet" id="mobileRouteSheet">
       <button class="mobile-route-toggle" type="button" onclick="toggleMobileRouteSheet()">

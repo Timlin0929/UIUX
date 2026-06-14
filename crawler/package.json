@@ -13,7 +13,9 @@
     "verify:places": "node worker.js --verify-places",
     "verify:places:dry": "node worker.js --verify-places --dry-run",
     "crawl:food": "node worker.js --crawl-food",
-    "crawl:food:dry": "node worker.js --crawl-food --dry-run"
+    "crawl:food:dry": "node worker.js --crawl-food --dry-run",
+    "cleanup:collab": "node worker.js --cleanup-collab",
+    "cleanup:collab:dry": "node worker.js --cleanup-collab --dry-run"
   },
   "author": "",
   "license": "MIT",
