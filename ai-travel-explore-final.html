@@ -403,6 +403,26 @@
         <button class="topbar-new-btn" onclick="openWizard()">＋ 建立微旅行</button>
       </div>
     </div>
+    <div class="mt-toolbar">
+      <div class="mt-search">
+        <span class="mt-search-icon">🔍</span>
+        <input id="mtSearch" type="text" autocomplete="off"
+               placeholder="搜尋關鍵字（地區、日期、名稱…可空格組合，如「台東 6/10」）"
+               oninput="mtOnSearch(this.value)">
+        <button class="mt-search-clear" id="mtSearchClear" title="清除" aria-label="清除搜尋"
+                style="display:none" onclick="mtClearSearch()">✕</button>
+      </div>
+      <div class="mt-sort">
+        <span class="sort-label">排序</span>
+        <select class="sort-select" id="mtSort" onchange="mtOnSort(this.value)">
+          <option value="date_desc">建立時間（新→舊）</option>
+          <option value="date_asc">建立時間（舊→新）</option>
+          <option value="region">地區</option>
+          <option value="status">狀態</option>
+          <option value="collab">共編優先</option>
+        </select>
+      </div>
+    </div>
     <div class="my-trips-grid" id="myTripsGrid"></div>
   </div>
 </div>

@@ -16,7 +16,7 @@ window.WAI_FERRY_CONFIG = {
     mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港', '台東富岡漁港']
   },
   '蘭嶼': {
-    islandHarbor: { name: '開元漁港', emoji: '⚓', lat: 22.0444, lng: 121.5581 },
+    islandHarbor: { name: '開元漁港', emoji: '⚓', lat: 22.058222, lng: 121.508167 },
     mainlandHarbor: { name: '富岡漁港', emoji: '⚓', lat: 22.7489, lng: 121.1551, region: '台東' },
     mainlandHarborAlias: ['富岡漁港', '富岡港', '台東漁港']
   },

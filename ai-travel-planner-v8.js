@@ -6,6 +6,11 @@
   let currentInviteCode = '';
   let collabReadOnly = false; // 多人共作：viewer / 訪客唯讀模式（變更不寫回共用行程）
   let collabRole = '';
+  let currentTripIsCollab = false;
+  let currentTripMembers = null;   // 共編成員 map（members[ekey]）
+  let currentTripOwnerName = '';
+  let currentTripShareToken = '';
+  let currentTripDepartureDate = '';
   const isPrototypeMode = true;
   let isReplanning = false;
   let draggingStopId = null;
@@ -50,8 +55,13 @@
   const tdxSpotsCache = new Map();
   const tdxParkingCache = new Map();
   const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
-  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/v2/Tourism/ScenicSpot';
+  // 觀光資訊 V1.0（/api/basic/v2/Tourism/ScenicSpot）將於 2026/6/30 停用 → 改用 V2.1 Attraction（中文縣市 $filter）
+  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/V2/Tourism/Attraction';
   const TDX_PARKING_BASE = 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/CarPark/City';
+  const TDX_COUNTY_ZH = { Taitung: '臺東縣', Hualien: '花蓮縣', Pingtung: '屏東縣', Tainan: '臺南市', Kaohsiung: '高雄市' };
+  // TDX 停車 City enum：縣級用 …County 後綴（TaitungCounty…），直轄市/市用裸名。帶錯（如 Taitung）→ 400。
+  const TDX_PARKING_CITY = { Taitung: 'TaitungCounty', Hualien: 'HualienCounty', Pingtung: 'PingtungCounty', Tainan: 'Tainan', Kaohsiung: 'Kaohsiung' };
+  let _tdxToken = null, _tdxTokenExp = 0, _tdxTokenPromise = null;
   const replanStartMinutes = 14 * 60;
   let replanStops = [];
   let persistTripDebounceTimer = null;
@@ -114,6 +124,11 @@
         { keywords: ['夕陽', '晚餐', '歸途', '南寮', '港口', '漁港'], lat: 22.65791, lng: 121.47449 },
         { keywords: ['燈塔'], lat: 22.67601, lng: 121.46758 }
       ]
+    },
+    {
+      keywords: ['蘭嶼', 'lanyu', 'orchid island'],
+      center: { lat: 22.043, lng: 121.539 }, // 島嶼地理中心；8km 門檻可涵蓋全島各景點
+      spots: []
     }
   ];
 
@@ -316,60 +331,83 @@
     return null;
   }
 
-  // 取得 TDX OAuth2 access token（scenic / parking 共用）
+  // 取得 TDX OAuth2 access token（scenic / parking 共用）。
+  // 快取 token 直到過期；並用 in-flight promise 去重，避免並發呼叫各自打 auth（造成 429）。
   async function getTdxAccessToken() {
     const cfg = window.TRAVEL_APP_CONFIG || {};
     const appId = cfg.TDX_APP_ID;
     const appKey = cfg.TDX_APP_KEY;
     if (!appId || !appKey) return null;
-    try {
-      const tokenRes = await fetch(TDX_AUTH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `grant_type=client_credentials&client_id=${encodeURIComponent(appId)}&client_secret=${encodeURIComponent(appKey)}`
-      });
-      if (!tokenRes.ok) return null;
-      const { access_token } = await tokenRes.json();
-      return access_token || null;
-    } catch (e) {
-      console.warn('[TDX] 取得 token 失敗', e.message);
-      return null;
-    }
+    if (_tdxToken && Date.now() < _tdxTokenExp) return _tdxToken;
+    if (_tdxTokenPromise) return _tdxTokenPromise;
+    _tdxTokenPromise = (async () => {
+      try {
+        const tokenRes = await fetch(TDX_AUTH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `grant_type=client_credentials&client_id=${encodeURIComponent(appId)}&client_secret=${encodeURIComponent(appKey)}`
+        });
+        if (!tokenRes.ok) return null;
+        const data = await tokenRes.json();
+        _tdxToken = data.access_token || null;
+        const ttl = Number(data.expires_in) || 86400;
+        _tdxTokenExp = Date.now() + Math.max(0, ttl - 60) * 1000; // 留 60s buffer
+        return _tdxToken;
+      } catch (e) {
+        console.warn('[TDX] 取得 token 失敗', e.message);
+        return null;
+      } finally {
+        _tdxTokenPromise = null;
+      }
+    })();
+    return _tdxTokenPromise;
   }
 
-  async function fetchTdxScenicSpots(county) {
-    if (!county) return [];
+  // 觀光景點（V2.1 Attraction，中文縣市 $filter）。並發去重：cache 存「進行中的 Promise」。
+  // 防禦式欄位對應（同時吃 V1/V2 命名）+ 失敗一律回 []（退回 Google Places 校正，不會比現在更差）。
+  function fetchTdxScenicSpots(county) {
+    if (!county) return Promise.resolve([]);
     if (tdxSpotsCache.has(county)) return tdxSpotsCache.get(county);
-    try {
-      const access_token = await getTdxAccessToken();
-      if (!access_token) return [];
-      const dataRes = await fetch(
-        `${TDX_SCENIC_BASE}/${county}?$select=ScenicSpotName,Position,OpenTime,DescriptionDetail&$top=200&$format=JSON`,
-        { headers: { Authorization: `Bearer ${access_token}` } }
-      );
-      if (!dataRes.ok) return [];
-      const spots = await dataRes.json();
-      const normalized = spots
-        .filter(s => s.Position?.PositionLat && s.Position?.PositionLon)
-        .map(s => ({
-          name: s.ScenicSpotName,
-          lat: s.Position.PositionLat,
-          lng: s.Position.PositionLon,
-          openTime: s.OpenTime || '',
-          desc: (s.DescriptionDetail || '').slice(0, 100)
-        }));
-      tdxSpotsCache.set(county, normalized);
-      console.info(`[TDX] 載入 ${county} 景點 ${normalized.length} 筆`);
-      return normalized;
-    } catch (e) {
-      console.warn('[TDX] 抓取失敗，跳過 TDX 驗證', e.message);
-      tdxSpotsCache.set(county, []);
-      return [];
-    }
+    const p = (async () => {
+      try {
+        const access_token = await getTdxAccessToken();
+        if (!access_token) return [];
+        const zh = TDX_COUNTY_ZH[county] || county;
+        const filter = encodeURIComponent(`PostalAddress/City eq '${zh}'`);
+        const dataRes = await fetch(
+          `${TDX_SCENIC_BASE}?$filter=${filter}&$top=200&$format=JSON`,
+          { headers: { Authorization: `Bearer ${access_token}` } }
+        );
+        if (!dataRes.ok) return [];
+        const spots = await dataRes.json();
+        const normalized = (Array.isArray(spots) ? spots : [])
+          .map(s => {
+            const pos = s.Position || s.PositionLatLon || {};
+            const lat = Number(pos.PositionLat != null ? pos.PositionLat : s.PositionLat);
+            const lng = Number(pos.PositionLon != null ? pos.PositionLon : s.PositionLon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+            return {
+              name: s.AttractionName || s.ScenicSpotName || s.Name || '',
+              lat,
+              lng,
+              openTime: s.OpenTime || '',
+              desc: (s.Description || s.DescriptionDetail || '').slice(0, 100)
+            };
+          })
+          .filter(Boolean);
+        console.info(`[TDX] 載入 ${county} 景點 ${normalized.length} 筆`);
+        return normalized;
+      } catch (e) {
+        console.warn('[TDX] 抓取失敗，跳過 TDX 驗證', e.message);
+        return [];
+      }
+    })();
+    tdxSpotsCache.set(county, p);
+    return p;
   }
 
-  function findTdxScenicMatch(stopName, county) {
-    const spots = tdxSpotsCache.get(county) || [];
+  function findTdxScenicMatch(stopName, spots) {
+    spots = Array.isArray(spots) ? spots : [];
     const norm = normalizeText(stopName);
     if (!norm) return null;
     return spots.find(s => {
@@ -378,37 +416,40 @@
     }) || null;
   }
 
-  // TDX 路外停車場（依縣市，仿 scenic 以 county 快取）
-  async function fetchTdxParking(county) {
-    if (!county) return [];
+  // TDX 路外停車場（依縣市快取）。並發去重：cache 存「進行中的 Promise」，同縣市只打一次（解 429）。
+  function fetchTdxParking(county) {
+    if (!county) return Promise.resolve([]);
     if (tdxParkingCache.has(county)) return tdxParkingCache.get(county);
-    try {
-      const access_token = await getTdxAccessToken();
-      if (!access_token) return [];
-      const dataRes = await fetch(
-        `${TDX_PARKING_BASE}/${county}?$format=JSON`,
-        { headers: { Authorization: `Bearer ${access_token}` } }
-      );
-      if (!dataRes.ok) { tdxParkingCache.set(county, []); return []; }
-      const list = await dataRes.json();
-      const normalized = (Array.isArray(list) ? list : [])
-        .map(p => {
-          const pos = p.CarParkPosition || {};
-          const lat = Number(pos.PositionLat);
-          const lng = Number(pos.PositionLon);
-          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-          const name = (p.CarParkName && (p.CarParkName.Zh_tw || p.CarParkName.En)) || '停車場';
-          return { name, lat, lng };
-        })
-        .filter(Boolean);
-      tdxParkingCache.set(county, normalized);
-      console.info(`[TDX] 載入 ${county} 停車場 ${normalized.length} 筆`);
-      return normalized;
-    } catch (e) {
-      console.warn('[TDX] 停車場抓取失敗，跳過 TDX 停車場', e.message);
-      tdxParkingCache.set(county, []);
-      return [];
-    }
+    const city = TDX_PARKING_CITY[county] || county; // 縣級要 …County 後綴，否則 TDX 回 400
+    const p = (async () => {
+      try {
+        const access_token = await getTdxAccessToken();
+        if (!access_token) return [];
+        const dataRes = await fetch(
+          `${TDX_PARKING_BASE}/${city}?$format=JSON`,
+          { headers: { Authorization: `Bearer ${access_token}` } }
+        );
+        if (!dataRes.ok) { console.warn(`[TDX] 停車場 ${city} HTTP ${dataRes.status}`); return []; }
+        const list = await dataRes.json();
+        const normalized = (Array.isArray(list) ? list : [])
+          .map(pk => {
+            const pos = pk.CarParkPosition || {};
+            const lat = Number(pos.PositionLat);
+            const lng = Number(pos.PositionLon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+            const name = (pk.CarParkName && (pk.CarParkName.Zh_tw || pk.CarParkName.En)) || '停車場';
+            return { name, lat, lng };
+          })
+          .filter(Boolean);
+        console.info(`[TDX] 載入 ${county} 停車場 ${normalized.length} 筆`);
+        return normalized;
+      } catch (e) {
+        console.warn('[TDX] 停車場抓取失敗，跳過 TDX 停車場', e.message);
+        return [];
+      }
+    })();
+    tdxParkingCache.set(county, p);
+    return p;
   }
 
   // 從 TDX 停車場清單挑距 center ≤ 半徑、依距離排序的前幾筆候選
@@ -1151,6 +1192,8 @@
     for (const stop of stops) {
       // 座標已鎖定的站（本島港/離島返程港）不重驗，避免被「超出離島範圍」誤判而搬到島上
       if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
+      // 已驗證過的站不再每次載入都重打 Places（座標不會自己變）；只有新生成/重新規劃的站才驗
+      if (stop.coordVerified) continue;
       const name = String(stop.name || '').trim();
       if (!name) continue;
       checked++;
@@ -1189,6 +1232,8 @@
           if (cand.placeId) stop.placeId = cand.placeId;
         }
       }
+      // 標記此站已驗證（連同 stops 一起存檔）→ 下次載入直接跳過，不再重打 Places
+      stop.coordVerified = true;
     }
     console.info(`[coord reverify] 完成：檢查 ${checked} 站、校正 ${snapped} 站`);
     return stops;
@@ -1407,8 +1452,8 @@
 
     // TDX 觀光 Open Data 查詢：在 Places API 之前，優先用政府資料比對
     const tdxCounty = resolveTdxCounty(region, title);
-    await fetchTdxScenicSpots(tdxCounty);
-    const tdxMatch = findTdxScenicMatch(String(template.name || '').trim(), tdxCounty);
+    const tdxSpots = await fetchTdxScenicSpots(tdxCounty);
+    const tdxMatch = findTdxScenicMatch(String(template.name || '').trim(), tdxSpots);
     if (tdxMatch) {
       const pos = { lat: tdxMatch.lat, lng: tdxMatch.lng };
       const enriched = { ...template, businessHours: tdxMatch.openTime || template.businessHours || '' };
@@ -1605,11 +1650,12 @@
       const tripId = explicitTripId || fallbackTripId;
       if (tripId) {
         let trip = myTrips.find(t => t.id === tripId);
-        
-        if (!trip && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
+
+        // 共編行程：本機快取可能是 join 當下的空殼（stops/members 都舊）→ 一律抓最新 Firebase 為準
+        if ((!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
-             if (doc.exists) { trip = doc.data(); if (!trip.id) trip.id = doc.id; }
+             if (doc.exists) { const fresh = doc.data(); if (!fresh.id) fresh.id = doc.id; trip = trip ? { ...trip, ...fresh } : fresh; }
            } catch (err) {
              console.warn('Failed to fetch trip from Firebase:', err);
            }
@@ -1621,11 +1667,17 @@
           try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (_e) {}
           const ekey = String(myEmail || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
           const mem = trip.members && trip.members[ekey];
-          // 優先用本機 trip.role（?id= 從 localStorage 載入時沒有 members map，owner 不能被誤判成 viewer）；
-          // Firebase 載入（?sharedId= 無本機檔）才退回 members 裡的角色。
-          collabRole = isGuestView ? 'guest' : (trip.role || (mem && mem.role) || 'viewer');
+          // 角色以 members[ekey] 為權威（變更 B 已確保抓到含 members 的最新文件）；
+          // 本機 trip.role 僅作 Firebase 抓不到時的離線退路。
+          collabRole = isGuestView ? 'guest' : ((mem && mem.role) || trip.role || 'viewer');
           collabReadOnly = isGuestView || !(collabRole === 'owner' || collabRole === 'editor');
           if (collabReadOnly) showCollabReadOnlyBanner(collabRole);
+          // 旅伴頁用：存下共編成員/擁有者/邀請資訊
+          currentTripIsCollab = true;
+          currentTripMembers = trip.members || null;
+          currentTripOwnerName = trip.ownerName || trip.organizer || '';
+          currentTripShareToken = trip.shareToken || '';
+          currentTripDepartureDate = (trip.wizardData && trip.wizardData.departureDate) || trip.departureDate || '';
         }
 
         if (trip) {
@@ -1647,6 +1699,7 @@
           }
           currentTripRegion = trip.region || currentTripRegion;
           currentTripPreferences = trip.wizardData || {};
+          renderMembersView(); // 旅伴頁：行程載入後即填好真實成員/邀請資料
           const bpDestEl = document.querySelector('.boarding-pass .bp-dest');
           if (bpDestEl) bpDestEl.textContent = trip.region || 'TRAVEL';
           
@@ -4151,6 +4204,7 @@
       manualEndMin: stop.manualEndMin ?? null,
       placeId: stop.placeId || null,
       businessHours: stop.businessHours || null,
+      coordVerified: stop.coordVerified || false, // 已驗證座標的旗標，存檔後下次載入跳過重驗
       // 景點介紹（乾淨 prose，不含「（含 …）」）一併保存，避免存檔重載後描述消失、只剩括號
       desc: stop.desc || '',
       // 合併大景點欄位一併保存，避免切換交通工具等觸發存檔後，重新載入時「🧩 含…」子景點資訊消失
@@ -4675,6 +4729,67 @@
     updateItineraryStageUI();
   }
 
+  // 旅伴頁：用真實共編資料填滿（成員、角色、Organizer、邀請碼、QR）；單人行程顯示個人狀態。
+  function membersRoleLabel(role) {
+    return ({ owner: '擁有者', editor: '可編輯', viewer: '唯讀', guest: '訪客' })[role] || '唯讀';
+  }
+  function renderMembersView() {
+    const countEl = document.getElementById('membersCount');
+    const stackEl = document.getElementById('membersAvatarStack');
+    const destEl = document.getElementById('membersDest');
+    const titleEl = document.getElementById('membersTripTitle');
+    const dateEl = document.getElementById('membersDate');
+    const orgEl = document.getElementById('membersOrganizer');
+    const codeEl = document.getElementById('inviteCodeDisplay');
+    const qrEl = document.getElementById('inviteQrCode');
+    const hintEl = document.getElementById('inviteQrHint');
+
+    if (destEl) destEl.textContent = currentTripRegion || '--';
+    if (titleEl) titleEl.textContent = currentTripTitle || '尚未載入行程';
+    if (dateEl) dateEl.textContent = currentTripDepartureDate ? String(currentTripDepartureDate).replace(/-/g, '/') : '待設定';
+
+    if (!currentTripIsCollab || !currentTripMembers) {
+      if (countEl) countEl.textContent = '👤 個人行程';
+      if (stackEl) stackEl.innerHTML = '<div class="avatar">🧍</div><div class="avatar-info"><div style="font-weight:600;font-size:16px;">個人行程</div><div style="font-size:13px;color:var(--ink3);">改用「多人共作」可邀請朋友一起編輯</div></div>';
+      if (orgEl) orgEl.textContent = '你';
+      if (codeEl) codeEl.textContent = '--';
+      if (qrEl) qrEl.innerHTML = '個人行程<br>沒有邀請碼';
+      if (hintEl) hintEl.textContent = '改用「多人共作」建立行程，才會有邀請碼與分享 QR';
+      return;
+    }
+
+    const members = Object.keys(currentTripMembers).map(k => currentTripMembers[k]);
+    let myEmail = '';
+    try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (e) {}
+    const myKey = String(myEmail).toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const myRole = (currentTripMembers[myKey] || {}).role || collabRole || 'viewer';
+
+    if (countEl) countEl.textContent = `👥 ${members.length} 人`;
+    if (orgEl) orgEl.textContent = currentTripOwnerName || (members.find(m => m.role === 'owner') || {}).name || '--';
+    if (codeEl) codeEl.textContent = currentInviteCode || '--';
+
+    if (stackEl) {
+      const avatars = members.slice(0, 5).map(m =>
+        `<div class="avatar" title="${(m.name || m.email || '')} · ${membersRoleLabel(m.role)}">${String(m.name || m.email || '?').slice(0, 1)}</div>`
+      ).join('');
+      const rows = members.map(m => {
+        const isMe = String(m.email || '').toLowerCase().replace(/[^a-z0-9]/g, '_') === myKey;
+        return `${m.name || m.email}${isMe ? '（你）' : ''}：${membersRoleLabel(m.role)}`;
+      }).join('｜');
+      stackEl.innerHTML = `${avatars}<div class="avatar-info"><div style="font-weight:600;font-size:16px;">你是${membersRoleLabel(myRole)}</div><div style="font-size:13px;color:var(--ink3);">${rows}</div></div>`;
+    }
+
+    if (qrEl) {
+      const share = currentTripShareToken
+        ? `${location.origin}${location.pathname}?sharedId=${encodeURIComponent(currentItineraryId)}&token=${encodeURIComponent(currentTripShareToken)}&guest=1`
+        : (currentInviteCode || '');
+      qrEl.innerHTML = share
+        ? `<img alt="邀請 QR" style="width:100%;height:100%;border-radius:10px;object-fit:contain;" src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(share)}">`
+        : '邀請碼產生中…';
+      if (hintEl) hintEl.textContent = share ? '讓朋友掃描 QR，或輸入上方邀請碼即可加入' : '邀請碼產生中…';
+    }
+  }
+
   // 切換左側視圖 (Itinerary, Budget, Members, Weather)
   function switchView(viewId) {
     // 更新頂部按鈕狀態
@@ -4693,6 +4808,7 @@
 
     if (viewId === 'travellog') renderTravelLog();
     if (viewId === 'budget') renderBudgetTracker();
+    if (viewId === 'members') renderMembersView();
 
     // 手機上的視圖模式邏輯
     if (isMobileLayout()) {
@@ -5032,8 +5148,9 @@
         firebase.initializeApp(config);
       }
       firebaseDb = firebase.firestore();
-      // 改用 long-polling 自動偵測：解掉某些網路/瀏覽器/擴充環境下 Firestore Listen 通道 400 Bad Request
-      try { firebaseDb.settings({ experimentalAutoDetectLongPolling: true }); } catch (e) { /* 已啟動則略過 */ }
+      // 強制 long-polling：避開會 400 Bad Request 的串流 Listen 通道，讓 onSnapshot 即時更新可靠。
+      // merge:true 不覆蓋預設 host（消除 "overriding the original host" 警告）；ignoreUndefinedProperties 避免 undefined 欄位害寫入整批失敗。
+      try { firebaseDb.settings({ experimentalForceLongPolling: true, ignoreUndefinedProperties: true, merge: true }); } catch (e) { /* 已啟動則略過 */ }
       if (firebase.storage && config.storageBucket) {
         firebaseStorage = firebase.storage();
       }
@@ -6108,6 +6225,18 @@
     if (Array.isArray(replanStops) && replanStops.length
       && !window.confirm('「重新規劃」會讓 AI 重新生成整份行程，覆蓋目前的景點與順序。要繼續嗎？')) return;
 
+    // 共編：取重生成鎖，避免與 owner / 其他可編輯成員同時重生成互相覆蓋
+    let _regenLocked = false;
+    if (currentTripIsCollab && window.WAI_COLLAB && firebaseEnabled && firebaseDb) {
+      try {
+        let myEmail = '', myName = '';
+        try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; myName = (u && u.currentUser && u.currentUser.name) || ''; } catch (_e) {}
+        const lock = await WAI_COLLAB.acquireRegenLock(currentItineraryId, { email: myEmail, name: myName });
+        if (!lock.ok) { window.alert(`${lock.holder} 正在重新生成，請稍候再試。`); return; }
+        _regenLocked = true;
+      } catch (e) { console.warn('取重生成鎖失敗（略過鎖）：', e); }
+    }
+
     enterReplanMode();
 
     const planningList = document.getElementById('replanSortableList');
@@ -6390,6 +6519,8 @@
       if (_rgOverlay) _rgOverlay.style.display = 'none';
       cancelReplan();
       window.alert(`AI 重新規劃失敗：${e.message}\n\n請確認 API Key 正確，並再試一次。`);
+    } finally {
+      if (_regenLocked) { try { await WAI_COLLAB.releaseRegenLock(currentItineraryId); } catch (_e) {} }
     }
   }
 

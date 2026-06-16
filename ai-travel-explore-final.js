@@ -132,8 +132,9 @@ function initFirebaseIfConfigured() {
       firebase.initializeApp(config);
     }
     firebaseDb = firebase.firestore();
-    // 改用 long-polling 自動偵測：解掉某些網路/瀏覽器/擴充環境下 Firestore Listen 通道 400 Bad Request
-    try { firebaseDb.settings({ experimentalAutoDetectLongPolling: true }); } catch (e) { /* 已啟動則略過 */ }
+    // 強制 long-polling：避開會 400 Bad Request 的串流 Listen 通道，讓 onSnapshot 即時更新可靠。
+    // merge:true 不覆蓋預設 host（消除 "overriding the original host" 警告）；ignoreUndefinedProperties 避免 undefined 欄位害寫入整批失敗。
+    try { firebaseDb.settings({ experimentalForceLongPolling: true, ignoreUndefinedProperties: true, merge: true }); } catch (e) { /* 已啟動則略過 */ }
     firebaseAuth = firebase.auth();
     firebaseEnabled = true;
     return true;
@@ -2912,7 +2913,8 @@ async function saveMicroTripToFirebase(trip) {
   try {
     const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
     // 剝除暫存旗標 __saving，避免把 UI 狀態寫進 Firestore
-    const cleanTrip = serializeTripForStorage(trip);
+    // 並拿掉 role：那是「本機這個人」的角色，owner 存檔會把 role:'owner' 漏進共用文件，害加入者讀到後誤判成可編輯。
+    const { role, ...cleanTrip } = serializeTripForStorage(trip);
     // merge:true：共編行程的協作欄位（members / inviteCode / memberEmails…）由 collab.js 另外維護，
     // 這裡只更新行程內容，不可整份覆寫把它們清掉。
     await tripRef.set({
@@ -3597,30 +3599,108 @@ function goToMyTrips() { closeCopySuccess(); showMainView('mytrips'); }
 // ══════════════════════════════════════════════════
 // MY TRIPS VIEW
 // ══════════════════════════════════════════════════
+// ── 我的行程：排序 + 關鍵字搜尋 ──
+let mtSortMode = (() => {
+  let m = 'date_desc';
+  try { m = localStorage.getItem('mt_sort') || 'date_desc'; } catch (e) {}
+  return ['date_desc', 'date_asc', 'region', 'status', 'collab'].includes(m) ? m : 'date_desc';
+})();
+let mtSearchQuery = '';
+const MT_STATUS_LABEL = { planning: '規劃中', upcoming: '即將出發', copied: '已複製' };
+const MT_STATUS_ORDER = { planning: 0, upcoming: 1, copied: 2 };
+function mtTs(s) { const n = new Date(String(s || '').replace(/-/g, '/')).getTime(); return Number.isFinite(n) ? n : 0; }
+// days 可能是純數字（社群複製，如 1）或已含單位的字串（精靈產生，如「8小時」「2天」「兩天一夜」）。
+// 純數字才補「天」，已含單位就原樣顯示，避免出現「8小時天」。
+function mtDurationLabel(d) {
+  if (d == null || d === '') return '';
+  const s = String(d).trim();
+  return /^\d+(\.\d+)?$/.test(s) ? s + '天' : s;
+}
+function sortMyTripsList(list, mode) {
+  const a = list.slice();
+  switch (mode) {
+    case 'date_asc': return a.sort((x, y) => mtTs(x.createdAt) - mtTs(y.createdAt));
+    case 'region':   return a.sort((x, y) => String(x.region || '').localeCompare(String(y.region || ''), 'zh-Hant'));
+    case 'status':   return a.sort((x, y) => (MT_STATUS_ORDER[x.status] ?? 9) - (MT_STATUS_ORDER[y.status] ?? 9));
+    case 'collab':   return a.sort((x, y) => (y.collab ? 1 : 0) - (x.collab ? 1 : 0));
+    default:         return a.sort((x, y) => mtTs(y.createdAt) - mtTs(x.createdAt)); // date_desc
+  }
+}
+function filterMyTripsList(list, q) {
+  q = String(q || '').trim().toLowerCase();
+  if (!q) return list;
+  const tokens = q.split(/\s+/).filter(Boolean); // 多個關鍵字皆需命中（地區＋日期可組合）
+  return list.filter(t => {
+    const hay = `${t.title || ''} ${t.region || ''} ${t.budget || ''} ${t.createdAt || ''} ${mtDurationLabel(t.days)} ${MT_STATUS_LABEL[t.status] || ''} ${t.collab ? '共編 多人' : ''}`.toLowerCase();
+    return tokens.every(tok => hay.includes(tok));
+  });
+}
+function mtOnSearch(v) {
+  mtSearchQuery = v;
+  const clr = document.getElementById('mtSearchClear');
+  if (clr) clr.style.display = String(v || '').length ? 'flex' : 'none';
+  renderMyTrips();
+}
+function mtClearSearch() {
+  const input = document.getElementById('mtSearch');
+  if (input) input.value = '';
+  mtOnSearch('');
+}
+function mtOnSort(v) {
+  mtSortMode = v;
+  try { localStorage.setItem('mt_sort', v); } catch (e) {}
+  renderMyTrips();
+}
+
 function renderMyTrips() {
   const grid = document.getElementById('myTripsGrid');
   if (!grid) return;
   const title = document.getElementById('myPageTitle');
-  if (isLoggedIn && currentUser) title.textContent = `${currentUser.name} 的行程`;
-  else title.textContent = `我的微旅行 (本機未登入)`;
-  
+  if (title) {
+    if (isLoggedIn && currentUser) title.textContent = `${currentUser.name} 的行程`;
+    else title.textContent = `我的微旅行 (本機未登入)`;
+  }
+  // 同步工具列狀態（重整／切頁後保留排序與搜尋）
+  const sortSel = document.getElementById('mtSort');
+  if (sortSel && sortSel.value !== mtSortMode) sortSel.value = mtSortMode;
+
+  const newCard = `
+    <div class="new-trip-card" onclick="openWizard()">
+      <div class="new-trip-card-icon">＋</div>
+      <div class="new-trip-card-label">建立微旅行</div>
+    </div>`;
+
   if (!myTrips.length) {
     grid.innerHTML = `
       <div class="new-trip-card" onclick="openWizard()">
         <div class="new-trip-card-icon">＋</div>
         <div class="new-trip-card-label">建立第一趟微旅行</div>
-      </div>
-    `;
+      </div>`;
     return;
   }
-  const statusLabel = {planning:'規劃中',upcoming:'即將出發',copied:'已複製'};
-    const cards = myTrips.map(t => `
+
+  const list = sortMyTripsList(filterMyTripsList(myTrips, mtSearchQuery), mtSortMode);
+  if (!list.length) {
+    grid.innerHTML = `<div class="mt-empty-search"><div class="mt-empty-emoji">🔍</div><div>找不到符合的行程，換個關鍵字試試</div></div>` + newCard;
+    return;
+  }
+
+  const statusHtml = (s) => s === 'planning' ? '✏️ 規劃中' : s === 'upcoming' ? '✈️ 即將出發' : '📋 複製的行程';
+  const cards = list.map(t => `
     <div class="my-trip-card">
-      <div class="mt-cover ${t.cc}">${t.emoji}</div>
+      <div class="mt-topbar ${t.cc || 'c0'}"></div>
       <div class="mt-body">
-        <div class="mt-status ${t.status}">${t.status==='planning'?'✏️ 規劃中':t.status==='upcoming'?'✈️ 即將出發':'📋 複製的行程'}</div>
-        <div class="mt-title">${t.title}</div>
-        <div class="mt-meta">${t.days}天 · ${t.region} · ${t.budget} · ${t.createdAt}</div>
+        <div class="mt-head">
+          <div class="mt-emoji">${t.emoji || '📍'}</div>
+          <div class="mt-title">${t.title || '未命名行程'}</div>
+        </div>
+        <div class="mt-status ${t.status}">${statusHtml(t.status)}</div>
+        <div class="mt-meta">
+          <span class="mt-chip">🗓 ${mtDurationLabel(t.days)}</span>
+          <span class="mt-chip">📍 ${t.region}</span>
+          <span class="mt-chip">💰 ${t.budget}</span>
+          <span class="mt-chip">🕑 ${t.createdAt}</span>
+        </div>
         <div class="mt-actions">
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
@@ -3630,11 +3710,7 @@ function renderMyTrips() {
         </div>
       </div>
     </div>`).join('');
-  grid.innerHTML = cards + `
-    <div class="new-trip-card" onclick="openWizard()">
-      <div class="new-trip-card-icon">＋</div>
-      <div class="new-trip-card-label">建立微旅行</div>
-    </div>`;
+  grid.innerHTML = cards + newCard;
 }
 async function deleteMyTrip(id) {
   const t = myTrips.find(x => x.id === id);
@@ -5085,19 +5161,38 @@ function collabOpenInEditor() {
 }
 // 共用：彙整當下成員偏好 → 直接生成團體行程（「精靈建立完」與「面板再生成」共用）
 async function runCollabGeneration(tripId) {
-  const d = await WAI_COLLAB.getSharedTrip(tripId);
-  if (!d) { showToast('找不到共編行程', 'red'); return; }
-  const profile = WAI_COLLAB.aggregateGroupProfile(d.members || {});
-  const wData = { ...(d.wizardData || {}) };
-  wData.groupProfile = profile;            // 觸發 buildPreferenceLines 團體分支
-  wData.interests = profile.interests.slice(0, 4);
-  wData.pace = profile.pace;
-  if (profile.budget) wData.budget = profile.budget;
-  if (profile.desired && profile.desired.length) wData.desiredSpots = profile.desired.map(x => x.text).join('、');
-  let trip = myTrips.find(t => t.id === d.id);
-  if (!trip) { trip = { id: d.id, title: d.title, region: d.region, days: d.days, collab: true, role: 'owner', wizardData: wData, stops: [] }; myTrips.unshift(trip); }
-  trip.wizardData = wData;
-  await _doGeneration(trip, wData);
+  // 取重生成鎖：避免 owner 與可編輯成員同時重生成互相覆蓋
+  let locked = false;
+  try {
+    const lock = await WAI_COLLAB.acquireRegenLock(tripId, {
+      email: (currentUser && currentUser.email) || '',
+      name: (currentUser && currentUser.name) || ''
+    });
+    if (!lock.ok) {
+      showToast(`${lock.holder} 正在重新生成，請稍候`, 'orange');
+      _restoreWizNav(); hideGenMiniBar();
+      return;
+    }
+    locked = true;
+  } catch (e) { console.warn('取重生成鎖失敗（略過鎖）：', e); }
+
+  try {
+    const d = await WAI_COLLAB.getSharedTrip(tripId);
+    if (!d) { showToast('找不到共編行程', 'red'); return; }
+    const profile = WAI_COLLAB.aggregateGroupProfile(d.members || {});
+    const wData = { ...(d.wizardData || {}) };
+    wData.groupProfile = profile;            // 觸發 buildPreferenceLines 團體分支
+    wData.interests = profile.interests.slice(0, 4);
+    wData.pace = profile.pace;
+    if (profile.budget) wData.budget = profile.budget;
+    if (profile.desired && profile.desired.length) wData.desiredSpots = profile.desired.map(x => x.text).join('、');
+    let trip = myTrips.find(t => t.id === d.id);
+    if (!trip) { trip = { id: d.id, title: d.title, region: d.region, days: d.days, collab: true, role: 'owner', wizardData: wData, stops: [] }; myTrips.unshift(trip); }
+    trip.wizardData = wData;
+    await _doGeneration(trip, wData);
+  } finally {
+    if (locked) { try { await WAI_COLLAB.releaseRegenLock(tripId); } catch (e) {} }
+  }
 }
 
 async function collabGenerate() {

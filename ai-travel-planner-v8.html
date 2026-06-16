@@ -137,34 +137,33 @@
     <div id="view-members" class="view-section">
       <div class="hero-section" style="padding-bottom: 24px;">
         <div class="hero-title">同行旅伴</div>
-        <div class="hero-meta"><div class="hero-tag">👥 2 人</div></div>
+        <div class="hero-meta"><div class="hero-tag" id="membersCount">👥 -- 人</div></div>
       </div>
       <div class="members-container">
-        <div class="avatar-stack">
-          <div class="avatar">👩</div>
-          <div class="avatar">👨</div>
+        <div class="avatar-stack" id="membersAvatarStack">
+          <div class="avatar">👤</div>
           <div class="avatar-info">
-            <div style="font-weight: 600; font-size: 16px;">你與朋友</div>
-            <div style="font-size: 13px; color: var(--ink3);">所有人都擁有編輯權限</div>
+            <div style="font-weight: 600; font-size: 16px;">載入中…</div>
+            <div style="font-size: 13px; color: var(--ink3);"></div>
           </div>
         </div>
-        
+
         <div class="boarding-pass">
           <div class="bp-top">
             <div class="bp-label" style="color: rgba(255,255,255,0.7);">Destination</div>
-            <div class="bp-dest">--</div>
-            <div style="font-size: 14px; opacity: 0.9;">尚未載入行程</div>
+            <div class="bp-dest" id="membersDest">--</div>
+            <div style="font-size: 14px; opacity: 0.9;" id="membersTripTitle">尚未載入行程</div>
           </div>
           <div class="bp-divider"></div>
           <div class="bp-bottom">
             <div class="bp-row">
               <div>
                 <div class="bp-label">Date</div>
-                <div class="bp-value">待設定</div>
+                <div class="bp-value" id="membersDate">待設定</div>
               </div>
               <div style="text-align: right;">
                 <div class="bp-label">Organizer</div>
-                <div class="bp-value">小美</div>
+                <div class="bp-value" id="membersOrganizer">--</div>
               </div>
             </div>
             <div>
@@ -173,7 +172,7 @@
             </div>
             <div style="display: flex; flex-direction: column; align-items: center; margin: 8px 0 16px;">
               <div id="inviteQrCode" style="border-radius: 12px; border: 1px dashed rgba(255,255,255,0.45); width: 120px; height: 120px; display:flex; align-items:center; justify-content:center; color: rgba(255,255,255,0.72); font-size: 12px; text-align:center; padding: 12px;">尚未產生邀請碼</div>
-              <div style="font-size: 11px; color: var(--ink3); margin-top: 8px;">建立或匯入行程後才會顯示分享 QR Code</div>
+              <div id="inviteQrHint" style="font-size: 11px; color: var(--ink3); margin-top: 8px;">建立或匯入行程後才會顯示分享 QR Code</div>
             </div>
             <button class="tool-btn" style="width: 100%; justify-content: center; background: #00C300; color: white; border: none;" onclick="shareViaLine()">💬 透過 LINE 分享邀請</button>
           </div>
@@ -495,6 +494,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="./collab.js"></script>
 <script src="./ai-travel-planner-v8.js"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，

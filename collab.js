@@ -57,28 +57,33 @@ window.WAI_COLLAB = (function () {
     return '$' + Math.round(n).toLocaleString('en-US');
   }
 
-  // ── 節奏多數決（平手取較放鬆者）──
-  // 越前面越放鬆；平手時 index 小者（較放鬆）優先。
+  // ── 節奏多數決（平手由發起人 owner 決定）──
+  // 有唯一最高票 → 取多數；平手（≥2 種同為最高票，含 2 人不同調）→ 取 ownerPace；
+  // owner 沒設節奏才退回「較放鬆者」（越前面越放鬆）。
   var PACE_ORDER = ['悠閒', '平衡', '輕快'];
-  function majorityPace(paces) {
+  function majorityPace(paces, ownerPace) {
     var counts = {};
     (paces || []).filter(Boolean).forEach(function (p) { counts[p] = (counts[p] || 0) + 1; });
-    var best = null, bestN = -1;
-    // 先掃已知節奏（保證平手偏放鬆）
-    PACE_ORDER.forEach(function (p) {
-      var n = counts[p] || 0;
-      if (n > bestN) { bestN = n; best = p; }
+    var keys = Object.keys(counts);
+    if (!keys.length) return ownerPace || '平衡';
+    var maxN = Math.max.apply(null, keys.map(function (k) { return counts[k]; }));
+    var top = keys.filter(function (k) { return counts[k] === maxN; });
+    if (top.length === 1) return top[0]; // 唯一最高票 → 多數決
+    // 平手 → 發起人說了算
+    if (ownerPace) return ownerPace;
+    // 退路：較放鬆者（PACE_ORDER 越前面越放鬆，自訂節奏排最後）
+    top.sort(function (a, b) {
+      var ia = PACE_ORDER.indexOf(a), ib = PACE_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
     });
-    // 再掃自訂節奏（嚴格大於才取代，維持平手偏放鬆）
-    Object.keys(counts).forEach(function (p) {
-      if (PACE_ORDER.indexOf(p) === -1 && counts[p] > bestN) { bestN = counts[p]; best = p; }
-    });
-    return (bestN > 0 && best) ? best : '平衡';
+    return top[0];
   }
 
   // ── 團體 profile 彙整（純函式）──
   function aggregateGroupProfile(members) {
     var list = Array.isArray(members) ? members : Object.keys(members || {}).map(function (k) { return members[k]; });
+    var ownerMember = list.find(function (m) { return m && m.role === 'owner'; });
+    var ownerPace = ownerMember ? ((ownerMember.prefs || ownerMember.preferences || {}).pace || '') : '';
     var interestVotes = {};
     var paces = [];
     var budgets = [];
@@ -117,7 +122,7 @@ window.WAI_COLLAB = (function () {
       memberCount: list.length,
       interests: interests,
       interestVotes: interestVotes,
-      pace: majorityPace(paces),
+      pace: majorityPace(paces, ownerPace),
       budget: budgets.length ? formatBudget(budgets.reduce(function (a, b) { return a + b; }, 0) / budgets.length) : '',
       avoid: avoid,
       desired: desired
@@ -127,7 +132,7 @@ window.WAI_COLLAB = (function () {
   // 把團體 profile 轉成 prompt 用的偏好行（取代單人 buildPreferenceLines）。
   function buildGroupPreferenceLines(profile) {
     var lines = [];
-    lines.push('行程節奏：' + profile.pace + '（團體多數決）');
+    lines.push('行程節奏：' + profile.pace + '（多數決；平手時以發起人為準）');
     lines.push('團體興趣方向：' + (profile.interests.join('、') || '多元體驗') +
       '（綜合 ' + profile.memberCount + ' 位成員，依被選票數排序，越前面越多人想去）');
     if (profile.budget) {
@@ -306,6 +311,33 @@ window.WAI_COLLAB = (function () {
     }, function (err) { if (onError) onError(err); });
   }
 
+  // 重生成鎖：避免 owner 與可編輯成員同時重生成互相覆蓋（最後寫入者覆蓋）。
+  var REGEN_LOCK_TTL_MS = 5 * 60 * 1000; // 鎖逾時自動失效，避免當機留死鎖
+  // 用 transaction 原子地檢查+設定：別人鎖住且未逾時 → { ok:false, holder }；否則上鎖 → { ok:true }
+  async function acquireRegenLock(tripId, user) {
+    var dbi = db();
+    var ref = dbi.collection('micro_trips').doc(tripId);
+    var myEmail = (user && user.email) || '';
+    return dbi.runTransaction(function (tx) {
+      return tx.get(ref).then(function (snap) {
+        if (!snap.exists) throw new Error('行程不存在');
+        var lock = snap.data().regenLock;
+        var now = Date.now();
+        if (lock && lock.at && (now - lock.at) < REGEN_LOCK_TTL_MS && lock.by !== myEmail) {
+          return { ok: false, holder: lock.byName || lock.by || '其他成員' };
+        }
+        tx.set(ref, { regenLock: { by: myEmail, byName: (user && user.name) || myEmail || '成員', at: now } }, { merge: true });
+        return { ok: true };
+      });
+    });
+  }
+  async function releaseRegenLock(tripId) {
+    try {
+      await db().collection('micro_trips').doc(tripId).set(
+        { regenLock: firebase.firestore.FieldValue.delete() }, { merge: true });
+    } catch (e) { /* 清鎖失敗不致命，TTL 也會自動失效 */ }
+  }
+
   // 單次讀取一份共用行程（含最新 members），供生成前彙整成員偏好用
   async function getSharedTrip(tripId) {
     var snap = await db().collection('micro_trips').doc(tripId).get();
@@ -378,6 +410,8 @@ window.WAI_COLLAB = (function () {
     revokeInvite: revokeInvite,
     subscribeSharedTrip: subscribeSharedTrip,
     getSharedTrip: getSharedTrip,
+    acquireRegenLock: acquireRegenLock,
+    releaseRegenLock: releaseRegenLock,
     fetchMyCollabTrips: fetchMyCollabTrips,
     loadGuestTrip: loadGuestTrip
   };

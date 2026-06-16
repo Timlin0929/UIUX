@@ -3194,8 +3194,8 @@ window.WAI_POI_DATA = {
     },
     {
       "name": "開元漁港",
-      "lat": 22.0444,
-      "lng": 121.5581,
+      "lat": 22.0578673,
+      "lng": 121.5060157,
       "desc": "旅程起始點，從這裡出發。",
       "address": "",
       "businessHours": "",
