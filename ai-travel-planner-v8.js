@@ -8859,16 +8859,17 @@
       if (renderToken !== routeRenderToken || !map) return '';
       const arr = (walkRenderers[stageIndex] = walkRenderers[stageIndex] || []);
       const visMap = stageVisible(stageIndex) ? map : null;
-      if (result) {
-        const wr = new google.maps.DirectionsRenderer({
+      if (result && result.routes && result.routes[0] && result.routes[0].overview_path) {
+        const wr = new google.maps.Polyline({
           map: visMap,
-          suppressMarkers: true,
-          preserveViewport: true,
-          polylineOptions: { strokeColor: WALK_LINE_COLOR, strokeOpacity: 0, zIndex: 1100, icons: [dash] }
+          path: result.routes[0].overview_path,
+          strokeColor: WALK_LINE_COLOR,
+          strokeOpacity: 0,
+          zIndex: 1100,
+          icons: [dash]
         });
-        wr.setDirections(result);
         arr.push(wr);
-        const leg = result.routes && result.routes[0] && result.routes[0].legs && result.routes[0].legs[0];
+        const leg = result.routes[0].legs && result.routes[0].legs[0];
         return (leg && leg.duration && leg.duration.text) || '';
       }
       const line = new google.maps.Polyline({
@@ -9234,44 +9235,39 @@
 
             const leg = response.routes[bestRouteIndex].legs[0];
             const segColor = ROUTE_MODE_COLORS[stageMode] || '#EA580C';
-            const renderer = new google.maps.DirectionsRenderer({
+            const renderer = new google.maps.Polyline({
               map: map,
-              suppressMarkers: true,
-              preserveViewport: true,
-              routeIndex: bestRouteIndex,
-              polylineOptions: {
-                strokeColor: segColor,
-                strokeWeight: 6,
-                strokeOpacity: 0.95,
-                geodesic: true,
-                zIndex: 1000,
-                icons: [
-                  {
-                    icon: {
-                      path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-                      scale: 8,
-                      strokeColor: '#ffffff',
-                      fillColor: '#ffffff',
-                      fillOpacity: 1
-                    },
-                    offset: '15%',
-                    repeat: '80px'
+              path: response.routes[bestRouteIndex].overview_path,
+              strokeColor: segColor,
+              strokeWeight: 6,
+              strokeOpacity: 0.95,
+              geodesic: true,
+              zIndex: 1000,
+              icons: [
+                {
+                  icon: {
+                    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                    scale: 8,
+                    strokeColor: '#ffffff',
+                    fillColor: '#ffffff',
+                    fillOpacity: 1
                   },
-                  {
-                    icon: {
-                      path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-                      scale: 5,
-                      strokeColor: segColor,
-                      fillColor: segColor,
-                      fillOpacity: 1
-                    },
-                    offset: '15%',
-                    repeat: '80px'
-                  }
-                ]
-              }
+                  offset: '15%',
+                  repeat: '80px'
+                },
+                {
+                  icon: {
+                    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                    scale: 5,
+                    strokeColor: segColor,
+                    fillColor: segColor,
+                    fillOpacity: 1
+                  },
+                  offset: '15%',
+                  repeat: '80px'
+                }
+              ]
             });
-            renderer.setDirections(response);
             directionsRenderers[i] = renderer;
 
             // 在路線中間加入方向標籤，讓使用者清楚知道往哪個景點移動

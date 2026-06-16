@@ -506,9 +506,15 @@
       console.error('[Maps] 未設定 GOOGLE_MAPS_API_KEY，請檢查 weather.env.js');
       return;
     }
+    // 註冊全域回呼以配合 loading=async
+    window.initGoogleMapsCallback = function () {
+      if (typeof window.initMap === 'function') {
+        window.initMap();
+      }
+    };
     var s = document.createElement('script');
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) +
-      '&libraries=places&language=zh-TW&region=TW';
+      '&libraries=places&language=zh-TW&region=TW&loading=async&callback=initGoogleMapsCallback';
     s.async = true;
     s.defer = true;
     s.onerror = function () { console.error('[Maps] Google Maps 載入失敗，請確認金鑰有效且已啟用 Maps JavaScript API'); };
