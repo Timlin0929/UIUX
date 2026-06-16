@@ -55,8 +55,8 @@
   const tdxSpotsCache = new Map();
   const tdxParkingCache = new Map();
   const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
-  // 觀光資訊 V1.0（/api/basic/v2/Tourism/ScenicSpot）將於 2026/6/30 停用 → 改用 V2.1 Attraction（中文縣市 $filter）
-  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/V2/Tourism/Attraction';
+  // 觀光資訊 V2.0 ScenicSpot (包含中文縣市 $filter)
+  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/v2/Tourism/ScenicSpot';
   const TDX_PARKING_BASE = 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/CarPark/City';
   const TDX_COUNTY_ZH = { Taitung: '臺東縣', Hualien: '花蓮縣', Pingtung: '屏東縣', Tainan: '臺南市', Kaohsiung: '高雄市' };
   // TDX 停車 City enum：縣級用 …County 後綴（TaitungCounty…），直轄市/市用裸名。帶錯（如 Taitung）→ 400。
@@ -373,14 +373,15 @@
         const access_token = await getTdxAccessToken();
         if (!access_token) return [];
         const zh = TDX_COUNTY_ZH[county] || county;
-        const filter = encodeURIComponent(`PostalAddress/City eq '${zh}'`);
+        const filter = encodeURIComponent(`City eq '${zh}'`);
         const dataRes = await fetch(
           `${TDX_SCENIC_BASE}?$filter=${filter}&$top=200&$format=JSON`,
           { headers: { Authorization: `Bearer ${access_token}` } }
         );
         if (!dataRes.ok) return [];
         const spots = await dataRes.json();
-        const normalized = (Array.isArray(spots) ? spots : [])
+        const rawSpots = Array.isArray(spots) ? spots : (spots && Array.isArray(spots.value) ? spots.value : []);
+        const normalized = rawSpots
           .map(s => {
             const pos = s.Position || s.PositionLatLon || {};
             const lat = Number(pos.PositionLat != null ? pos.PositionLat : s.PositionLat);
@@ -431,7 +432,8 @@
         );
         if (!dataRes.ok) { console.warn(`[TDX] 停車場 ${city} HTTP ${dataRes.status}`); return []; }
         const list = await dataRes.json();
-        const normalized = (Array.isArray(list) ? list : [])
+        const rawList = Array.isArray(list) ? list : (list && Array.isArray(list.CarParks) ? list.CarParks : []);
+        const normalized = rawList
           .map(pk => {
             const pos = pk.CarParkPosition || {};
             const lat = Number(pos.PositionLat);
