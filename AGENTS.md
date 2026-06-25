@@ -4,11 +4,11 @@ This workspace is a static HTML prototype playground. Edit the individual `.html
 
 ## Working rules
 
-- Prefer the nearest prototype file as the source of truth. The main travel flow is centered on [ai-travel-planner-v8.html](ai-travel-planner-v8.html).
+- Prefer the nearest prototype file as the source of truth. The main travel flow is centered on [app/ai-travel-planner-v8.html](app/ai-travel-planner-v8.html).
 - Keep changes local to the target prototype unless the user explicitly asks for cross-file alignment.
-- `ai-travel-planner-v8.html` and `ai-travel-explore-final.html` now load their styles/logic from sibling `.css`/`.js` files (e.g. [ai-travel-planner-v8.js](ai-travel-planner-v8.js), [ai-travel-planner-v8.css](ai-travel-planner-v8.css)). Edit those external files for CSS/JS changes; the `.html` keeps only markup, CDN/`weather.env.js` script tags, and the Google Maps loader. They are plain `<script src>`/`<link>` (not ES modules) so `file://` still works. Other prototypes remain inline.
+- All app runtime files live in [app/](app/). `ai-travel-planner-v8.html` and `ai-travel-explore-final.html` load their styles/logic from sibling `.css`/`.js` files (e.g. [app/ai-travel-planner-v8.js](app/ai-travel-planner-v8.js), [app/ai-travel-planner-v8.css](app/ai-travel-planner-v8.css)). Edit those external files for CSS/JS changes; the `.html` keeps only markup, CDN/`weather.env.js` script tags, and the Google Maps loader. They are plain `<script src>`/`<link>` (not ES modules) so `file://` still works. Retired prototypes are in [archive/](archive/).
 - Preserve the existing no-build, no-framework style. Avoid introducing frameworks, bundlers, or new abstractions unless requested.
-- Shared runtime config lives in [weather.env.js](weather.env.js); use it for local API keys and environment values instead of hardcoding secrets into page markup.
+- Shared runtime config lives in [app/weather.env.js](app/weather.env.js); use it for local API keys and environment values instead of hardcoding secrets into page markup.
 - External services currently used by the prototypes include Firebase and Google Maps. Keep any related script loading and initialization compatible with the existing CDN-based approach.
 
 ## Editing guidance

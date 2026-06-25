@@ -34,8 +34,8 @@ const CLEANUP_COLLAB_MODE = !!(argv['cleanup-collab'] || argv.mode === 'cleanup-
 const CLEANUP_DAYS = parseInt(argv.days || process.env.CLEANUP_COLLAB_DAYS || '7', 10);
 const FORCE = !!argv.force;
 const VERIFY_NEAR_METERS = parseInt(process.env.VERIFY_NEAR_METERS || '5000', 10);
-const EXPORT_LOCAL_PATH = process.env.EXPORT_LOCAL_PATH || path.resolve(__dirname, '..', 'poi-data.js');
-const RESTAURANT_DATA_PATH = process.env.RESTAURANT_DATA_PATH || path.resolve(__dirname, '..', 'restaurant-data.js');
+const EXPORT_LOCAL_PATH = process.env.EXPORT_LOCAL_PATH || path.resolve(__dirname, '..', 'app', 'poi-data.js');
+const RESTAURANT_DATA_PATH = process.env.RESTAURANT_DATA_PATH || path.resolve(__dirname, '..', 'app', 'restaurant-data.js');
 const MIN_FOOD_POIS = parseInt(process.env.MIN_FOOD_POIS || '3', 10);
 const FOOD_PER_DEST = parseInt(process.env.FOOD_PER_DEST || '25', 10);
 const LIMIT = parseInt(argv.limit || process.env.CRAWL_LIMIT || '50', 10);
