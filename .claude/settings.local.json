@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 patch_gen_overlay.py)"
-    ]
-  }
-}
