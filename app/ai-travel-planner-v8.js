@@ -4001,7 +4001,7 @@
 
   // 給「開始行程」後續完成用的公開介面：自動將整趟行程的景點標為「去過了」
   window.markTripAsCompleted = function() {
-    if (!replanStops || !replanStops.length) return showToast('沒有可記錄的行程', 'orange');
+    if (!replanStops || !replanStops.length) return feedbackToast('沒有可記錄的行程', 'orange');
     let addedCount = 0;
     replanStops.forEach(stop => {
       if (stop.type !== 'start' && stop.type !== 'end' && stop.name) {
@@ -4017,12 +4017,184 @@
       }
     });
     if (addedCount > 0) {
-      showToast(`🎉 行程已完成！自動將 ${addedCount} 個景點加入去過清單。`, 'green');
+      feedbackToast(`🎉 行程已完成！自動將 ${addedCount} 個景點加入去過清單。`, 'green');
       if (document.getElementById('travellog-list')) renderTravelLog();
     } else {
-      showToast('此行程的景點皆已記錄過。', 'blue');
+      feedbackToast('此行程的景點皆已記錄過。', 'blue');
     }
+    // 完成行程後邀請使用者評分回饋（B1）；稍微延遲讓完成 toast 先顯示
+    setTimeout(() => { if (typeof window.openTripFeedback === 'function') window.openTripFeedback(true); }, 900);
   };
+
+  // ══════════════════════════════════════════════════
+  // 行程回饋系統（B1：整體評分 + AI 準確度 + 選填意見）
+  // 到訪標記沿用既有 toggleVisitedPlace / isPlaceVisited。
+  // 資料寫入 micro_trips/{tripId}.feedback.{emailKey}（見 docs/FEEDBACK_SCHEMA.md）。
+  // ══════════════════════════════════════════════════
+  const TRIP_FEEDBACK_KEY = 'wai_trip_feedback';
+  let tripFeedbackDraft = { tripRating: 0, aiAccuracy: 0, comment: '' };
+
+  // planner 執行期沒有全域 showToast（僅 explore 有）；安全退回 showVisitedToast，避免 ReferenceError。
+  function feedbackToast(msg, color) {
+    if (typeof showToast === 'function') { showToast(msg, color); return; }
+    if (typeof showVisitedToast === 'function') { showVisitedToast(msg); return; }
+  }
+
+  function getCurrentUserIdentity() {
+    let email = '', name = '';
+    try {
+      const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
+      const cu = u && u.currentUser;
+      if (cu) { email = cu.email || ''; name = cu.name || cu.displayName || ''; }
+    } catch (_e) {}
+    if (!name) name = email ? email.split('@')[0] : '旅人';
+    return { email, name };
+  }
+
+  function feedbackEmailKey(email) {
+    if (window.WAI_COLLAB && typeof WAI_COLLAB.emailKey === 'function') return WAI_COLLAB.emailKey(email);
+    return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+  }
+
+  function getLocalTripFeedbackMap() {
+    try { return JSON.parse(localStorage.getItem(TRIP_FEEDBACK_KEY) || '{}'); } catch { return {}; }
+  }
+  function getLocalTripFeedback(tripId) {
+    const map = getLocalTripFeedbackMap();
+    return (tripId && map[tripId]) ? map[tripId] : null;
+  }
+
+  // 計算本趟到訪數 / 總景點數（不含 start/end 節點）
+  function computeVisitedSummary() {
+    const stops = (replanStops || []).filter(s => s && s.type !== 'start' && s.type !== 'end' && s.name);
+    const visited = stops.filter(s => isPlaceVisited(s.name)).length;
+    return { visitedCount: visited, totalStops: stops.length };
+  }
+
+  window.openTripFeedback = function(auto) {
+    const hasTrip = (currentItineraryId && currentItineraryId !== 'TRIP-EMPTY') || (replanStops && replanStops.length);
+    if (!hasTrip) { feedbackToast('尚未載入行程，請先開啟或生成一份行程。', 'orange'); return; }
+    // 預填：優先讀本機快取（離線 / 個人行程也能回填）
+    const existing = getLocalTripFeedback(currentItineraryId);
+    tripFeedbackDraft = existing
+      ? { tripRating: existing.tripRating || 0, aiAccuracy: existing.aiAccuracy || 0, comment: existing.comment || '' }
+      : { tripRating: 0, aiAccuracy: 0, comment: '' };
+    renderTripFeedbackModal(!!existing);
+    const overlay = document.getElementById('tripfb-overlay');
+    if (overlay) requestAnimationFrame(() => overlay.classList.add('open'));
+  };
+
+  window.closeTripFeedback = function() {
+    const overlay = document.getElementById('tripfb-overlay');
+    if (overlay) overlay.classList.remove('open');
+  };
+
+  window.setFeedbackStar = function(field, val) {
+    if (field !== 'tripRating' && field !== 'aiAccuracy') return;
+    tripFeedbackDraft[field] = val;
+    // 只更新該列星星與送出按鈕狀態，不重建整個 modal（保留 textarea 焦點）
+    const row = document.getElementById('tripfb-stars-' + field);
+    if (row) row.querySelectorAll('.tripfb-star').forEach((b, i) => b.classList.toggle('on', i < val));
+    const submitBtn = document.getElementById('tripfb-submit');
+    if (submitBtn) submitBtn.disabled = !(tripFeedbackDraft.tripRating > 0 && tripFeedbackDraft.aiAccuracy > 0);
+  };
+
+  window.submitTripFeedback = async function() {
+    const commentEl = document.getElementById('tripfb-comment');
+    tripFeedbackDraft.comment = commentEl ? commentEl.value.trim().slice(0, 500) : '';
+    if (!(tripFeedbackDraft.tripRating > 0 && tripFeedbackDraft.aiAccuracy > 0)) {
+      feedbackToast('請先為「行程整體」與「AI 準確度」評分。', 'orange');
+      return;
+    }
+    const { email, name } = getCurrentUserIdentity();
+    const { visitedCount, totalStops } = computeVisitedSummary();
+    const entry = {
+      email: email || '',
+      name: name,
+      tripRating: tripFeedbackDraft.tripRating,
+      aiAccuracy: tripFeedbackDraft.aiAccuracy,
+      comment: tripFeedbackDraft.comment,
+      visitedCount, totalStops,
+      submittedAt: Date.now(),
+      appPlatform: 'web'
+    };
+
+    // 1) 本機快取（一定成功，離線 / 個人行程也保留）
+    try {
+      const map = getLocalTripFeedbackMap();
+      map[currentItineraryId] = {
+        tripRating: entry.tripRating, aiAccuracy: entry.aiAccuracy,
+        comment: entry.comment, submittedAt: entry.submittedAt
+      };
+      localStorage.setItem(TRIP_FEEDBACK_KEY, JSON.stringify(map));
+    } catch (e) { console.warn('Save feedback to localStorage failed:', e); }
+
+    // 2) Firestore：micro_trips/{tripId}.feedback.{emailKey}（巢狀物件，避免 dot-key 陷阱）
+    if (firebaseEnabled && firebaseDb && email && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY') {
+      try {
+        const fbPatch = {};
+        fbPatch[feedbackEmailKey(email)] = entry;
+        await firebaseDb.collection('micro_trips').doc(currentItineraryId)
+                        .set({ feedback: fbPatch }, { merge: true });
+      } catch (e) {
+        console.warn('Persist feedback to Firebase failed:', e);
+      }
+    }
+
+    window.closeTripFeedback();
+    feedbackToast('💚 感謝你的回饋！', 'green');
+  };
+
+  function renderTripFeedbackModal(isEdit) {
+    let overlay = document.getElementById('tripfb-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'tripfb-overlay';
+      overlay.className = 'tripfb-overlay';
+      // 點擊遮罩空白處關閉
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) window.closeTripFeedback(); });
+      document.body.appendChild(overlay);
+    }
+    const { visitedCount, totalStops } = computeVisitedSummary();
+    const title = currentTripTitle || '這趟旅程';
+    const starsRow = (field, val) => `
+      <div class="tripfb-stars" id="tripfb-stars-${field}">
+        ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= val ? 'on' : ''}" onclick="setFeedbackStar('${field}',${i})">★</button>`).join('')}
+      </div>`;
+    const canSubmit = tripFeedbackDraft.tripRating > 0 && tripFeedbackDraft.aiAccuracy > 0;
+    overlay.innerHTML = `
+      <div class="tripfb-card" role="dialog" aria-modal="true">
+        <div class="tripfb-title">為「${escapeFeedbackText(title)}」評分</div>
+        <div class="tripfb-sub">${isEdit ? '你已評分過，可修改後重新送出。' : '你的回饋會幫助我們讓 AI 行程更準確。'}</div>
+
+        <div class="tripfb-field">
+          <div class="tripfb-label">行程整體評分</div>
+          ${starsRow('tripRating', tripFeedbackDraft.tripRating)}
+        </div>
+
+        <div class="tripfb-field">
+          <div class="tripfb-label">AI 準確度<span class="tripfb-hint">行程是否合理、符合你的需求</span></div>
+          ${starsRow('aiAccuracy', tripFeedbackDraft.aiAccuracy)}
+          <div class="tripfb-scalehint"><span>很不準</span><span>非常準</span></div>
+        </div>
+
+        <div class="tripfb-field">
+          <div class="tripfb-label">想法與建議<span class="tripfb-hint">選填</span></div>
+          <textarea class="tripfb-textarea" id="tripfb-comment" maxlength="500" placeholder="例如：路線很順，但某站營業時間有誤差…">${escapeFeedbackText(tripFeedbackDraft.comment)}</textarea>
+        </div>
+
+        <div class="tripfb-summary">📍 本趟已到訪 ${visitedCount} / ${totalStops} 個景點</div>
+
+        <div class="tripfb-actions">
+          <button type="button" class="tripfb-btn ghost" onclick="closeTripFeedback()">稍後</button>
+          <button type="button" class="tripfb-btn primary" id="tripfb-submit" ${canSubmit ? '' : 'disabled'} onclick="submitTripFeedback()">送出回饋</button>
+        </div>
+      </div>`;
+  }
+
+  function escapeFeedbackText(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
 
   function showVisitedToast(msg) {
     let el = document.getElementById('visited-toast');
@@ -9525,8 +9697,275 @@
     }
   }
 
+  // ── 使用者登入與 Google 登入整合 (W1) ──
+  window.openLogin = function() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.classList.add('open');
+  };
+
+  window.closeLogin = function() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.classList.remove('open');
+  };
+
+  window.switchAuthTab = function(tab) {
+    const loginTab = document.getElementById('loginTab');
+    const registerTab = document.getElementById('registerTab');
+    const loginForm = document.getElementById('loginForm');
+    const registerForm = document.getElementById('registerForm');
+    if (loginTab && registerTab && loginForm && registerForm) {
+      loginTab.classList.toggle('active', tab === 'login');
+      registerTab.classList.toggle('active', tab === 'register');
+      loginForm.style.display = tab === 'login' ? '' : 'none';
+      registerForm.style.display = tab === 'register' ? '' : 'none';
+    }
+  };
+
+  window.toggleUserDropdown = function() {
+    const dd = document.getElementById('userDropdown');
+    if (dd) dd.classList.toggle('open');
+  };
+
+  window.openChangePwd = function() {
+    const u = firebaseAuth && firebaseAuth.currentUser;
+    if (!u) return feedbackToast('請先登入', 'orange');
+    const hasPwd = (u.providerData || []).some(p => p && p.providerId === 'password');
+    if (!hasPwd) return feedbackToast('你以社群帳號登入，請至 Google／Facebook 修改密碼', 'orange');
+    ['cpwCurrent', 'cpwNew', 'cpwConfirm'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    const overlay = document.getElementById('changePwdOverlay');
+    if (overlay) overlay.classList.add('open');
+  };
+
+  window.closeChangePwd = function() {
+    const overlay = document.getElementById('changePwdOverlay');
+    if (overlay) overlay.classList.remove('open');
+  };
+
+  function isValidEmail(s) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  }
+
+  window.doLogin = async function() {
+    if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
+    const emailEl = document.getElementById('loginEmail');
+    const pwdEl = document.getElementById('loginPwd');
+    const email = emailEl ? emailEl.value.trim() : '';
+    const pwd = pwdEl ? pwdEl.value : '';
+    if (!email || !pwd) return feedbackToast('請填寫帳號和密碼', 'orange');
+    if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
+    try {
+      await firebaseAuth.signInWithEmailAndPassword(email, pwd);
+      feedbackToast('👋 歡迎回來！', 'green');
+      window.closeLogin();
+    } catch (e) {
+      feedbackToast(`登入失敗: ${e.message}`, 'red');
+    }
+  };
+
+  window.doRegister = async function() {
+    if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
+    const nameEl = document.getElementById('regName');
+    const emailEl = document.getElementById('regEmail');
+    const pwdEl = document.getElementById('regPwd');
+    const name = nameEl ? nameEl.value.trim() : '';
+    const email = emailEl ? emailEl.value.trim() : '';
+    const pwd = pwdEl ? pwdEl.value : '';
+    if (!name || !email || !pwd) return feedbackToast('請填寫所有欄位', 'orange');
+    if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
+    if (pwd.length < 8) return feedbackToast('密碼至少需要 8 個字元', 'orange');
+    try {
+      const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
+      const user = userCredential.user;
+      if (firebaseDb) {
+        await firebaseDb.collection('users').doc(user.uid).set({
+          uid: user.uid,
+          email: email,
+          name: name,
+          emoji: '🌟',
+          preferences: { interests: [], pace: '平衡', avoid: '', avoidTags: [] },
+          visitedSpots: [],
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+      feedbackToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+      window.closeLogin();
+      feedbackToast('您可至「我的微旅行」首頁設定個人偏好。', 'blue');
+    } catch (e) {
+      feedbackToast(`註冊失敗: ${e.message}`, 'red');
+    }
+  };
+
+  window.doSocialLogin = async function(providerName) {
+    if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
+    try {
+      let provider = null;
+      if (providerName === 'Google') provider = new firebase.auth.GoogleAuthProvider();
+      else if (providerName === 'Facebook') provider = new firebase.auth.FacebookAuthProvider();
+      else return;
+      
+      const userCredential = await firebaseAuth.signInWithPopup(provider);
+      const user = userCredential.user;
+      
+      if (firebaseDb) {
+        const docRef = firebaseDb.collection('users').doc(user.uid);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+          await docRef.set({
+            uid: user.uid,
+            email: user.email || '',
+            name: user.displayName || '社群用戶',
+            emoji: providerName === 'Google' ? '🌐' : '📘',
+            preferences: { interests: [], pace: '平衡', avoid: '', avoidTags: [] },
+            visitedSpots: [],
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          });
+          feedbackToast('🎉 歡迎首次登入 WanderAI！', 'green');
+        } else {
+          feedbackToast(`👋 歡迎回來，${user.displayName || '使用者'}！`, 'green');
+        }
+      }
+      window.closeLogin();
+    } catch (e) {
+      feedbackToast(`登入失敗: ${e.message}`, 'red');
+    }
+  };
+
+  window.doLogout = function() {
+    if (firebaseAuth) firebaseAuth.signOut();
+    feedbackToast('已登出，重整頁面中…');
+    setTimeout(() => { window.location.reload(); }, 800);
+  };
+
+  window.doChangePassword = async function() {
+    if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
+    const u = firebaseAuth.currentUser;
+    if (!u) return feedbackToast('請先登入', 'orange');
+    const curEl = document.getElementById('cpwCurrent');
+    const npEl = document.getElementById('cpwNew');
+    const cfEl = document.getElementById('cpwConfirm');
+    const cur = curEl ? curEl.value : '';
+    const np = npEl ? npEl.value : '';
+    const cf = cfEl ? cfEl.value : '';
+    if (!cur || !np || !cf) return feedbackToast('請填寫所有欄位', 'orange');
+    if (np.length < 8) return feedbackToast('新密碼至少需要 8 個字元', 'orange');
+    if (np !== cf) return feedbackToast('兩次輸入的新密碼不一致', 'orange');
+    if (np === cur) return feedbackToast('新密碼不可與目前密碼相同', 'orange');
+    try {
+      const cred = firebase.auth.EmailAuthProvider.credential(u.email, cur);
+      await u.reauthenticateWithCredential(cred);
+      await u.updatePassword(np);
+      feedbackToast('🔒 密碼已更新', 'green');
+      window.closeChangePwd();
+    } catch (e) {
+      const code = e && e.code;
+      let msg;
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') msg = '目前密碼不正確';
+      else if (code === 'auth/weak-password') msg = '新密碼強度不足';
+      else if (code === 'auth/too-many-requests') msg = '嘗試次數過多，請稍後再試';
+      else msg = '密碼更新失敗：' + ((e && e.message) || '未知錯誤');
+      feedbackToast(msg, 'red');
+    }
+  };
+
+  function renderUserMenuWithData(name, emoji, email) {
+    const wrap = document.getElementById('userMenuWrap');
+    if (!wrap) return;
+    if (!name || !email) {
+      wrap.innerHTML = `<button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>`;
+    } else {
+      const u = firebaseAuth && firebaseAuth.currentUser;
+      const _hasPwd = !!(u && (u.providerData || []).some(p => p && p.providerId === 'password'));
+      wrap.innerHTML = `
+        <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${escapeFeedbackText(name)}">
+          ${escapeFeedbackText(emoji)}
+        </div>
+        <div class="user-dropdown" id="userDropdown">
+          <div class="user-dropdown-header">
+            <div class="user-dropdown-name">${escapeFeedbackText(name)}</div>
+            <div class="user-dropdown-email">${escapeFeedbackText(email)}</div>
+          </div>
+          <div class="user-dd-item" onclick="window.location='ai-travel-explore-final.html?view=mytrips';toggleUserDropdown()">📋 我的微旅行</div>
+          <div class="user-dd-item" onclick="window.location='ai-travel-explore-final.html?openPref=1';toggleUserDropdown()">🎯 修改個人喜好</div>
+          ${_hasPwd ? `<div class="user-dd-item" onclick="openChangePwd();toggleUserDropdown()">🔒 修改密碼</div>` : ''}
+          <div class="user-dd-sep"></div>
+          <div class="user-dd-item danger" onclick="doLogout()">👋 登出</div>
+        </div>`;
+    }
+  }
+
+  function setupAuthListener() {
+    if (!firebaseEnabled || !firebaseAuth) return;
+    firebaseAuth.onAuthStateChanged(async (user) => {
+      if (user) {
+        let name = user.displayName || user.email?.split('@')[0] || '使用者';
+        let emoji = '😊';
+        let preferences = { interests: [], pace: '平衡', avoid: '', avoidTags: [] };
+        let visitedSpots = [];
+        
+        let cachedData = null;
+        try {
+          const raw = localStorage.getItem('wai_user');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.currentUser && parsed.currentUser.email === user.email) {
+              cachedData = parsed.currentUser;
+            }
+          }
+        } catch (_) {}
+
+        if (cachedData) {
+          name = cachedData.name || name;
+          emoji = cachedData.emoji || emoji;
+          preferences = cachedData.preferences || preferences;
+          visitedSpots = cachedData.visitedSpots || visitedSpots;
+        }
+
+        renderUserMenuWithData(name, emoji, user.email);
+
+        if (firebaseDb) {
+          try {
+            const doc = await firebaseDb.collection('users').doc(user.uid).get();
+            if (doc.exists) {
+              const data = doc.data();
+              name = data.name || name;
+              emoji = data.emoji || emoji;
+              preferences = data.preferences || preferences;
+              if (data.visitedSpots && Array.isArray(data.visitedSpots)) {
+                visitedSpots = data.visitedSpots;
+                localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(visitedSpots));
+              }
+            }
+          } catch (e) {
+            console.warn('無法從 Firestore 讀取使用者資料', e);
+          }
+        }
+
+        const currentUserObj = { uid: user.uid, email: user.email, name, emoji, preferences, visitedSpots };
+        localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn: true, currentUser: currentUserObj }));
+        renderUserMenuWithData(name, emoji, user.email);
+      } else {
+        localStorage.removeItem('wai_user');
+        renderUserMenuWithData('', '', '');
+      }
+    });
+  }
+
+  document.addEventListener('click', e => {
+    const wrap = document.getElementById('userMenuWrap');
+    if (wrap && !wrap.contains(e.target)) {
+      const dd = document.getElementById('userDropdown');
+      if (dd) dd.classList.remove('open');
+    }
+  });
+
   async function startApp() {
     initFirebaseIfConfigured();
+    setupAuthListener();
     await initFromUrl();
     if (window.google && window.google.maps) {
       if (!map) {

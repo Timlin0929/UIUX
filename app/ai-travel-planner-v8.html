@@ -28,7 +28,10 @@
     </div>
   </div>
 
-  <div class="header-right">
+  <div class="header-right" style="display: flex; align-items: center; gap: 12px;">
+    <div class="user-menu-wrap" id="userMenuWrap">
+      <button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>
+    </div>
     <button class="tool-btn primary" onclick="toggleAI()">✨ AI 隨行管家</button>
   </div>
 </header>
@@ -328,7 +331,8 @@
       </div>
       <div style="padding: 0 16px 16px;">
         <p style="font-size:13px;color:var(--ink2);margin-bottom:16px;">已標記的景點會在 AI 重新規劃時自動排除，讓每次旅行都有新體驗。</p>
-        <div id="travellog-list"></div>
+        <button class="travellog-rate-btn" onclick="openTripFeedback()">⭐ 為這趟旅程評分</button>
+        <div id="travellog-list" style="margin-top:16px;"></div>
         <div id="travellog-empty" style="text-align:center;padding:48px 16px;color:var(--ink3,#aaa);">
           <div style="font-size:40px;margin-bottom:12px;">🗺️</div>
           <div style="font-size:15px;font-weight:600;color:var(--ink2);">還沒有旅遊紀錄</div>
@@ -556,6 +560,46 @@
       <div class="replan-gen-output" id="replanGenOutput"></div>
       <div class="replan-gen-cursor" id="replanGenCursor">◌</div>
     </div>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: LOGIN ─── -->
+<div class="overlay" id="loginOverlay" onclick="if(event.target===this)closeLogin()" style="z-index:300">
+  <div class="login-modal" style="position:relative">
+    <button class="lm-close" onclick="closeLogin()">✕</button>
+    <div class="lm-title">歡迎回來 🗺</div>
+    <div class="lm-sub">登入後可以儲存行程、複製他人規劃</div>
+    <div class="lm-tabs">
+      <button class="lm-tab active" id="loginTab" onclick="switchAuthTab('login')">登入</button>
+      <button class="lm-tab" id="registerTab" onclick="switchAuthTab('register')">註冊</button>
+    </div>
+    <div id="loginForm">
+      <div class="lm-field"><label>電子信箱</label><input type="email" id="loginEmail" placeholder="you@example.com"></div>
+      <div class="lm-field"><label>密碼</label><input type="password" id="loginPwd" placeholder="••••••••"></div>
+      <button class="lm-submit" onclick="doLogin()">登入</button>
+    </div>
+    <div id="registerForm" style="display:none">
+      <div class="lm-field"><label>暱稱</label><input type="text" id="regName" placeholder="旅遊達人小美"></div>
+      <div class="lm-field"><label>電子信箱</label><input type="email" id="regEmail" placeholder="you@example.com"></div>
+      <div class="lm-field"><label>密碼</label><input type="password" id="regPwd" placeholder="至少 8 個字元"></div>
+      <button class="lm-submit" onclick="doRegister()">建立帳號</button>
+    </div>
+    <div class="lm-divider">或</div>
+    <button class="lm-social-btn" onclick="doSocialLogin('Google')">🌐 以 Google 帳號登入</button>
+    <button class="lm-social-btn" style="margin-top:8px" onclick="doSocialLogin('Facebook')">📘 以 Facebook 帳號登入</button>
+  </div>
+</div>
+
+<!-- ─── OVERLAY: CHANGE PASSWORD ─── -->
+<div class="overlay" id="changePwdOverlay" onclick="if(event.target===this)closeChangePwd()" style="z-index:300">
+  <div class="login-modal" style="position:relative">
+    <button class="lm-close" onclick="closeChangePwd()">✕</button>
+    <div class="lm-title">修改密碼 🔒</div>
+    <div class="lm-sub">請輸入您目前的密碼與新密碼。</div>
+    <div class="lm-field"><label>目前密碼</label><input type="password" id="cpwCurrent" placeholder="••••••••"></div>
+    <div class="lm-field"><label>新密碼</label><input type="password" id="cpwNew" placeholder="至少 8 個字元"></div>
+    <div class="lm-field"><label>確認新密碼</label><input type="password" id="cpwConfirm" placeholder="至少 8 個字元"></div>
+    <button class="lm-submit" onclick="doChangePassword()">更新密碼</button>
   </div>
 </div>
 </body>

@@ -92,6 +92,18 @@ let wizardPreviewDebounceTimer = null;
   initFirebaseIfConfigured();
   await loadState();
 
+  // Check if openPref=1 parameter is present in URL
+  if (new URLSearchParams(window.location.search).get('openPref')) {
+    setTimeout(() => {
+      if (isLoggedIn && typeof openPrefWizard === 'function') {
+        openPrefWizard();
+      } else if (!isLoggedIn) {
+        showToast('請先登入以修改個人喜好', 'orange');
+        openLogin();
+      }
+    }, 600);
+  }
+
   // Show welcome toast for fresh login (flag set by landing page)
   if (sessionStorage.getItem('wai_just_logged_in')) {
     sessionStorage.removeItem('wai_just_logged_in');
@@ -3270,7 +3282,7 @@ async function doSocialLogin(providerName) {
 function doLogout() {
   if (firebaseAuth) firebaseAuth.signOut();
   showToast('已登出，跳轉回首頁…');
-  setTimeout(() => { window.location.href = 'ai-travel-planner.html'; }, 800);
+  setTimeout(() => { window.location.href = 'ai-travel-explore-final.html'; }, 800);
 }
 
 // === Preferences Wizard ===
@@ -3723,7 +3735,59 @@ async function deleteMyTrip(id) {
   }
   showToast('🗑 已刪除行程', 'red');
 }
-function shareTrip(id) { showToast('🔗 分享連結已複製！', 'green'); }
+// B2：深度連結 / URL 邀請強化。
+// collab 行程 → 訪客唯讀分享連結（含 shareToken）；個人行程 → 開啟該行程的深連結。
+function buildTripDeepLink(t) {
+  let path;
+  if (t && t.collab && t.shareToken && window.WAI_COLLAB) {
+    path = WAI_COLLAB.buildShareLink(t.id, t.shareToken); // ...planner.html?sharedId=..&token=..&guest=1
+  } else {
+    path = 'ai-travel-planner-v8.html?id=' + encodeURIComponent(t.id);
+  }
+  try { return new URL(path, window.location.href).href; } // 轉成絕對網址，貼出去才可用
+  catch (_e) { return path; }
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_e) { /* file:// 或權限不足時退回 textarea 方案 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_e) { return false; }
+}
+
+async function shareTrip(id) {
+  const t = (typeof myTrips !== 'undefined' ? myTrips : []).find(x => x.id === id);
+  if (!t) { showToast('找不到這份行程', 'red'); return; }
+  const link = buildTripDeepLink(t);
+  const ok = await copyTextToClipboard(link);
+  if (ok) {
+    showToast(t.collab ? '🔗 唯讀分享連結已複製！' : '🔗 行程連結已複製！', 'green');
+    return;
+  }
+  // 複製失敗（例如無使用者手勢或瀏覽器阻擋）→ 用 prompt 讓使用者手動複製；
+  // 某些環境 prompt 亦被封鎖（會拋錯），故 try/catch 後退回 toast 顯示連結，確保絕不中斷。
+  try {
+    if (typeof window.prompt === 'function') {
+      const res = window.prompt('複製這個行程連結：', link);
+      if (res !== null) return;
+    }
+    throw new Error('prompt unavailable');
+  } catch (_e) {
+    showToast('🔗 連結：' + link, 'blue');
+  }
+}
 
 function renderSideMyTrips() {
   const el = document.getElementById('sideMyTrips');

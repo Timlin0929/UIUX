@@ -20,7 +20,7 @@ This workspace is a static HTML prototype playground. Edit the individual `.html
 ## Validation
 
 - For HTML/CSS/JS changes, verify the edited page renders cleanly and the relevant interactions still work.
-- If a script depends on local config, check [weather.env.js](weather.env.js) before assuming a missing key is a code bug.
+- If a script depends on local config, check [weather.env.js](app/weather.env.js) before assuming a missing key is a code bug.
 
 ## User-flow testing
 

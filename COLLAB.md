@@ -17,10 +17,10 @@
 
 | 檔案 | 角色 |
 |---|---|
-| [collab.js](collab.js) | `window.WAI_COLLAB`：邀請碼/分享 token、建立/加入、成員與角色、團體偏好彙整（純函式可測） |
-| [ai-travel-explore-final.js](ai-travel-explore-final.js) | 建立共用行程、真實加入、成員面板、團體生成、`loadState` 載入「我加入的」 |
-| [ai-travel-explore-final.html](ai-travel-explore-final.html) | `#collabPanelOverlay` 成員面板；載入 `collab.js` |
-| [ai-travel-planner-v8.js](ai-travel-planner-v8.js) | `?sharedId=`/`guest` 載入共用行程；viewer/訪客唯讀橫幅 + 鎖存檔 |
+| [collab.js](app/collab.js) | `window.WAI_COLLAB`：邀請碼/分享 token、建立/加入、成員與角色、團體偏好彙整（純函式可測） |
+| [ai-travel-explore-final.js](app/ai-travel-explore-final.js) | 建立共用行程、真實加入、成員面板、團體生成、`loadState` 載入「我加入的」 |
+| [ai-travel-explore-final.html](app/ai-travel-explore-final.html) | `#collabPanelOverlay` 成員面板；載入 `collab.js` |
+| [ai-travel-planner-v8.js](app/ai-travel-planner-v8.js) | `?sharedId=`/`guest` 載入共用行程；viewer/訪客唯讀橫幅 + 鎖存檔 |
 | [firestore.rules](firestore.rules) | 安全規則（含 collab） |
 
 ## 資料模型（沿用既有 `micro_trips`）
