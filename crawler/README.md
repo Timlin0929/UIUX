@@ -158,7 +158,7 @@ npm run export:local
 說明：
 
 - 會依景點的行政區把資料分桶成前端目的地鍵（如「台東」「綠島」「蘭嶼」）。
-- 每筆只保留變動不大的欄位：`name / lat / lng / desc / address / businessHours / duration? / nearbyToiletLocations`。
+- 每筆只保留變動不大的欄位：`name / lat / lng / desc / address / businessHours / duration? / nearbyToiletLocations`，以及 `enrich:fees` 寫入的 `fee? / feeNote?`（有票價來源才會出現，見下方「校正景點門票費用」）。
 - 預設輸出到專案根目錄的 `poi-data.js`；可用 `$env:EXPORT_LOCAL_PATH` 覆寫路徑。
 - 前端兩頁（explore、planner-v8）以 `<script src="poi-data.js">` 載入；檔案為空 `{}` 時自動回退 Firebase / live Maps。
 
@@ -185,9 +185,34 @@ npm run verify:places
 - 成本：約 1 次 searchText／景點（一次性 Enterprise SKU，**不含** reviews 高價 SKU）。
 - 校正後記得 `npm run export:local` 才會反映到 `poi-data.js`。
 
+## 校正景點門票費用（enrich:fees）
+
+景點的真實票價不在 OpenData／Places 的常規欄位裡。這個模式抓「台東觀光旅遊網自有 opendata」的 `ticket` 門票文字（主來源，265 景點約 41 筆有值），解析出金額後把 **`fee`（數字，0＝免費）、`feeNote`（原始票價文字）、`feeSource`** 寫回 Firestore `scenic_points`；校正一次後重跑 `export:local`，`poi-data.js` 就會帶有門票欄位，前端（`ai-travel-planner-v8.js`）用它在行程卡片顯示門票、並算進預算拆解。
+
+先試跑（不寫入，只印出比對結果）：
+
+```powershell
+npm run enrich:fees:dry
+```
+
+正式寫回 Firestore：
+
+```powershell
+npm run enrich:fees
+```
+
+說明：
+
+- 預設**跳過已有 `feeSource`** 的文件；要全部重新比對加 `-- --force`。
+- 預設**只接受名稱嚴格比對**；加 `-- --loose` 改用寬鬆比對（與 `verify:places` 的 `placeNameMatchesQuery` 同一套），較容易配錯同名異地的景點，請搭配少量 `--limit` 檢查輸出再放大跑。
+- 加 `-- --tdx` 會再用**全國 TDX `AttractionFee`／`Attraction`** 補台東觀光網沒涵蓋到的景點（結構化票價優先，其次 `IsAccessibleForFree`／`FeeInfo` 文字），需要 `TDX_APP_ID` / `TDX_APP_KEY`（讀 `app/weather.env.js` 或環境變數）。台東縣本身在全國 TDX 的 `AttractionFee` 資料很少，通常不需要加這個旗標。
+- 對不到票價來源的景點**維持未知**（不寫欄位），不做估算；前端會顯示「門票資訊未提供」以區別「查不到」與「免費」。
+- 少數解析結果不理想或想覆蓋（例如改用假日全票、或票價文字誤判）的景點，改在 [`app/attraction-fee-config.js`](../app/attraction-fee-config.js) 的人工覆蓋表手動調整，不必重跑爬蟲；前端查詢時人工覆蓋表優先於 `poi-data.js`。
+- 校正後記得 `npm run export:local` 才會反映到 `poi-data.js`。
+
 ## 餐廳快取（crawl:food → restaurant-data.js）
 
-餐廳變動快、且不在 `poi-data.js` 裡。這個模式依景點形心，用 Places 抓每個目的地的餐廳候選，寫成獨立檔 `..\restaurant-data.js`（`window.WAI_RESTAURANT_DATA`）。前端 `fetchGoogleMapsFoodList` **本地優先**：有快取就用、跳過 Places；命中的餐廳站連執行階段驗證也一併跳過。
+餐廳變動快、且不在 `poi-data.js` 裡。這個模式依景點形心，用 Places (New) `searchNearby`（`includedTypes: restaurant`）抓每個目的地的餐廳候選，寫成獨立檔 `..\restaurant-data.js`（`window.WAI_RESTAURANT_DATA`）。前端 `fetchGoogleMapsFoodList` **本地優先**：有快取就用、跳過 Places；命中的餐廳站連執行階段驗證也一併跳過。
 
 先預覽：
 
@@ -204,8 +229,9 @@ npm run crawl:food
 說明：
 
 - 只對景點數 ≥ `MIN_FOOD_POIS`(預設 3) 的目的地產生；每目的地收 `FOOD_PER_DEST`(預設 25) 間。
-- 欄位：`name / lat / lng / businessHours / address / rating`，與前端即時抓的格式一致。
-- 成本：約 3 個目的地 × 3 詞 ≈ 9 次 searchText（~US$0.3）。
+- 欄位：`name / lat / lng / businessHours / address / rating`，另外從 Places 的 `priceLevel` / `priceRange` 換算出 **`costPerPerson`（人均消費估值）與 `costNote`（顯示文字，如「$300–500」或「約 $150（$）」）**；只有 `priceLevel` 沒有 `priceRange` 時用等級估值（免費/$150/$350/$700/$1200）代替。前端用它在用餐站顯示人均消費、並算進預算拆解。
+- 會過濾掉夾帶在 `restaurant` 類型結果裡的住宿（`primaryType` 命中飯店/民宿類別，或店名符合「飯店／旅館／民宿／resort／hotel」等關鍵字者不收）。
+- 成本：改用 `searchNearby` 後每目的地 1 次呼叫（原本 `searchText` 3 詞需 3 次）。
 - 由 `..\ai-travel-explore-final.html` 以 `<script src="restaurant-data.js">` 載入；檔案不存在時前端自動回退即時抓。
 
 ## 每兩週自動爬餐廳（Windows 工作排程）
@@ -288,10 +314,11 @@ npm run cleanup:collab
 
 | 檔案 | 全域變數 | 由誰產生 | 何時刷新 |
 |---|---|---|---|
-| `..\poi-data.js` | `window.WAI_POI_DATA` | `export:local`（資料來自 `verify:places`） | 景點/校正有變時：`verify:places -- --force` → `export:local` |
+| `..\poi-data.js` | `window.WAI_POI_DATA` | `export:local`（資料來自 `verify:places` + `enrich:fees`） | 景點/座標校正有變時：`verify:places -- --force` → `export:local`；門票有變時：`enrich:fees -- --force` → `export:local` |
 | `..\restaurant-data.js` | `window.WAI_RESTAURANT_DATA` | `crawl:food` | 每兩週自動；要立即更新就手動 `crawl:food` |
+| [`app/attraction-fee-config.js`](../app/attraction-fee-config.js) | `window.WAI_ATTRACTION_FEE` | 手動維護（非爬蟲產出） | 想覆蓋 `poi-data.js` 門票時直接編輯，不必重跑爬蟲 |
 
-兩份皆為自動產生檔，請勿手動編輯。
+前兩者為自動產生檔，請勿手動編輯；`attraction-fee-config.js` 相反，是唯一預期手動編輯的覆蓋層。
 
 ## 可選設定
 
@@ -318,6 +345,8 @@ $env:IMPORT_LIMIT="500"
 - `CRAWL_MAX_CALLS`：單次執行最多打幾次 Google API，達上限即停（免費額度守門），`0`＝不限
 - `CRAWL_SLICE`：把工作均分成 N 份只跑第 K 份，形如 `3/7`（等同 `--slice`，用於一週分散）
 - `RESTAURANT_DATA_PATH` / `EXPORT_LOCAL_PATH`：覆寫輸出檔路徑
+- `TDX_APP_ID` / `TDX_APP_KEY`：`enrich:fees -- --tdx` 用的 TDX 會員金鑰；沒設定時會嘗試讀取 `app/weather.env.js` 裡的同名欄位
+- `WEATHER_ENV_PATH`：覆寫 `weather.env.js` 的讀取路徑；沒設定時依序找 `app/weather.env.js`（目前現址）再退回專案根目錄（舊位置，相容用）
 
 ## 常用流程
 
