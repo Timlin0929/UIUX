@@ -1571,6 +1571,8 @@ body.prototype-mode .prototype-id-chip {
 .spot-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .tag { font-size: 11px; padding: 4px 10px; border-radius: 8px; font-weight: 600; background: var(--surface2); color: var(--ink2); }
 .stop-hours-row { font-size: 11px; color: var(--ink2); margin-bottom: 4px; }
+.stop-fee-row { font-size: 11px; color: var(--accent2-dark, #b26a00); font-weight: 600; margin-bottom: 4px; }
+.stop-fee-row.stop-fee-unknown { color: var(--ink3, #9aa5b1); font-weight: 400; }
 .stop-dur-select{font-size:11px;border:1px solid var(--border);border-radius:6px;padding:2px 6px;background:var(--surface2,#f4f8fb);color:var(--ink2);cursor:pointer;}
 .stay-time-tag{font-size:11px;padding:4px 10px;border-radius:8px;font-weight:600;background:var(--surface2);color:var(--ink2);}
 .stay-edit-btn{font-size:11px;padding:3px 8px;border-radius:8px;border:1px dashed var(--border);background:transparent;color:var(--ink2);cursor:pointer;line-height:1.4;vertical-align:middle;}

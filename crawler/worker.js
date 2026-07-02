@@ -8,8 +8,14 @@ const minimist = require('minimist');
 const argv = minimist(process.argv.slice(2));
 
 function loadLocalAppConfig() {
-  const configPath = process.env.WEATHER_ENV_PATH || path.resolve(__dirname, '..', 'weather.env.js');
-  if (!fs.existsSync(configPath)) return {};
+  // 依序找設定檔：WEATHER_ENV_PATH → app/weather.env.js（整理後現址）→ 舊 root 位置（相容）。
+  const candidates = [
+    process.env.WEATHER_ENV_PATH,
+    path.resolve(__dirname, '..', 'app', 'weather.env.js'),
+    path.resolve(__dirname, '..', 'weather.env.js')
+  ].filter(Boolean);
+  const configPath = candidates.find((p) => fs.existsSync(p));
+  if (!configPath) return {};
 
   try {
     const sandbox = { window: {} };
@@ -29,6 +35,7 @@ const DRY = !!(argv['dry-run'] || argv.dry);
 const IMPORT_MODE = !!(argv.import || argv.mode === 'import');
 const EXPORT_LOCAL_MODE = !!(argv['export-local'] || argv.export || argv.mode === 'export-local');
 const VERIFY_PLACES_MODE = !!(argv['verify-places'] || argv.mode === 'verify-places');
+const ENRICH_FEES_MODE = !!(argv['enrich-fees'] || argv.mode === 'enrich-fees');
 const CRAWL_FOOD_MODE = !!(argv['crawl-food'] || argv.mode === 'crawl-food');
 const CLEANUP_COLLAB_MODE = !!(argv['cleanup-collab'] || argv.mode === 'cleanup-collab');
 const CLEANUP_DAYS = parseInt(argv.days || process.env.CLEANUP_COLLAB_DAYS || '7', 10);
@@ -54,6 +61,11 @@ if (GOOGLE_KEY) {
   console.warn('GOOGLE_MAPS_API_KEY 未設定，廁所搜尋將略過。');
 }
 const OPENDATA_URL = process.env.OPENDATA_SOURCE_URL || 'https://media.taiwan.net.tw/XMLReleaseALL_public/scenic_spot_C_f.json';
+// TDX 觀光資訊 API（門票費用來源，沿用前端同一組金鑰）。
+const TDX_APP_ID = process.env.TDX_APP_ID || LOCAL_APP_CONFIG.TDX_APP_ID || null;
+const TDX_APP_KEY = process.env.TDX_APP_KEY || LOCAL_APP_CONFIG.TDX_APP_KEY || null;
+const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
+const TDX_TOURISM_BASE = 'https://tdx.transportdata.tw/api/tourism/service/odata/V2/Tourism';
 const CRAWL_REGION = argv.region || argv.city || process.env.CRAWL_REGION || process.env.CRAWL_CITY || '\u53f0\u6771\u7e23';
 const MAX_NEARBY_TOILET_DISTANCE_METERS = 500;
 const REGION_ALIASES = {
@@ -723,6 +735,9 @@ function toLocalPoi(data) {
   };
   if (Number.isFinite(Number(data.placesRating)) && Number(data.placesRating) > 0) poi.rating = Number(data.placesRating);
   if (data.placeVerified === true) poi.placeVerified = true; // 供前端 verify 短路：命中即可跳過 Places 呼叫
+  // 門票費用（enrich-fees 寫入的真實票價；含 0=免費）。對不到的景點無此欄位＝未知。
+  if (Number.isFinite(Number(data.fee))) poi.fee = Number(data.fee);
+  if (data.feeNote) poi.feeNote = String(data.feeNote);
   poi.duration = estimateDuration(data);
   if (Array.isArray(data.nearbyToiletLocations) && data.nearbyToiletLocations.length) {
     poi.nearbyToiletLocations = data.nearbyToiletLocations;
@@ -849,6 +864,208 @@ async function verifyPlaces(db) {
   console.log('Verify-places summary', { region: CRAWL_REGION, scanned, verified, unmatched, closed, skipped, sliced, apiCalls: apiCallsUsed, slice: SLICE_RAW || 'all', maxCalls: MAX_CALLS || 'none', dryRun: DRY });
 }
 
+// ================= 門票費用（TDX 觀光資訊：Attraction + AttractionFee）=================
+// 只寫真實票價：對得到就寫 fee(數字,0=免費)/feeNote/feeSource；對不到不動（保持未知）。不做估算。
+let _tdxToken = null;
+async function getTdxToken() {
+  if (_tdxToken) return _tdxToken;
+  if (!TDX_APP_ID || !TDX_APP_KEY) throw new Error('缺少 TDX_APP_ID / TDX_APP_KEY（請確認 app/weather.env.js）');
+  const body = `grant_type=client_credentials&client_id=${encodeURIComponent(TDX_APP_ID)}&client_secret=${encodeURIComponent(TDX_APP_KEY)}`;
+  const r = await axios.post(TDX_AUTH_URL, body, {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    timeout: 15000
+  });
+  _tdxToken = r.data && r.data.access_token;
+  if (!_tdxToken) throw new Error('TDX 取得 access_token 失敗');
+  return _tdxToken;
+}
+
+// 單次 GET，遇 429（TDX 免費層速率限制）依 Retry-After 退避重試。
+async function tdxGet(url, attempt) {
+  const token = await getTdxToken();
+  try {
+    return await axios.get(url, { headers: { authorization: `Bearer ${token}` }, timeout: 30000 });
+  } catch (e) {
+    const status = e.response && e.response.status;
+    if (status === 429 && (attempt || 0) < 5) {
+      const retryAfter = Number(e.response.headers && e.response.headers['retry-after']);
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : Math.min(30000, 2000 * Math.pow(2, attempt || 0));
+      console.warn(`TDX 429 限流，等待 ${Math.round(waitMs / 1000)}s 後重試…`);
+      await new Promise((res) => setTimeout(res, waitMs));
+      return tdxGet(url, (attempt || 0) + 1);
+    }
+    throw e;
+  }
+}
+
+// 以 $top/$skip 分頁抓完整資源，回陣列。
+async function fetchTdxAll(resourcePath, pageSize) {
+  const size = pageSize || 500; // TDX 觀光 OData $top 上限為 500
+  const out = [];
+  for (let skip = 0; ; skip += size) {
+    const url = `${TDX_TOURISM_BASE}/${resourcePath}?%24top=${size}&%24skip=${skip}&%24format=JSON`;
+    const r = await tdxGet(url, 0);
+    const rows = Array.isArray(r.data) ? r.data : (r.data && Array.isArray(r.data.value) ? r.data.value : []);
+    out.push(...rows);
+    if (rows.length < size) break;
+    await new Promise((res) => setTimeout(res, 600)); // 頁間間隔，降低觸發限流機率
+  }
+  return out;
+}
+
+// fee map key：normalizeText + 臺→台（與前端 getLocalPoiList 對齊）。
+function feeNameKey(name) { return normalizeText(String(name || '').replace(/臺/g, '台')); }
+
+// 從自由票價文字解析「每人全票金額」。先去掉年齡/人數/時間等會被誤判成金額的數字，
+// 再優先抓「全票…金額」，否則取有 元/$/＄ 標記者的最大值；純免費→0；無法判斷→null。
+function parseFeeFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  let t = text.replace(/[\r\n]+/g, ' ');
+  // 純免費（且無任何金額）直接 0
+  if (/免費(參觀|入園|入場)?/.test(t) && !/(\d+\s*元|＄\s*\d|\$\s*\d)/.test(t)) return 0;
+  // 去雜訊：年齡/人數/公分/時間/月日/成團，避免「65歲」「10人」被當金額
+  t = t.replace(/\d+\s*歲/g, ' ')
+       .replace(/\d+\s*(人|位|名|公分|分鐘|小時|公尺|公里|張)/g, ' ')
+       .replace(/\d{1,2}:\d{2}/g, ' ')
+       .replace(/\d+\s*[月日]/g, ' ')
+       .replace(/\d+\s*成團/g, ' ');
+  // 優先「全票 … 金額」
+  const full = t.match(/全票[^0-9元＄$]{0,8}(?:nt\$?|＄|\$)?\s*(\d{1,5})/i);
+  if (full) { const v = parseInt(full[1], 10); if (v >= 0 && v <= 20000) return v; }
+  // 否則取有 元/$/＄ 標記的金額最大值（忽略裸數字，如團體人數）
+  const marked = [];
+  for (const m of t.matchAll(/(?:nt\$?|＄|\$)\s*(\d{1,5})|(\d{1,5})\s*元/gi)) {
+    const v = parseInt(m[1] || m[2], 10);
+    if (Number.isFinite(v) && v >= 0 && v <= 20000) marked.push(v);
+  }
+  if (marked.length) return Math.max(...marked);
+  return /免費|免门票|免門票|free/i.test(t) ? 0 : null;
+}
+
+// ── 台東觀光旅遊網自有 opendata（含 265 景點的 ticket 門票文字，41 筆有值，優於全國 TDX）──
+// 需帶 X-Requested-With: XMLHttpRequest（否則 302 轉走）。回 名稱正規化key → { name, fee?, feeNote, feeSource }。
+const TAITUNG_OD_ATTRACTIONS_URL = 'https://tour.taitung.gov.tw/zh-tw/opendata/attractions';
+async function buildTaitungFeeMap() {
+  console.log('台東觀光網 opendata 抓取 attractions …');
+  const r = await axios.get(TAITUNG_OD_ATTRACTIONS_URL, {
+    headers: {
+      'X-Requested-With': 'XMLHttpRequest',
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': 'https://tour.taitung.gov.tw/zh-tw/attraction',
+      'User-Agent': 'Mozilla/5.0'
+    },
+    timeout: 30000,
+    transformResponse: [(d) => d] // 保留原字串，自行去 BOM 解析
+  });
+  let payload;
+  try { payload = JSON.parse(String(r.data).replace(/^﻿/, '')); }
+  catch (e) { console.warn('台東 opendata 解析失敗：', e.message); return new Map(); }
+  const arr = Array.isArray(payload) ? payload : (payload.data || payload.Data || []);
+  const map = new Map();
+  let withFee = 0;
+  for (const a of arr) {
+    const name = a.name || a.Name || a.title;
+    if (!name) continue;
+    const ticket = String(a.ticket || '').trim();
+    if (!ticket || /^[無─\-–—.．\s]*$/.test(ticket)) continue; // 空或「無」等佔位＝未知，不寫
+    const fee = parseFeeFromText(ticket);
+    const feeNote = ticket.replace(/[\r\n]+/g, ' ').slice(0, 60);
+    const entry = { name: String(name).trim(), feeNote, feeSource: 'taitung_od' };
+    if (Number.isFinite(fee)) entry.fee = fee;
+    map.set(feeNameKey(name), entry);
+    withFee += 1;
+  }
+  console.log(`台東 opendata 取得 ${arr.length} 景點，其中 ${withFee} 筆有門票資料`);
+  return map;
+}
+
+// 建立 名稱正規化key → { name, fee?, feeNote, feeSource }。結構化票價優先，其次免費旗標，最後 FeeInfo 文字。
+async function buildTdxFeeMap() {
+  console.log('TDX 抓取 AttractionFee / Attraction …（依序，避免限流）');
+  const fees = await fetchTdxAll('AttractionFee');
+  const attractions = await fetchTdxAll('Attraction');
+  console.log(`TDX 取得 Attraction ${attractions.length} 筆、AttractionFee ${fees.length} 筆`);
+  const map = new Map();
+  const setIfAbsent = (name, entry) => {
+    const k = feeNameKey(name);
+    if (!k || !entry) return;
+    if (!map.has(k)) map.set(k, Object.assign({ name: String(name).trim() }, entry));
+  };
+  // 1) 結構化票價（含 Price 數字）優先
+  for (const f of fees) {
+    const list = Array.isArray(f.Fees) ? f.Fees : [];
+    const prices = list.map((x) => Number(x && x.Price)).filter((v) => Number.isFinite(v) && v >= 0);
+    if (!prices.length) continue;
+    const fee = Math.max(...prices); // 全票（通常最高）
+    const note = list.map((x) => {
+      const nm = String(x.Name || '').trim();
+      const pr = Number(x.Price);
+      if (Number.isFinite(pr) && pr > 0) return `${nm || '票'} $${pr}`;
+      return nm || '免費';
+    }).filter(Boolean).join(' / ') || (fee === 0 ? '免費' : `$${fee}`);
+    setIfAbsent(f.AttractionName, { fee, feeNote: note, feeSource: 'tdx_fee' });
+  }
+  // 2) 免費旗標 / FeeInfo 文字補充（不覆蓋已有結構化票價）
+  for (const a of attractions) {
+    const name = a.AttractionName || a.Name;
+    if (!name || map.has(feeNameKey(name))) continue;
+    if (a.IsAccessibleForFree === true) {
+      setIfAbsent(name, { fee: 0, feeNote: '免費', feeSource: 'tdx_free' });
+      continue;
+    }
+    const info = String(a.FeeInfo || '').trim();
+    if (!info) continue;
+    const fee = parseFeeFromText(info);
+    if (fee !== null) setIfAbsent(name, { fee, feeNote: info.slice(0, 60), feeSource: 'tdx_feeinfo' });
+    else setIfAbsent(name, { feeNote: info.slice(0, 60), feeSource: 'tdx_feeinfo' }); // 只有文字沒數字
+  }
+  console.log(`TDX fee map 建立完成：${map.size} 筆`);
+  return map;
+}
+
+// enrich-fees 模式：把真實票價比對回 scenic_points。
+// 主來源＝台東觀光網 opendata（含 ticket 門票文字）；加 --tdx 時再用全國 TDX 補未命中者。
+// 旗標：--limit / --region / --dry-run / --force / --loose / --tdx。
+async function enrichFees(db) {
+  const feeMap = await buildTaitungFeeMap(); // 台東主來源優先
+  if (argv.tdx) {
+    const tdx = await buildTdxFeeMap();      // 選用：全國 TDX 補洞（台東 opendata 未涵蓋者）
+    for (const [k, v] of tdx) { if (!feeMap.has(k)) feeMap.set(k, v); }
+  }
+  if (!feeMap.size) { console.warn('無任何票價來源資料，結束。'); return; }
+  const looseList = Array.from(feeMap.values());
+  const FEE_LOOSE = !!argv.loose; // 預設只用精確名稱比對，避免把票價配錯到同名異地
+  console.log(`Enrich-fees mode: reading ${POI_COLLECTION}（force=${FORCE}, loose=${FEE_LOOSE}, tdx=${!!argv.tdx}, 來源筆數=${feeMap.size}）`);
+  const snap = await db.collection(POI_COLLECTION).get();
+  if (snap.empty) { console.log(`No documents in ${POI_COLLECTION}.`); return; }
+  let scanned = 0, matched = 0, exact = 0, loose = 0, unmatched = 0, skipped = 0, sliced = 0, eligibleIdx = -1;
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
+    if (!FORCE && data.feeSource) { skipped += 1; continue; } // 已有費用來源、非 force 就跳過
+    eligibleIdx += 1;
+    if (!inSlice(eligibleIdx, WORK_SLICE)) { sliced += 1; continue; }
+    if (argv.limit !== undefined && scanned >= LIMIT) break;
+    scanned += 1;
+    let hit = feeMap.get(feeNameKey(data.name)) || null;
+    let via = 'exact';
+    if (!hit && FEE_LOOSE) {
+      hit = looseList.find((e) => placeNameMatchesQuery(e.name, data.name)) || null;
+      via = 'loose';
+    }
+    if (!hit || (!Number.isFinite(hit.fee) && !hit.feeNote)) { unmatched += 1; continue; }
+    matched += 1; if (via === 'exact') exact += 1; else loose += 1;
+    const feeStr = (hit.fee === 0) ? '免費' : (Number.isFinite(hit.fee) ? '$' + hit.fee : (hit.feeNote || '?'));
+    console.log(`✓ ${data.name} → ${feeStr}｜${hit.feeSource}｜(${via})`);
+    if (DRY) continue;
+    const update = { feeSource: hit.feeSource, feeUpdatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (Number.isFinite(hit.fee)) update.fee = hit.fee;
+    if (hit.feeNote) update.feeNote = hit.feeNote;
+    await doc.ref.set(update, { merge: true });
+  }
+  console.log('Enrich-fees summary', { region: CRAWL_REGION, scanned, matched, exact, loose, unmatched, skipped, sliced, dryRun: DRY });
+}
+
 async function exportLocal(db) {
   console.log('Export-local mode: reading collection', POI_COLLECTION);
   const snap = await db.collection(POI_COLLECTION).get();
@@ -891,67 +1108,85 @@ async function exportLocal(db) {
   console.log('Export-local wrote', EXPORT_LOCAL_PATH);
 }
 
-// 對單一目的地（以形心 center 為中心）用 Places searchText 抓餐廳候選。
-// 名稱/座標/時間/評分皆 Places 來源；不含 reviews 高價 SKU。
+// priceLevel enum → 0..4；並提供各級的人均消費估值（無 priceRange 時退回用）。
+const PRICE_LEVEL_NUM = {
+  PRICE_LEVEL_FREE: 0, PRICE_LEVEL_INEXPENSIVE: 1, PRICE_LEVEL_MODERATE: 2,
+  PRICE_LEVEL_EXPENSIVE: 3, PRICE_LEVEL_VERY_EXPENSIVE: 4
+};
+const PRICE_LEVEL_ESTIMATE = [0, 150, 350, 700, 1200]; // 免費/$/$$/$$$/$$$$ 的人均估值
+const PRICE_LEVEL_SYMBOL = ['免費', '$', '$$', '$$$', '$$$$'];
+// 過濾住宿（searchNearby includedTypes:restaurant 仍會夾帶附設餐廳的飯店）
+const LODGING_TYPE_SET = new Set(['lodging', 'hotel', 'resort_hotel', 'motel', 'hostel', 'bed_and_breakfast', 'guest_house', 'campground', 'rv_park']);
+const LODGING_NAME_RE = /飯店|酒店|旅店|旅館|民宿|行館|度假村|度假酒店|villa|hotel|inn\b|resort|hostel/i;
+
+// 對單一目的地（以形心 center 為中心）用 Places (New) searchNearby 抓餐廳候選。
+// 改用 searchNearby（此金鑰伺服器端 searchText 會回空、searchNearby 正常）並取回 priceLevel/priceRange 價格。
 async function fetchRestaurantsNear(region, center) {
   if (!GOOGLE_KEY) return [];
-  const terms = ['餐廳', '美食', '小吃'];
-  const seen = new Set();
+  if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) return [];
   const out = [];
-  for (const term of terms) {
-    const body = {
-      textQuery: `${region || ''} ${term}`.trim(),
-      languageCode: 'zh-TW',
-      maxResultCount: 10
-    };
-    if (center && Number.isFinite(center.lat) && Number.isFinite(center.lng)) {
-      body.locationBias = { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 20000 } };
-    }
-    try {
-      noteApiCall();
-      const r = await axios.post(
-        'https://places.googleapis.com/v1/places:searchText',
-        body,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': GOOGLE_KEY,
-            'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours,places.rating,places.formattedAddress,places.id,places.businessStatus'
-          },
-          timeout: 15000
-        }
-      );
-      const places = Array.isArray(r.data && r.data.places) ? r.data.places : [];
-      for (const p of places) {
-        if (!p.location) continue;
-        if (p.businessStatus === 'CLOSED_PERMANENTLY') continue;
-        const name = (p.displayName && p.displayName.text) || '';
-        if (!name) continue;
-        const dedupe = normalizeText(name);
-        if (seen.has(dedupe)) continue;
-        seen.add(dedupe);
-        const hours = (p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
-          ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '';
-        const poi = {
-          name,
-          lat: p.location.latitude,
-          lng: p.location.longitude,
-          businessHours: hours,
-          address: p.formattedAddress || ''
-        };
-        if (typeof p.rating === 'number') poi.rating = p.rating;
-        out.push(poi);
-        if (out.length >= FOOD_PER_DEST) break;
+  const seen = new Set();
+  try {
+    noteApiCall();
+    const r = await axios.post(
+      'https://places.googleapis.com/v1/places:searchNearby',
+      {
+        includedTypes: ['restaurant'],
+        maxResultCount: 20,
+        languageCode: 'zh-TW',
+        locationRestriction: { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 15000 } }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': GOOGLE_KEY,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours,places.rating,places.formattedAddress,places.id,places.businessStatus,places.primaryType,places.priceLevel,places.priceRange'
+        },
+        timeout: 15000
       }
-    } catch (e) {
-      if (e.response && e.response.status === 403) {
-        console.warn('Places API 403：請至 GCP Console 啟用「Places API (New)」。');
-      } else {
-        console.warn(`Restaurant fetch error (${region}/${term}):`, e.message);
+    );
+    const places = Array.isArray(r.data && r.data.places) ? r.data.places : [];
+    for (const p of places) {
+      if (!p.location) continue;
+      if (p.businessStatus === 'CLOSED_PERMANENTLY') continue;
+      const name = (p.displayName && p.displayName.text) || '';
+      if (!name) continue;
+      if (LODGING_TYPE_SET.has(p.primaryType) || LODGING_NAME_RE.test(name)) continue; // 濾掉飯店
+      const dedupe = normalizeText(name);
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      const hours = (p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
+        ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '';
+      const poi = { name, lat: p.location.latitude, lng: p.location.longitude, businessHours: hours, address: p.formattedAddress || '' };
+      if (typeof p.rating === 'number') poi.rating = p.rating;
+      // 價格：priceLevel(0..4) + priceRange 的 NT$ 區間 → 人均估值 costPerPerson + 顯示用 costNote
+      const pl = PRICE_LEVEL_NUM[p.priceLevel];
+      if (pl !== undefined) poi.priceLevel = pl;
+      const pr = p.priceRange || null;
+      const lo = pr && pr.startPrice ? Number(pr.startPrice.units) : NaN;
+      const hi = pr && pr.endPrice ? Number(pr.endPrice.units) : NaN;
+      if (Number.isFinite(lo) || Number.isFinite(hi)) {
+        if (Number.isFinite(lo)) poi.costMin = lo;
+        if (Number.isFinite(hi)) poi.costMax = hi;
+        const mid = (Number.isFinite(lo) && Number.isFinite(hi)) ? Math.round((lo + hi) / 2) : (Number.isFinite(hi) ? hi : lo);
+        if (Number.isFinite(mid)) poi.costPerPerson = mid;
+        poi.costNote = (Number.isFinite(lo) && Number.isFinite(hi))
+          ? (lo <= 1 ? `$${hi} 內` : `$${lo}–${hi}`)
+          : (Number.isFinite(hi) ? `約 $${hi}` : `約 $${lo}`);
+      } else if (pl !== undefined) { // 無 priceRange → 用 priceLevel 估
+        const est = PRICE_LEVEL_ESTIMATE[pl];
+        poi.costPerPerson = est;
+        poi.costNote = pl === 0 ? '免費' : `約 $${est}（${PRICE_LEVEL_SYMBOL[pl]}）`;
       }
+      out.push(poi);
+      if (out.length >= FOOD_PER_DEST) break;
     }
-    await new Promise((r) => setTimeout(r, 250)); // 限速
-    if (out.length >= FOOD_PER_DEST) break;
+  } catch (e) {
+    if (e.response && e.response.status === 403) {
+      console.warn('Places API 403：請至 GCP Console 啟用「Places API (New)」。');
+    } else {
+      console.warn(`Restaurant fetch error (${region}):`, e.message);
+    }
   }
   return out;
 }
@@ -1057,6 +1292,8 @@ async function main() {
     await crawlFood(db);
   } else if (VERIFY_PLACES_MODE) {
     await verifyPlaces(db);
+  } else if (ENRICH_FEES_MODE) {
+    await enrichFees(db);
   } else if (EXPORT_LOCAL_MODE) {
     await exportLocal(db);
   } else if (IMPORT_MODE) {

@@ -12,6 +12,8 @@
     "export:local:dry": "node worker.js --export-local --dry-run",
     "verify:places": "node worker.js --verify-places",
     "verify:places:dry": "node worker.js --verify-places --dry-run",
+    "enrich:fees": "node worker.js --enrich-fees",
+    "enrich:fees:dry": "node worker.js --enrich-fees --dry-run",
     "crawl:food": "node worker.js --crawl-food",
     "crawl:food:dry": "node worker.js --crawl-food --dry-run",
     "cleanup:collab": "node worker.js --cleanup-collab",

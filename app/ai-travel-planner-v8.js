@@ -4753,6 +4753,11 @@
     const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
     if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
 
+    // 本地門票對照表（依目前行程目的地），供卡片顯示真實票價。
+    const feeDestination = currentTripRegion || (currentTripPreferences && (currentTripPreferences.dest || currentTripPreferences.destCustom)) || '';
+    const itineraryFeeMap = getLocalPoiFeeMap(feeDestination);
+    const itineraryFoodCostMap = getLocalFoodCostMap(feeDestination);
+
     // 生成标签映射
     const tagMap = {
       'luggage': { text: '起點', style: '' },
@@ -4787,6 +4792,25 @@
       const tagStyle = tag.style ? `style="${tag.style}"` : '';
       const isEndpointStop = stop.type === 'start' || stop.type === 'end';
       const endpointLabel = stop.type === 'start' ? '🚩 起點' : stop.type === 'end' ? '🏁 終點' : '';
+      let feeRowHtml = '';
+      if (!isEndpointStop) {
+        const isFood = stopIsFood(stop, itineraryFoodCostMap);
+        if (isFood) {
+          // 用餐站：顯示餐廳人均消費（restaurant-data.js / stop 自帶）；查無則不顯示（餐廳無門票概念）
+          const fc = lookupStopFoodCost(itineraryFoodCostMap, stop);
+          if (fc && (Number.isFinite(fc.costPerPerson) || fc.costNote)) {
+            feeRowHtml = `<div class="stop-fee-row">🍽 人均 ${Number.isFinite(fc.costPerPerson) ? (fc.costPerPerson > 0 ? '約 $' + fc.costPerPerson : '免費') : fc.costNote}</div>`;
+          }
+        } else {
+          const feeHit = lookupStopFee(itineraryFeeMap, stop.name);
+          if (feeHit && (Number.isFinite(feeHit.fee) || feeHit.feeNote)) {
+            feeRowHtml = `<div class="stop-fee-row">💳 ${Number.isFinite(feeHit.fee) ? (feeHit.fee > 0 ? '門票 $' + feeHit.fee : '免費') : feeHit.feeNote}</div>`;
+          } else {
+            // 景點查無門票資料 → 標示「未提供」以區別「漏掉」
+            feeRowHtml = `<div class="stop-fee-row stop-fee-unknown">💳 門票資訊未提供</div>`;
+          }
+        }
+      }
 
       html += `
         <div id="itinerary-stop-${stop.id}" class="timeline-item" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
@@ -4800,6 +4824,7 @@
                 ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:12px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
                 <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button><button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
+                ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
                 </div>
@@ -5030,7 +5055,10 @@
     const tr = (stops.length >= 2)
       ? estimateTripTransport(stops, { mode, people, destination })
       : estimateTransportRough(destination, mode, people, days);
-    const bd = buildBudgetBreakdown(budget, people, tr.totalPerPerson);
+    // 各站真實門票 + 用餐站餐廳人均（每人）：從可動用預算一併扣除。
+    const feesPerPerson = sumStopFeesPerPerson(stops, destination);
+    const foodPerPerson = sumStopFoodPerPerson(stops, destination);
+    const bd = buildBudgetBreakdown(budget, people, tr.totalPerPerson + feesPerPerson + foodPerPerson);
 
     // 交通占人均預算比例（無 budget 時不顯示比例）
     let pct = 0, denom = 0;
@@ -5050,6 +5078,9 @@
     const items = [];
     if (tr.ferryPerPerson > 0) items.push({ emoji: '⚓', name: '離島往返船票', val: tr.ferryPerPerson });
     items.push({ emoji: modeEmoji, name: `站間移動（${modeLabel}）`, val: tr.movePerPerson });
+    if (feesPerPerson > 0) items.push({ emoji: '💳', name: '景點門票', val: feesPerPerson });
+    if (foodPerPerson > 0) items.push({ emoji: '🍽', name: '餐飲（餐廳人均）', val: foodPerPerson });
+    const spendTotalPerPerson = tr.totalPerPerson + feesPerPerson + foodPerPerson;
     const receiptRows = items.map(it => `
           <div class="receipt-item">
             <div class="receipt-item-name"><span>${it.emoji}</span> ${it.name}</div>
@@ -5072,8 +5103,8 @@
       <div class="receipt-container">
         <div class="receipt-card">
           <div class="receipt-header">
-            <div class="receipt-day">交通費拆解（每人）</div>
-            <div class="receipt-total">${money(tr.totalPerPerson)}</div>
+            <div class="receipt-day">${(feesPerPerson > 0 || foodPerPerson > 0) ? '花費拆解（每人）' : '交通費拆解（每人）'}</div>
+            <div class="receipt-total">${money(spendTotalPerPerson)}</div>
           </div>
           ${receiptRows}
           <div class="receipt-item">
@@ -5082,7 +5113,7 @@
           </div>
         </div>
         <div style="font-size:12px;color:var(--ink3);margin-top:10px;line-height:1.7;">
-          交通費為估算值（離島船票＋依交通方式的站間移動），可在 cost-config.js 調整費率。可動用＝每人預算 −  交通。
+          交通費為估算值（離島船票＋站間移動，可在 cost-config.js 調費率）；門票為真實票價、餐飲為餐廳人均消費（Google 價格，僅計有資料者）。可動用（購物/其他）＝每人預算 − 交通${feesPerPerson > 0 ? ' − 門票' : ''}${foodPerPerson > 0 ? ' − 餐飲' : ''}。
         </div>
       </div>`;
   }
@@ -6349,10 +6380,12 @@
         const live = (Array.isArray(replanStops) && replanStops.length >= 2)
           ? estimateTripTransport(replanStops, { mode: wizardData.transportMode, people, destination: dest })
           : estimateTransportRough(dest, wizardData.transportMode, people, days);
-        const bd = buildBudgetBreakdown(budget, people, live.totalPerPerson);
+        const liveFees = sumStopFeesPerPerson(replanStops, dest);
+        const bd = buildBudgetBreakdown(budget, people, live.totalPerPerson + liveFees);
         if (!bd || live.totalPerPerson <= 0) return null;
         const ferryPart = live.ferryPerPerson > 0 ? `離島船票 $${live.ferryPerPerson}、` : '';
-        return `交通預估：每人約 $${live.totalPerPerson}（${ferryPart}站間移動約 $${live.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點`;
+        const feePart = liveFees > 0 ? `、景點門票約 $${liveFees}` : '';
+        return `交通預估：每人約 $${live.totalPerPerson}（${ferryPart}站間移動約 $${live.movePerPerson}）${feePart}。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點`;
       })() : null,
       accommodation ? `住宿安排：${accommodation}` : null,
       startLoc ? `出發車站：${startLoc}` : null,
@@ -6784,6 +6817,102 @@
       }
     }
     return out;
+  }
+
+  // 門票費用（只來自本地已驗證資料 poi-data.js 的 fee/feeNote，爬蟲 enrich:fees 寫入的真實票價）。
+  function normalizeFeeName(s) { return String(s || '').replace(/\s/g, '').replace(/臺/g, '台').toLowerCase(); }
+  // 建目的地本地 POI 的門票對照表：正規化名稱 → { fee(數字|null), feeNote }。只含有票價資訊的景點。
+  function getLocalPoiFeeMap(destination) {
+    const map = new Map();
+    const list = getLocalPoiList(destination) || [];
+    for (const p of list) {
+      if (!p || !p.name) continue;
+      const hasFee = Number.isFinite(Number(p.fee));
+      if (!hasFee && !p.feeNote) continue;
+      map.set(normalizeFeeName(p.name), { fee: hasFee ? Number(p.fee) : null, feeNote: p.feeNote || '' });
+    }
+    return map;
+  }
+  // 人工維護票價表（attraction-fee-config.js）查名稱 → { fee, feeNote } 或 null。
+  function getCuratedFee(name) {
+    const cfg = (typeof window !== 'undefined' && window.WAI_ATTRACTION_FEE) || null;
+    if (!cfg || !cfg.paid || !name) return null;
+    const key = normalizeFeeName(name);
+    for (const k of Object.keys(cfg.paid)) {
+      if (normalizeFeeName(k) === key) {
+        const e = cfg.paid[k] || {};
+        return { fee: Number.isFinite(Number(e.fee)) ? Number(e.fee) : null, feeNote: e.note || '' };
+      }
+    }
+    return null;
+  }
+  // 以景點名稱查門票，回 { fee, feeNote } 或 null。優先人工維護表 → 其次本地資料(TDX 抓的)。
+  function lookupStopFee(feeMap, name) {
+    const curated = getCuratedFee(name);
+    if (curated) return curated;
+    if (!feeMap || !feeMap.size || !name) return null;
+    return feeMap.get(normalizeFeeName(name)) || null;
+  }
+  // 加總各站每人門票（只計有數字者；0=免費不加錢）。門票為每人各付，不除以人數。
+  // 排除用餐站（餐廳算餐飲、不算門票），避免與 poi-data/restaurant-data 重疊者重複計。
+  function sumStopFeesPerPerson(stops, destination) {
+    const feeMap = getLocalPoiFeeMap(destination);
+    const foodMap = getLocalFoodCostMap(destination);
+    let sum = 0;
+    for (const s of (Array.isArray(stops) ? stops : [])) {
+      if (stopIsFood(s, foodMap)) continue; // 餐廳歸餐飲
+      const hit = lookupStopFee(feeMap, s && s.name);
+      if (hit && Number.isFinite(hit.fee)) sum += hit.fee;
+    }
+    return Math.round(sum);
+  }
+
+  // 餐廳人均消費（restaurant-data.js，爬蟲 crawl:food 用 Places searchNearby 抓的 priceRange/priceLevel）。
+  // 建目的地餐廳的人均對照表：正規化名稱 → { costPerPerson(數字|null), costNote }。
+  function getLocalFoodCostMap(destination) {
+    const data = (typeof window !== 'undefined' && window.WAI_RESTAURANT_DATA) || null;
+    const map = new Map();
+    if (!data) return map;
+    const norm = (s) => String(s || '').trim().replace(/臺/g, '台');
+    const dest = norm(destination);
+    if (!dest) return map;
+    const stripped = dest.replace(/[縣市]$/u, '').trim();
+    for (const key of Object.keys(data)) {
+      if (key === '__generatedAt' || !Array.isArray(data[key])) continue;
+      const k = norm(key);
+      const match = k === dest || (stripped && k === stripped) || dest.includes(k) || k.includes(dest) || (stripped && (stripped.includes(k) || k.includes(stripped)));
+      if (!match) continue;
+      for (const r of data[key]) {
+        if (!r || !r.name) continue;
+        const hasCost = Number.isFinite(Number(r.costPerPerson));
+        if (!hasCost && !r.costNote) continue;
+        map.set(normalizeFeeName(r.name), { costPerPerson: hasCost ? Number(r.costPerPerson) : null, costNote: r.costNote || '' });
+      }
+    }
+    return map;
+  }
+  // 以餐廳名稱查人均消費，回 { costPerPerson, costNote } 或 null。優先 stop 自帶的（生成時寫入），其次本地餐廳表。
+  function lookupStopFoodCost(costMap, stop) {
+    if (!stop) return null;
+    if (Number.isFinite(Number(stop.costPerPerson))) return { costPerPerson: Number(stop.costPerPerson), costNote: stop.costNote || '' };
+    if (!costMap || !costMap.size || !stop.name) return null;
+    return costMap.get(normalizeFeeName(stop.name)) || null;
+  }
+  // 判斷是否為用餐站：isFoodStop（店名/emoji）或「在餐廳資料庫查得到」皆算餐廳。
+  // 後者可修正 poi-data/restaurant-data 重疊時，店名不含關鍵字（如「林家臭豆腐」）被誤判成景點的情況。
+  function stopIsFood(stop, foodCostMap) {
+    if (typeof isFoodStop === 'function' && isFoodStop(stop)) return true;
+    return !!lookupStopFoodCost(foodCostMap, stop);
+  }
+  // 加總各用餐站每人餐費（只計有數字者）。餐費為每人各付，不除以人數。
+  function sumStopFoodPerPerson(stops, destination) {
+    const costMap = getLocalFoodCostMap(destination);
+    let sum = 0;
+    for (const s of (Array.isArray(stops) ? stops : [])) {
+      const hit = lookupStopFoodCost(costMap, s);
+      if (hit && Number.isFinite(hit.costPerPerson)) sum += hit.costPerPerson;
+    }
+    return Math.round(sum);
   }
 
   // 用本地景點清單組 hint（沿用 v8 的「只能從此清單挑選」指令），交給 AI 重新排序。無資料回 ''。

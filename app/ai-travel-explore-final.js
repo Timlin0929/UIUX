@@ -250,7 +250,7 @@ async function buildFirebasePoiHintBlock(wizardData) {
       return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`;
     });
 
-    return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
+    return `【已驗證景點快取】規劃行程時「只能」從以下清單中挑選景點，嚴禁自行創造、想像或加入清單以外的任何景點（即使你認為該地點真實存在也不行）。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
   } catch (error) {
     console.warn('Firebase POI 檢索失敗：', error);
     return '';
@@ -307,7 +307,7 @@ function buildLocalPoiHintBlock(destination) {
     const durationHint = Number.isFinite(Number(poi.duration)) && Number(poi.duration) > 0 ? `${poi.duration} 分鐘` : '未知';
     return `景點名稱：${poi.emoji ? poi.emoji + ' ' : ''}${poi.name || '未知'}\n${coordinateHint}\n建議停留時間：${durationHint}\n營業時間：${poi.businessHours || '未知'}\n地址：${poi.address || poi.location || '無'}\n描述：${poi.desc || poi.description || '無'}\n`;
   });
-  return `【已驗證景點快取】以下景點已通過驗證，規劃行程時必須優先從此清單中選取。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
+  return `【已驗證景點快取】規劃行程時「只能」從以下清單中挑選景點，嚴禁自行創造、想像或加入清單以外的任何景點（即使你認為該地點真實存在也不行）。景點名稱必須與「景點名稱：」欄位完全一致，禁止自行附加縣市名稱後綴（例：快取顯示「鐵花村」則輸出「鐵花村」，禁止改寫為「鐵花村台東」、「鐵花村臺東市」或任何變體）：\n${poiLines.join('\n')}`;
 }
 
 async function prefetchFirebasePoiHint(wizardData, force = false) {
@@ -534,7 +534,7 @@ function getPromptRuleLines(wizardData, mode) {
 
   if (detailed) {
     const { min, max } = getDurationStopRange(days, people);
-    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、行程最後一站的結束時間必須在 ${endTime} 前後 15 分鐘內，嚴禁行程在 ${endTime} 的 15 分鐘前完全結束；若景點不足請加入具體名稱的餐廳、咖啡廳、市場、公園等補充體驗（禁止使用「在地午餐」等模糊名稱）`);
+    lines.push(`5. 必須包含 ${min}-${max} 個主要停留點（不得低於 ${min} 個），行程從 ${startTime} 開始、行程最後一站的結束時間必須在 ${endTime} 前後 15 分鐘內，嚴禁行程在 ${endTime} 的 15 分鐘前完全結束；所有停留點與用餐站都「只能」從上方提供的景點快取／餐廳候選清單中挑選，若清單景點不足，寧可安排較少的停留點或延長各站停留時間，也嚴禁加入清單以外的任何地點（禁止使用「在地午餐」等模糊名稱）`);
     lines.push('6. 每站包含時間、景點名稱、推薦理由、營業時間；請勿在 JSON 中輸出 lat/lng 座標或廁所資料，座標與廁所由系統自動查詢');
     lines.push('7. 景點須考慮營業時間，使用正式可定位名稱；嚴禁使用「在地午餐」、「當地早餐」、「附近餐廳」、「在地美食」等任何模糊飲食描述作為景點名稱——餐飲景點必須填入具體店家名稱（例如「池上飯包文化故事館」、「春一枝冰棒」），確保遊客能透過 Google Maps 直接搜尋到');
     lines.push('8. duration 為建議停留分鐘數（正整數，勿省略），依景點實際規模與特性靈活設定，禁止固定使用 30、60、90、120 等整數倍，應依景點規模自行判斷填入合理的非整數倍值；參考上限：觀景台/制高點 20-45、步道/健行路線 35-70、湖泊/海灘 25-55、公園/廣場 20-45、美食/小吃 15-35、咖啡廳 25-50、博物館/文化館 45-85、市場/夜市 35-65、廟宇/歷史景點 15-40；例：小型展館填 40、大型步道填 55、湖畔散步填 35');
@@ -696,7 +696,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
       const bd = buildBudgetBreakdown(wizardData.budget, wizardData.people, tr.totalPerPerson);
       if (!bd || tr.totalPerPerson <= 0) return null;
       const ferryPart = tr.ferryPerPerson > 0 ? `離島船票 $${tr.ferryPerPerson}、` : '';
-      return `交通預估：每人約 $${tr.totalPerPerson}（${ferryPart}站間移動約 $${tr.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點`;
+      return `交通預估：每人約 $${tr.totalPerPerson}（${ferryPart}站間移動約 $${tr.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點；用餐站請優先挑選人均消費落在此額度內的餐廳（餐廳候選已附人均消費）`;
     })() : null,
     wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
     wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
@@ -2095,9 +2095,10 @@ function buildLiveFoodHintBlock(places) {
   if (!Array.isArray(places) || !places.length) return '';
   const lines = places.map(p => {
     const coordLine = (p.lat != null && p.lng != null) ? `座標：lat ${p.lat}, lng ${p.lng}` : '座標：未知';
-    return [`餐廳名稱：${p.name}`, coordLine, `營業時間：${p.businessHours}`, `地址：${p.address || '無'}`, p.rating ? `評分：${p.rating}` : ''].filter(Boolean).join('\n');
+    const costLine = p.costNote ? `人均消費：${p.costNote}` : (Number.isFinite(p.costPerPerson) ? `人均消費：約 $${p.costPerPerson}` : '');
+    return [`餐廳名稱：${p.name}`, coordLine, `營業時間：${p.businessHours}`, `地址：${p.address || '無'}`, p.rating ? `評分：${p.rating}` : '', costLine].filter(Boolean).join('\n');
   });
-  return `【即時餐廳候選（Google Maps）】用餐站請從以下餐廳挑選，名稱需與清單完全一致：\n\n${lines.join('\n\n')}`;
+  return `【即時餐廳候選（Google Maps）】用餐站「只能」從以下餐廳挑選，名稱需與清單完全一致，嚴禁使用清單以外的餐廳；請依使用者預算優先選擇人均消費相符的餐廳：\n\n${lines.join('\n\n')}`;
 }
 
 function findBestPoiMatch(stopName, livePlaces) {
@@ -2121,7 +2122,10 @@ function matchStopsToLivePlaces(stops, livePlaces) {
       lng: match.lng,
       businessHours: stop.businessHours || match.businessHours || null,
       address: stop.address || match.address || '',
-      coordinateSource: 'google_places_matched'
+      coordinateSource: 'google_places_matched',
+      // 餐廳人均消費（若有）隨 stop 帶走，供 planner 卡片/預算顯示
+      ...(Number.isFinite(match.costPerPerson) ? { costPerPerson: match.costPerPerson } : {}),
+      ...(match.costNote ? { costNote: match.costNote } : {})
     };
   });
 }
@@ -2776,6 +2780,14 @@ function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardDa
   const endLoc = (wizardData.endLocation || '').trim();
   const excluded = (excludedNames || []).slice(0, 40).join('、');
   const _avoid = getEffectivePrefs(wizardData).avoid;
+  // 只能從本地端：補景點也只從本地清單挑（排除已用），本地無資料才退回 Google Maps 描述。
+  const _norm = (s) => String(s || '').replace(/\s/g, '').replace(/臺/g, '台');
+  const _excludeSet = new Set((excludedNames || []).map(_norm));
+  const _localPool = (typeof getLocalPoiList === 'function' ? getLocalPoiList(dest) : [])
+    .filter((p) => p && p.name && !_excludeSet.has(_norm(p.name)));
+  const _localBlock = _localPool.length
+    ? `景點「只能」從以下本地清單挑選未使用者（名稱需完全一致，嚴禁清單以外的任何景點）：\n${_localPool.slice(0, 40).map((p) => `・${p.name}`).join('\n')}`
+    : `景點須為 ${dest} 周邊真實存在、能在 Google Maps 搜尋到的正式名稱`;
   return [
     `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 1} 個景點（多補 1 個備用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
     _avoid ? `⚠️ 個人禁忌／需避免（務必遵守）：${_avoid}` : null,
@@ -2783,7 +2795,8 @@ function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardDa
     (startLoc || endLoc)
       ? `景點請沿「${startLoc || dest}」→「${dest}」→「${endLoc || dest}」路線廊道分散（距路線 10 公里內），不要全部集中在同一點`
       : '景點沿行程路線分散，不要集中在同一點',
-    `景點須為 ${dest} 周邊真實存在、能在 Google Maps 搜尋到的正式名稱；duration 為停留分鐘（15–90）；風格 ${theme}、興趣 ${interests}`,
+    _localBlock,
+    `duration 為停留分鐘（15–90）；風格 ${theme}、興趣 ${interests}`,
     '請勿輸出 lat/lng（座標由系統查詢）。只回傳 JSON：{"stops":[{"name":"景點正式名稱","emoji":"📍","duration":45,"desc":"推薦理由","businessHours":"週一至週日 09:00-17:00"}]}'
   ].filter(Boolean).join('\n');
 }
