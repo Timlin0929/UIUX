@@ -68,11 +68,25 @@ let wizStep = 0;
 let wizData = {};
 let collabState = null; // 多人協作面板的即時狀態：{ tripId, data, unsub, myEmail, myPrefsDraft }
 
+// 將任意字串跳脫成可安全放進 innerHTML 的文字（避免成員顯示名稱等使用者輸入被當 HTML 執行）
+function escapeHtml(text) {
+  return String(text == null ? '' : text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ── GEMINI & FIREBASE CONFIG ──
 const GEMINI_MODEL = 'gemini-3-flash-preview';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
-const VERTEX_API_BASE = 'https://aiplatform.googleapis.com/v1';
+// 後端代理模式：API_PROXY_BASE 設了就走同源代理（/api/vertex），金鑰由伺服器注入、不進前端。
+// 未設則回退直連 Google（需前端自帶 VERTEX_API_KEY，僅本機開發用）。
+const VERTEX_PROXY_BASE = ((window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.API_PROXY_BASE) || '').replace(/\/$/, '');
+const VERTEX_HOST = VERTEX_PROXY_BASE ? (VERTEX_PROXY_BASE + '/vertex') : 'https://aiplatform.googleapis.com';
+const VERTEX_API_BASE = `${VERTEX_HOST}/v1`;
 const VERTEX_LOCAL_KEY = 'TRAVEL_VERTEX_API_KEY';
 const VERTEX_LOCAL_PROJECT = 'TRAVEL_VERTEX_PROJECT_ID';
 let firebaseDb = null;
@@ -766,17 +780,34 @@ function parsePlanJsonFromText(text) {
   }
 }
 
+// 代理模式的 Vertex 呼叫需要登入（後端驗 Firebase ID token，防止陌生人燒 Vertex 額度）。
+// 回傳含 Authorization 的標頭；未登入時不帶（後端會回 401，由呼叫端顯示友善訊息）。
+async function vertexAuthHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  try {
+    const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+    if (u) headers.Authorization = 'Bearer ' + (await u.getIdToken());
+  } catch (_e) { /* token 取失敗就不帶，讓後端 401 */ }
+  return headers;
+}
+
+function vertexHttpError(status, kind) {
+  if (status === 401) return new Error('請先登入，登入後才能使用 AI 生成功能。');
+  if (status === 429) return new Error('AI 請求過於頻繁，請休息一下再試。');
+  return new Error(`${kind}（${status}）`);
+}
+
 async function fetchGeminiJson({ apiKey, model, payload }) {
   const vertex = getVertexConfig();
   if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
   const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await vertexAuthHeaders(),
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    throw new Error(`Vertex API 失敗（${response.status}）`);
+    throw vertexHttpError(response.status, 'Vertex API 失敗');
   }
   return response.json();
 }
@@ -787,11 +818,11 @@ async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
   const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`;
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: await vertexAuthHeaders(),
     body: JSON.stringify(payload)
   });
   if (!response.ok || !response.body) {
-    throw new Error(`Vertex stream 失敗（${response.status}）`);
+    throw vertexHttpError(response.status, 'Vertex stream 失敗');
   }
 
   const reader = response.body.getReader();
@@ -841,7 +872,9 @@ function getVertexConfig() {
   const cfg = window.TRAVEL_APP_CONFIG || {};
   const apiKey = (cfg.VERTEX_API_KEY || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_KEY) || '').trim();
   const projectId = (cfg.VERTEX_PROJECT_ID || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_PROJECT) || '').trim();
-  return { apiKey, projectId, ready: !!(apiKey && projectId) };
+  // 代理模式下前端沒有金鑰也視為 ready（金鑰在伺服器）；直連模式仍需 apiKey + projectId。
+  const proxied = !!VERTEX_PROXY_BASE;
+  return { apiKey, projectId, proxied, ready: proxied || !!(apiKey && projectId) };
 }
 
 function setGeminiApiKey(apiKey) {
@@ -1951,8 +1984,11 @@ function assignTransportModes(stops, preferredMode) {
 
 function fuzzyMatchLocation(stopName, locationName) {
   if (!stopName || !locationName) return false;
-  const a = stopName.trim().toLowerCase().replace(/\s/g, '');
-  const b = locationName.trim().toLowerCase().replace(/\s/g, '');
+  // 「火車站→車站」正規化：AI 常把起訖站寫成「台東火車站」，須與「台東車站」視為同一地，
+  // 否則樞紐站會被當成一般景點留在行程中（起點旁邊再排一個 26 分鐘的「台東火車站」）。
+  const norm = (s) => s.trim().toLowerCase().replace(/\s/g, '').replace(/火車站/g, '車站');
+  const a = norm(stopName);
+  const b = norm(locationName);
   return a.includes(b) || b.includes(a);
 }
 
@@ -2261,6 +2297,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
         }
       }
       stop.placeVerified = true;
+      stop.coordVerified = true; // 本地座標已由 crawler verify:places 校正過 → planner 載入免重驗
       return stop;
     }
 
@@ -2308,6 +2345,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
         }
       }
       stop.placeVerified = true;
+      stop.coordVerified = true; // Places 嚴格配對成功的座標 → planner 載入免重驗
       return stop;
     } catch (e) {
       return null;
@@ -2327,7 +2365,13 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
     if (fuzzyMatchLocation(s.name, startLoc) || fuzzyMatchLocation(s.name, endLoc)) return false;
     return true;
   });
-  return mainStops.length >= 2 ? verified : stops;
+  // 樞紐站去重：AI 有時會把起訖站又排成中途「景點」（起點台東車站後緊接「台東火車站」26 分鐘），
+  // 它不是景點——直接剔除，避免多出無意義的停留與步行段。
+  const withoutHubDupes = verified.filter(s => {
+    if (s.type === 'start' || s.type === 'end') return true;
+    return !(fuzzyMatchLocation(s.name, startLoc) || fuzzyMatchLocation(s.name, endLoc));
+  });
+  return mainStops.length >= 2 ? withoutHubDupes : stops;
 }
 
 // === 同一大景區內密集子景點合併（與 ai-travel-planner-v8.html 行為一致）===
@@ -3053,7 +3097,11 @@ async function loadState() {
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
     myTrips = JSON.parse(localStorage.getItem('wai_mytrips')||'[]').map(serializeTripForStorage);
     
-    if (isLoggedIn && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb && currentUser && currentUser.email) {
+    // 必須等 firebaseAuth.currentUser 真的就緒才查 Firestore：開機時 localStorage 說「已登入」
+    // 但 Auth token 尚未還原（request.auth=null），查詢會被安全規則擋下、噴 permission 錯誤。
+    // auth 還原後 onAuthStateChanged 會再呼叫一次 loadState，屆時才真正同步。
+    if (isLoggedIn && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb && currentUser && currentUser.email
+        && typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
       try {
         // 不用 .orderBy('createdAt')：等式查詢 + 不同欄位排序會要求複合索引（就是 console 那個 "requires an index" 錯誤）。
         // 改成只用等式查詢（單欄位自動索引），抓回來後在前端依 createdAt 排序。
@@ -3173,6 +3221,23 @@ function switchAuthTab(tab) {
 
 function isValidEmail(s){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s); }
 
+// 資安：把 Firebase 原始錯誤轉成「不可區分」的通用訊息。
+// 絕不能把 e.message 直接秀給使用者——「user-not-found」vs「wrong-password」的差異
+// 會讓攻擊者列舉出哪些 email 有註冊（撞庫前的偵察）。登入失敗一律同一句話。
+function authErrorMessage(e, kind) {
+  const code = (e && e.code) || '';
+  if (code === 'auth/too-many-requests') return '嘗試次數過多，帳號已暫時鎖定，請稍後再試。';
+  if (code === 'auth/network-request-failed') return '網路連線異常，請檢查網路後再試。';
+  if (kind === 'register') {
+    if (code === 'auth/email-already-in-use') return '這個 Email 無法使用，請改用其他信箱，或直接嘗試登入。';
+    if (code === 'auth/weak-password') return '密碼強度不足，請使用至少 8 個字元並混合英數。';
+    if (code === 'auth/invalid-email') return 'Email 格式不正確。';
+    return '註冊失敗，請稍後再試。';
+  }
+  // 登入：帳號不存在／密碼錯誤／憑證無效 → 一律同一句，不洩漏差異
+  return '帳號或密碼錯誤，請確認後再試。';
+}
+
 async function doLogin() {
   if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
   const email = document.getElementById('loginEmail').value.trim();
@@ -3184,7 +3249,7 @@ async function doLogin() {
     showToast(`👋 歡迎回來！`, 'green');
     closeLogin();
   } catch(e) {
-    showToast(`登入失敗: ${e.message}`, 'red');
+    showToast(authErrorMessage(e, 'login'), 'red');
   }
 }
 
@@ -3215,7 +3280,7 @@ async function doRegister() {
     closeLogin();
     openPrefWizard(); // 引導設定偏好
   } catch(e) {
-    showToast(`註冊失敗: ${e.message}`, 'red');
+    showToast(authErrorMessage(e, 'register'), 'red');
   }
 }
 
@@ -3288,7 +3353,9 @@ async function doSocialLogin(providerName) {
     showToast(`✅ 已透過 ${providerName} 登入`, 'green');
     closeLogin();
   } catch(e) {
-    showToast(`登入失敗: ${e.message}`, 'red');
+    // 社群登入取消/失敗：也不洩漏原始錯誤（popup-closed-by-user 等由使用者自行重試）
+    const code = (e && e.code) || '';
+    showToast(code === 'auth/popup-closed-by-user' ? '已取消登入' : authErrorMessage(e, 'login'), 'red');
   }
 }
 
@@ -3730,6 +3797,7 @@ function renderMyTrips() {
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
           ${t.collab ? '' : `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>`}
+          <button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
           <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
         </div>
@@ -3737,16 +3805,41 @@ function renderMyTrips() {
     </div>`).join('');
   grid.innerHTML = cards + newCard;
 }
+// 重新命名行程：本機立即生效，登入時同步遠端（自己的行程與共編行程皆可；共編改名會即時推送給成員）
+async function renameMyTrip(id) {
+  const t = myTrips.find(x => x.id === id);
+  if (!t) return;
+  const input = window.prompt('輸入新的行程名稱（40 字內）：', t.title || '');
+  if (input === null) return; // 使用者取消
+  const name = String(input).trim().slice(0, 40);
+  if (!name) { showToast('名稱不可為空白', 'orange'); return; }
+  t.title = name;
+  t.customTitle = true; // 之後 AI 標題不覆蓋
+  saveState(); renderMyTrips(); renderSideMyTrips();
+  if (firebaseEnabled && firebaseDb && typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
+    try { await firebaseDb.collection('micro_trips').doc(id).set({ title: name, customTitle: true }, { merge: true }); }
+    catch (e) { console.warn('同步行程名稱失敗（本機已保留）：', e); }
+  }
+  showToast('📝 已更新行程名稱', 'green');
+}
+
 async function deleteMyTrip(id) {
   const t = myTrips.find(x => x.id === id);
   myTrips = myTrips.filter(x => x.id !== id);
   if (collabState && collabState.tripId === id) closeCollabPanel(); // 刪到正在看的就先關面板
   saveState(); renderMyTrips(); renderSideMyTrips();
-  // 共編行程：owner 刪除時連遠端一起清（避免孤兒佔 Firestore）；成員只移除本機（等同離開）
-  if (t && t.collab && t.role === 'owner' && firebaseEnabled && firebaseDb && window.WAI_COLLAB) {
-    try { await WAI_COLLAB.deleteSharedTrip(id, t.inviteCode); } catch (e) { console.warn('刪除共用行程失敗：', e); }
+  // 共編行程：owner 刪除時連遠端一起清（避免孤兒佔 Firestore）；
+  // 非 owner 成員則要真正「離開」——把自己從遠端 memberEmails/members 移除，
+  // 否則只清本機、email 仍留在 memberEmails，下次登入 fetchMyCollabTrips 又會把行程抓回來。
+  if (t && t.collab && firebaseEnabled && firebaseDb && window.WAI_COLLAB) {
+    const myEmail = (currentUser && currentUser.email) || '';
+    if (t.role === 'owner') {
+      try { await WAI_COLLAB.deleteSharedTrip(id, t.inviteCode); } catch (e) { console.warn('刪除共用行程失敗：', e); }
+    } else if (myEmail) {
+      try { await WAI_COLLAB.leaveSharedTrip(id, myEmail); } catch (e) { console.warn('離開共用行程失敗：', e); }
+    }
   }
-  showToast('🗑 已刪除行程', 'red');
+  showToast(t && t.collab && t.role !== 'owner' ? '👋 已離開共編行程' : '🗑 已刪除行程', 'red');
 }
 // B2：深度連結 / URL 邀請強化。
 // collab 行程 → 訪客唯讀分享連結（含 shareToken）；個人行程 → 開啟該行程的深連結。
@@ -3949,6 +4042,13 @@ function renderWizard() {
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr)">
           ${WIZ_DESTS.map(d=>`<button class="wizard-tag${wizData.dest===d.label?' active':''}" onclick="selectDest('${d.label}')" type="button" style="background:${wizData.dest===d.label?'#dff1ff':'#f7fbff'};border-color:${wizData.dest===d.label?'#7db8ee':'#d8e2ef'}">${d.emoji} ${d.label}</button>`).join('')}
         </div>
+      </div>
+      <div class="wizard-field">
+        <label>行程名稱 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，留空自動以「目的地＋天數」命名）</span></label>
+        <input type="text" id="wizTripName" maxlength="40" placeholder="例如：台東畢旅、週末放空之旅"
+          value="${String(wizData.tripName || '').replace(/"/g, '&quot;')}"
+          oninput="setWizTripName(this.value)"
+          style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #d8e2ef;border-radius:12px;font-size:15px;background:#f7fbff;color:#1f3a52;">
       </div>
       <div class="wizard-field">
         <label>旅行人數</label>
@@ -4241,6 +4341,11 @@ function setTripPeople(n) {
 // 旅行人數：步進調整
 function adjustTripPeople(delta) {
   setTripPeople((parseInt(wizData.people, 10) || 2) + delta);
+}
+
+// 行程名稱（選填）：只記到 wizData，不觸發重繪（重繪會讓輸入框失焦）
+function setWizTripName(v) {
+  wizData.tripName = String(v || '').slice(0, 40);
 }
 
 // 兩天一夜：第一天遊玩時數（1–12）
@@ -4834,8 +4939,11 @@ async function finishWizard() {
   const defaultBudget = _durM <= 120 ? '$300' : _durM <= 240 ? '$800' : _durM <= 480 ? '$1,500' : '$3,000';
   const tripMode = wizData.tripMode || 'solo';
   const emojiMap = {'台東':'🌊','花蓮':'🏔','台北':'🏙','日本':'⛩️','韓國':'🌸','歐洲':'🏛'};
+  // 使用者在精靈填了名稱就用它（並標記 customTitle，AI 生成的標題不覆蓋）；留空則自動命名
+  const _customName = String(wizData.tripName || '').trim().slice(0, 40);
   const newTrip = {
-    id: 'my_' + Date.now(), title: `${dest} ${days}微旅行`,
+    id: 'my_' + Date.now(), title: _customName || `${dest} ${days}微旅行`,
+    customTitle: !!_customName,
     emoji: emojiMap[dest] || '✈️',
     cc: ['c0','c1','c2','c3'][Math.floor(Math.random()*4)],
     days, region: dest, budget: wizData.budget || defaultBudget,
@@ -4963,7 +5071,8 @@ async function _doGeneration(trip, wData) {
 
     if (finalPlan && finalPlan.stops) {
       trip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wData, livePlaces);
-      trip.aiTitle = finalPlan.title || trip.title;
+      // 使用者自訂名稱（customTitle）優先：AI 標題只在未自訂時作為別名保存
+      trip.aiTitle = trip.customTitle ? trip.title : (finalPlan.title || trip.title);
       trip.aiReply = finalPlan.reply || '';
     }
 
@@ -5107,6 +5216,20 @@ function collabSetDesired(v) { if (collabState && collabState.myPrefsDraft) coll
 function renderCollabPanel() {
   const body = document.getElementById('collabPanelBody');
   if (!body || !collabState || !collabState.data) return;
+  // 若使用者正在面板內的輸入框打字（例如「想去的景點」），先別整塊重繪，否則 Firestore
+  // 快照一到就 innerHTML 重建、害輸入框失焦。改記下「待重繪」，等 blur 後再補繪一次。
+  const active = document.activeElement;
+  if (active && body.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+    collabState._pendingRender = true;
+    if (!active._collabBlurHooked) {
+      active._collabBlurHooked = true;
+      active.addEventListener('blur', () => {
+        if (collabState && collabState._pendingRender) { collabState._pendingRender = false; renderCollabPanel(); }
+      }, { once: true });
+    }
+    return;
+  }
+  collabState._pendingRender = false;
   const d = collabState.data;
   const isOwner = collabMyRole() === 'owner';
   const members = d.members || {};
@@ -5124,8 +5247,8 @@ function renderCollabPanel() {
 
   body.innerHTML = `
     <div class="collab-trip-head">
-      <div class="collab-trip-title">${d.emoji || '👥'} ${d.title || '共編行程'}</div>
-      <div class="collab-trip-sub">${d.region || ''} · ${d.days || ''} · ${memberList.length}/${d.maxMembers || 10} 人</div>
+      <div class="collab-trip-title">${d.emoji || '👥'} ${escapeHtml(d.title || '共編行程')}</div>
+      <div class="collab-trip-sub">${escapeHtml(d.region || '')} · ${escapeHtml(d.days || '')} · ${memberList.length}/${d.maxMembers || 10} 人</div>
     </div>
     <div class="collab-section">
       <div class="collab-section-title">邀請朋友（上限 ${d.maxMembers || 10} 人）</div>
@@ -5200,7 +5323,7 @@ function collabMemberRowHtml(m, ownerControls) {
   } else {
     roleCell = `<span class="collab-role-badge ${m.role}">${WAI_COLLAB.roleLabel(m.role)}</span>`;
   }
-  return `<div class="collab-member-row">${readyDot}<span class="collab-member-name">${m.name || m.email}${isMe ? '（你）' : ''}</span>${roleCell}</div>`;
+  return `<div class="collab-member-row">${readyDot}<span class="collab-member-name">${escapeHtml(m.name || m.email)}${isMe ? '（你）' : ''}</span>${roleCell}</div>`;
 }
 
 function collabCopy(text, label) {
