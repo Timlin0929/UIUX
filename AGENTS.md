@@ -19,6 +19,11 @@ This workspace is a static HTML prototype playground. Edit the individual `.html
 
 ## Validation
 
+- **Test against the production site `https://travel-link-ai.duckdns.org/`, not localhost**（使用者 2026-07-06 指示）. The site is served by nginx + the Node proxy on this machine, and static file edits go live immediately (no reload needed).
+  - **Hard-refresh（Ctrl+F5）before judging results**: nginx caches CSS/images for 7 days in the browser — without a hard refresh you will be testing the old version.
+  - Known limitation: the sandboxed automation browser **cannot reach the public domain** (hairpin/sandbox restriction). DOM-level automated checks may fall back to a local static server (`localhost:8123`), but **final human verification must be on the production site**. HTTP-level checks (curl, headers, `/api` endpoints) should hit the production domain directly.
+  - `file://` and plain localhost static servers cannot reach the `/api` proxy (Vertex/TDX). Any flow involving AI generation must be tested on the production site.
+- **Zero console errors（F12）**: during the tested flows, open DevTools — the console must show **no red errors**. Known-harmless third-party warnings are acceptable (Google Maps deprecation notices, Firebase COOP popup warnings), but any red error, `permission-denied`, or uncaught exception counts as a failed validation and must be fixed before the change is considered done.
 - For HTML/CSS/JS changes, verify the edited page renders cleanly and the relevant interactions still work.
 - If a script depends on local config, check [weather.env.js](app/weather.env.js) before assuming a missing key is a code bug.
 

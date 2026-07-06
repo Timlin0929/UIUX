@@ -15,6 +15,7 @@ app/        ← all web-app runtime files (HTML, CSS, JS, data, config)
 archive/    ← retired inline prototypes (no longer active)
 tools/      ← one-off utility scripts (patch_gen_overlay.py, nginx-blocklist.conf)
 crawler/    ← Node.js data pipeline (npm project, run from that folder)
+server/     ← Node.js backend proxy for Vertex/Gemini (keeps the API key server-side; see DEPLOY.md)
 ```
 
 ## Commands
@@ -43,10 +44,11 @@ A Windows scheduled task **`WanderAI Food Crawl`** runs `crawl:food` biweekly vi
 - Keep changes local to the target prototype; only backport across variants when explicitly asked.
 
 ### Runtime config & external services
-- [app/weather.env.js](app/weather.env.js) (gitignored) defines `window.TRAVEL_APP_CONFIG`: `GOOGLE_MAPS_API_KEY`, Vertex AI keys/project, Firebase config. Never hardcode keys in page markup — read them from here.
+- [app/weather.env.js](app/weather.env.js) (gitignored) defines `window.TRAVEL_APP_CONFIG`: `GOOGLE_MAPS_API_KEY`, `VERTEX_PROJECT_ID` (not secret — same as Firebase projectId), Firebase config, `API_PROXY_BASE`. Never hardcode keys in page markup — read them from here. **`VERTEX_API_KEY` is no longer here** — it moved to `server/.env` (see below).
 - [app/ferry-config.js](app/ferry-config.js) (`window.WAI_FERRY_CONFIG`) holds stable island-harbor anchor coordinates (Places often mis-geocodes these).
 - [app/attraction-fee-config.js](app/attraction-fee-config.js) (`window.WAI_ATTRACTION_FEE`) is a **hand-maintained** override layer for admission fees — unlike the other data files below, edit it directly; it takes priority over the `fee`/`feeNote` that `enrich:fees` writes into `app/poi-data.js`.
 - Services, all loaded via CDN (`file://`-compatible): **Firebase** (Auth + Firestore), **Google Maps Places API (New)**, **Vertex AI / Gemini** (trip generation).
+- **Vertex/Gemini calls go through a backend proxy** ([server/](server/), Node + Express). When `TRAVEL_APP_CONFIG.API_PROXY_BASE` is set (e.g. `'/api'`), the frontend calls the same-origin `/api/vertex/*` instead of `aiplatform.googleapis.com/...?key=`; the proxy injects `VERTEX_API_KEY` (from `server/.env`) so the key never reaches the browser. Both files build this via `VERTEX_HOST`/`VERTEX_API_BASE` and `getVertexConfig()` (`ready` is true in proxy mode without a client-side key). Leaving `API_PROXY_BASE` empty falls back to direct calls (needs a client-side key; dev only). Maps JS + Firebase keys **can't** be proxied (they run in the browser) — protect those with HTTP-referrer / authorized-domain restrictions. `file://` won't hit the proxy; test proxy mode via a static server + the Node proxy (or nginx). See [server/README.md](server/README.md) and [DEPLOY.md](DEPLOY.md).
 
 ### Local-first data pipeline (the core cost design — spans crawler + frontend)
 Per-trip Google Places calls are expensive, so generated scenic/restaurant data is **cached into static files and used local-first**:
