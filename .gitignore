@@ -6,6 +6,8 @@ weather.env
 weather.env.js
 .env
 .env.*
+# 但保留範本檔（不含真實金鑰，供他人參照）
+!**/.env.example
 
 # Secrets / service accounts (Firebase 私鑰等，絕不可進版控)
 serviceAccount.json
