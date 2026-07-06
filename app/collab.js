@@ -293,6 +293,19 @@ window.WAI_COLLAB = (function () {
     if (code) await db().collection('invites').doc(normalizeCode(code)).set({ active: false }, { merge: true });
   }
 
+  // 成員「離開」共用行程：把自己從 memberEmails 與 members map 移除。
+  // 用於非 owner 成員在「我的微旅行」刪除 collab 行程時，真正退出（否則 memberEmails
+  // 仍含其 email，下次登入 fetchMyCollabTrips 的 array-contains 又會把行程抓回來）。
+  async function leaveSharedTrip(tripId, email) {
+    if (!email) return;
+    var patch = {};
+    patch[emailKey(email)] = firebase.firestore.FieldValue.delete();
+    await db().collection('micro_trips').doc(tripId).set({
+      memberEmails: firebase.firestore.FieldValue.arrayRemove(email),
+      members: patch
+    }, { merge: true });
+  }
+
   // owner 刪除整個共用行程：清 micro_trips doc（規則允許 owner 刪）+ 停用邀請碼。
   // 用於使用者在「我的微旅行」刪除 collab 行程時連遠端一起清，避免孤兒佔 Firestore。
   async function deleteSharedTrip(tripId, inviteCode) {
@@ -406,6 +419,7 @@ window.WAI_COLLAB = (function () {
     joinByCode: joinByCode,
     setMemberRole: setMemberRole,
     deleteSharedTrip: deleteSharedTrip,
+    leaveSharedTrip: leaveSharedTrip,
     setMemberPrefs: setMemberPrefs,
     revokeInvite: revokeInvite,
     subscribeSharedTrip: subscribeSharedTrip,
