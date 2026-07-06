@@ -36,7 +36,11 @@
   const GEMINI_MODEL = 'gemini-3-flash-preview';
   const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
   const GEMINI_LOCAL_KEY = 'TRAVEL_GEMINI_API_KEY';
-  const VERTEX_API_BASE = 'https://aiplatform.googleapis.com/v1';
+  // 後端代理模式：API_PROXY_BASE 設了就走同源代理（/api/vertex），金鑰由伺服器注入、不進前端。
+  // 未設則回退直連 Google（需前端自帶 VERTEX_API_KEY，僅本機開發用）。
+  const VERTEX_PROXY_BASE = ((window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.API_PROXY_BASE) || '').replace(/\/$/, '');
+  const VERTEX_HOST = VERTEX_PROXY_BASE ? (VERTEX_PROXY_BASE + '/vertex') : 'https://aiplatform.googleapis.com';
+  const VERTEX_API_BASE = `${VERTEX_HOST}/v1`;
   const VERTEX_LOCAL_KEY = 'TRAVEL_VERTEX_API_KEY';
   const VERTEX_LOCAL_PROJECT = 'TRAVEL_VERTEX_PROJECT_ID';
   const ACTIVE_TRIP_LOCAL_KEY = 'wai_active_trip_id';
@@ -55,9 +59,17 @@
   const tdxSpotsCache = new Map();
   const tdxParkingCache = new Map();
   const TDX_AUTH_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
-  // 觀光資訊 V2.0 ScenicSpot (包含中文縣市 $filter)
-  const TDX_SCENIC_BASE = 'https://tdx.transportdata.tw/api/basic/v2/Tourism/ScenicSpot';
-  const TDX_PARKING_BASE = 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/CarPark/City';
+  // TDX 走後端代理：client_credentials 已移到 server/.env（不可進前端），token 由代理處理。
+  // 未設 API_PROXY_BASE（本機直連開發）才會走 tdx.transportdata.tw 並需要前端憑證。
+  const TDX_PROXIED = !!VERTEX_PROXY_BASE;
+  // 景點改用新版 odata Attraction（舊 basic 的 v2/Tourism/ScenicSpot 已退役回 404）；
+  // 縣市過濾用 PostalAddress/City（LocatedCities 多為空、City eq 過濾一律 0 筆，2026-07 實測）。
+  const TDX_SCENIC_BASE = TDX_PROXIED
+    ? `${VERTEX_PROXY_BASE}/tdx/V2/Tourism/Attraction`
+    : 'https://tdx.transportdata.tw/api/tourism/service/odata/V2/Tourism/Attraction';
+  const TDX_PARKING_BASE = TDX_PROXIED
+    ? `${VERTEX_PROXY_BASE}/tdx/v1/Parking/OffStreet/CarPark/City`
+    : 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/CarPark/City';
   const TDX_COUNTY_ZH = { Taitung: '臺東縣', Hualien: '花蓮縣', Pingtung: '屏東縣', Tainan: '臺南市', Kaohsiung: '高雄市' };
   // TDX 停車 City enum：縣級用 …County 後綴（TaitungCounty…），直轄市/市用裸名。帶錯（如 Taitung）→ 400。
   const TDX_PARKING_CITY = { Taitung: 'TaitungCounty', Hualien: 'HualienCounty', Pingtung: 'PingtungCounty', Tainan: 'Tainan', Kaohsiung: 'Kaohsiung' };
@@ -334,6 +346,8 @@
   // 取得 TDX OAuth2 access token（scenic / parking 共用）。
   // 快取 token 直到過期；並用 in-flight promise 去重，避免並發呼叫各自打 auth（造成 429）。
   async function getTdxAccessToken() {
+    // 代理模式：token 由後端注入，前端不需（也不該有）憑證；回傳哨兵值讓呼叫端繼續。
+    if (TDX_PROXIED) return 'proxied';
     const cfg = window.TRAVEL_APP_CONFIG || {};
     const appId = cfg.TDX_APP_ID;
     const appKey = cfg.TDX_APP_KEY;
@@ -373,10 +387,11 @@
         const access_token = await getTdxAccessToken();
         if (!access_token) return [];
         const zh = TDX_COUNTY_ZH[county] || county;
-        const filter = encodeURIComponent(`City eq '${zh}'`);
+        // 新版 Attraction 的縣市在 PostalAddress/City（值用「臺」寫法，TDX_COUNTY_ZH 已是）
+        const filter = encodeURIComponent(`PostalAddress/City eq '${zh}'`);
         const dataRes = await fetch(
           `${TDX_SCENIC_BASE}?$filter=${filter}&$top=200&$format=JSON`,
-          { headers: { Authorization: `Bearer ${access_token}` } }
+          { headers: access_token === 'proxied' ? {} : { Authorization: `Bearer ${access_token}` } }
         );
         if (!dataRes.ok) return [];
         const spots = await dataRes.json();
@@ -428,7 +443,7 @@
         if (!access_token) return [];
         const dataRes = await fetch(
           `${TDX_PARKING_BASE}/${city}?$format=JSON`,
-          { headers: { Authorization: `Bearer ${access_token}` } }
+          { headers: access_token === 'proxied' ? {} : { Authorization: `Bearer ${access_token}` } }
         );
         if (!dataRes.ok) { console.warn(`[TDX] 停車場 ${city} HTTP ${dataRes.status}`); return []; }
         const list = await dataRes.json();
@@ -578,35 +593,10 @@
     };
     scenicPointCache.set(key, cachedRecord);
 
-    const docRef = getScenicPointDocRef(name, region);
-    // 如果無法取得 docRef 或無 firebase，僅保留快取，不寫入
-    if (!docRef || !firebaseEnabled) return scenicPointCache.get(key);
-
-    try {
-      const verified = await verifyPlaceWithOpenData(name, { lat: coordinates.lat, lng: coordinates.lng }, region);
-      if (!verified) {
-        console.info(`OpenData 驗證未通過，暫不寫入 Firebase：${name}`);
-        // 更新快取狀態 (未驗證)
-        scenicPointCache.set(key, { ...cachedRecord, verified: false });
-        return scenicPointCache.get(key);
-      }
-
-      // 驗證通過後先在快取標記為 verified，並以非同步方式寫入 Firebase（避免被外部重建 token 取消）
-      scenicPointCache.set(key, { ...record, verified: true });
-      // fire-and-forget 寫入，錯誤則記錄，但不影響目前流程
-      docRef.set({ ...record, verified: true }, { merge: true })
-        .then(() => {
-          // 成功寫入
-        })
-        .catch((err) => {
-          console.warn('寫入景點座標失敗（非同步）：', err);
-          // 若寫入失敗，仍保留快取但標記為未驗證
-          scenicPointCache.set(key, { ...cachedRecord, verified: false });
-        });
-    } catch (error) {
-      console.warn('寫入景點座標失敗：', error);
-    }
-
+    // 不再從前端寫回 Firestore scenic_points：安全規則明定該集合僅後端 crawler（service
+    // account）可寫，前端寫入永遠 permission-denied（先前每站失敗噴一條 console 錯誤）。
+    // 座標只保留在本頁的記憶體快取；正式資料由 crawler verify:places → export:local 維護。
+    // （順帶省下原本每站一次的 OpenData 驗證請求，加快行程載入。）
     return scenicPointCache.get(key);
   }
 
@@ -1190,19 +1180,21 @@
     if (!Array.isArray(stops) || !stops.length) return stops;
     const ready = await waitForPlacesService();
     if (!ready) { console.warn('[coord reverify] Places 服務未就緒，略過座標重驗'); return stops; }
-    let snapped = 0, checked = 0;
-    for (const stop of stops) {
-      // 座標已鎖定的站（本島港/離島返程港）不重驗，避免被「超出離島範圍」誤判而搬到島上
-      if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
-      // 已驗證過的站不再每次載入都重打 Places（座標不會自己變）；只有新生成/重新規劃的站才驗
-      if (stop.coordVerified) continue;
+    let snapped = 0;
+
+    // 需要重驗的站：排除端點/鎖定座標/已驗證（各站互相獨立 → 可平行）
+    const targets = stops.filter((stop) =>
+      stop && stop.type !== 'start' && stop.type !== 'end'
+      && !stop._lockedCoordinates && !stop.coordVerified
+      && String(stop.name || '').trim());
+
+    // 單站驗證（原本序列迴圈的每輪工作，continue 改為 return）
+    const verifyOne = async (stop) => {
       const name = String(stop.name || '').trim();
-      if (!name) continue;
-      checked++;
       const cur = readStopCoordinates(stop);
       let cand = null;
       let renamed = false;
-      try { cand = await searchStrictPlaceCandidate(name, stop, region, title); } catch (e) { continue; }
+      try { cand = await searchStrictPlaceCandidate(name, stop, region, title); } catch (e) { return; }
       if (!cand || !cand.position) {
         // 嚴格配對失敗（多為 AI 取的別名，如「白色陋屋」實為「台東阿伯小白屋」）：
         // 信心控管的模糊退回——信任 Google 對該名稱的最佳 in-region 候選，連同名稱一起校正。
@@ -1215,10 +1207,10 @@
           renamed = true;
         } else {
           console.info('[coord reverify] 無嚴格配對候選：', name);
-          continue;
+          return;
         }
       }
-      if (isCoordinatesOutsideRegion(cand.position, region, name)) { console.info('[coord reverify] 候選超出範圍，略過：', name, cand.name); continue; }
+      if (isCoordinatesOutsideRegion(cand.position, region, name)) { console.info('[coord reverify] 候選超出範圍，略過：', name, cand.name); return; }
       const dist = cur ? measureDistanceMeters(cur, cand.position) : Infinity;
       if (!cur || dist > 800 || renamed) {
         stop.lat = cand.position.lat;
@@ -1236,8 +1228,15 @@
       }
       // 標記此站已驗證（連同 stops 一起存檔）→ 下次載入直接跳過，不再重打 Places
       stop.coordVerified = true;
+    };
+
+    // 分批平行（每批 5 站）：整段耗時從「逐站排隊」降為「站數/5 輪」；
+    // 批次上限是為了不觸發 Places QPS 限流，勿一次全開。
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < targets.length; i += BATCH_SIZE) {
+      await Promise.all(targets.slice(i, i + BATCH_SIZE).map(verifyOne));
     }
-    console.info(`[coord reverify] 完成：檢查 ${checked} 站、校正 ${snapped} 站`);
+    console.info(`[coord reverify] 完成：檢查 ${targets.length} 站、校正 ${snapped} 站`);
     return stops;
   }
 
@@ -1657,7 +1656,24 @@
         if ((!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
-             if (doc.exists) { const fresh = doc.data(); if (!fresh.id) fresh.id = doc.id; trip = trip ? { ...trip, ...fresh } : fresh; }
+             if (doc.exists) {
+               const fresh = doc.data();
+               if (!fresh.id) fresh.id = doc.id;
+               // 訪客唯讀連結：必須帶對 shareToken 且行程開放分享，否則不得載入
+               // （tripId 可被推測；token 是不可猜的門檻，前端亦需驗證，不能只依賴 Firestore 規則）
+               if (isGuestView && fresh.collab) {
+                 const paramToken = params.get('token') || '';
+                 const tokenOk = fresh.shareToken && paramToken === fresh.shareToken;
+                 if (!fresh.guestReadable || !tokenOk) {
+                   document.body.innerHTML = '<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#37506e;">'
+                     + '<div style="font-size:40px;margin-bottom:12px;">🔒</div>'
+                     + '<h2 style="margin:0 0 8px;">分享連結無效</h2>'
+                     + '<p style="color:#8fa4b8;">這個分享連結已失效或無權限查看，請向擁有者索取新的連結。</p></div>';
+                   return;
+                 }
+               }
+               trip = trip ? { ...trip, ...fresh } : fresh;
+             }
            } catch (err) {
              console.warn('Failed to fetch trip from Firebase:', err);
            }
@@ -1680,6 +1696,8 @@
           currentTripOwnerName = trip.ownerName || trip.organizer || '';
           currentTripShareToken = trip.shareToken || '';
           currentTripDepartureDate = (trip.wizardData && trip.wizardData.departureDate) || trip.departureDate || '';
+          // 多人即時同步：訂閱這份共編行程，任一成員（owner/editor）改動後所有人立即重繪
+          startCollabTripLiveSync(trip.id || tripId);
         }
 
         if (trip) {
@@ -1773,6 +1791,7 @@
                     mapPinId: assignedPinId,
                     scenicCoordinates: lockedPos, _lockedCoordinates: lockedPos,
                     placeId: s.placeId || null,
+                    coordVerified: s.coordVerified || false, // 旗標必須跟著載入，否則存檔歸零、下次又全站重驗
                     businessHours: s.businessHours || null,
                     desc: s.desc || '',
                     isMergedAttraction: s.isMergedAttraction || false,
@@ -1851,6 +1870,7 @@
                 mapPinId: assignedPinId,
                 scenicCoordinates: resolvedPosition,
                 placeId: s.placeId || scenicRecord?.placeId || null,
+                coordVerified: s.coordVerified || false, // 旗標必須跟著載入，否則存檔歸零、下次又全站重驗
                 businessHours: s.businessHours || scenicRecord?.businessHours || null,
                 desc: (scenicRecord?.desc || s.desc || ''),
                 isMergedAttraction: s.isMergedAttraction || false,
@@ -2042,8 +2062,10 @@
   }
 
   function shouldMergeAdjacentStops(a, b) {
-    const aN = normalizeText(a.name || '');
-    const bN = normalizeText(b.name || '');
+    // 「火車站→車站」正規化：「台東火車站」與「台東車站」是同一地，否則會出現
+    // 起點車站旁再排一個同站「景點」、之間還走 15 分鐘的荒謬行程。
+    const aN = normalizeText(a.name || '').replace(/火車站/g, '車站');
+    const bN = normalizeText(b.name || '').replace(/火車站/g, '車站');
     // 若較短的名稱（≥3字）是另一個名稱的子字串，視為同地點
     const shorter = aN.length <= bN.length ? aN : bN;
     if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
@@ -2062,6 +2084,15 @@
       const curr = stops[i];
       const next = i + 1 < stops.length ? stops[i + 1] : null;
       if (next && shouldMergeAdjacentStops(curr, next)) {
+        const currIsEndpoint = curr.type === 'start' || curr.type === 'end';
+        const nextIsEndpoint = next.type === 'start' || next.type === 'end';
+        if (currIsEndpoint !== nextIsEndpoint) {
+          // 端點旁邊排了同一地點的「景點」（如起點台東車站後又出現台東火車站）：
+          // 保留端點原樣（名稱/型別/0 停留），直接丟掉重複站——端點不該被改名或加停留時間。
+          result.push(currIsEndpoint ? curr : next);
+          i += 2;
+          continue;
+        }
         const currDur = curr.duration || curr.stayMin || 30;
         const nextDur = next.duration || next.stayMin || 30;
         // 保留較具描述性（較長）的名稱，合併停留時間
@@ -2840,11 +2871,11 @@
     const vertex = getVertexConfig();
     try {
       const endpoint = vertex.ready
-        ? `https://aiplatform.googleapis.com/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
+        ? `${VERTEX_HOST}/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
         : `${GEMINI_API_BASE}/${imageModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await vertexAuthHeaders(),
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: {
@@ -2853,6 +2884,7 @@
           }
         })
       });
+      if (res.status === 401 || res.status === 429) throw vertexHttpError(res.status, '圖片生成失敗');
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error?.message || `HTTP ${res.status}`);
@@ -3657,9 +3689,15 @@
 
   function reorderReplanStops(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) return;
+    if (collabReadOnly) return; // 唯讀成員／訪客不可調整順序
     const sourceIndex = replanStops.findIndex((item) => item.id === sourceId);
     const targetIndex = replanStops.findIndex((item) => item.id === targetId);
     if (sourceIndex < 0 || targetIndex < 0) return;
+
+    // 起點（出發）與終點（返回）是行程錨點：本身不可被搬移，其他站也不可移到起點之前
+    // 或終點之後，否則會出現「先返回、後出發」這類錯亂順序（且在共編行程會被存回、推送給所有成員）。
+    const isAnchor = (s) => s && (s.type === 'start' || s.type === 'end');
+    if (isAnchor(replanStops[sourceIndex]) || isAnchor(replanStops[targetIndex])) return;
 
     const [moved] = replanStops.splice(sourceIndex, 1);
     replanStops.splice(targetIndex, 0, moved);
@@ -3962,6 +4000,7 @@
   }
 
   function removeStopById(stopId) {
+    if (collabReadOnly) return; // 唯讀成員／訪客不可刪除站點（變更也不會寫回共用行程）
     if (replanStops.length <= 1) {
       window.alert('至少需要保留一個景點。');
       return;
@@ -4185,11 +4224,45 @@
 
         <div class="tripfb-summary">📍 本趟已到訪 ${visitedCount} / ${totalStops} 個景點</div>
 
+        <div id="tripfb-others"></div>
+
         <div class="tripfb-actions">
           <button type="button" class="tripfb-btn ghost" onclick="closeTripFeedback()">稍後</button>
           <button type="button" class="tripfb-btn primary" id="tripfb-submit" ${canSubmit ? '' : 'disabled'} onclick="submitTripFeedback()">送出回饋</button>
         </div>
       </div>`;
+    loadOthersFeedback(); // 非同步載入「大家的回饋」（個人行程＝自己的；共編行程＝所有成員的）
+  }
+
+  // 讀取此行程已收到的回饋（micro_trips/{id}.feedback map）並顯示在評分視窗內。
+  // 共編行程的成員都讀得到（安全規則的成員讀取權），所以旅伴互相看得到彼此的評分與留言。
+  async function loadOthersFeedback() {
+    const host = document.getElementById('tripfb-others');
+    if (!host) return;
+    if (!(firebaseEnabled && firebaseDb && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY')) { host.innerHTML = ''; return; }
+    host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">載入大家的回饋中…</div>';
+    try {
+      const doc = await firebaseDb.collection('micro_trips').doc(currentItineraryId).get();
+      const fb = (doc.exists && doc.data().feedback) || {};
+      const entries = Object.values(fb).filter(Boolean).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+      if (!entries.length) {
+        host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">🗣 這份行程還沒有任何回饋，送出第一則吧！</div>';
+        return;
+      }
+      const star = (n) => '★'.repeat(Math.max(0, Math.min(5, n || 0))) + '☆'.repeat(Math.max(0, 5 - (n || 0)));
+      host.innerHTML = `<div class="tripfb-label" style="margin-top:14px">🗣 大家的回饋（${entries.length}）</div>`
+        + entries.map((e) => `
+          <div style="border:1px solid #e3ecf5;border-radius:10px;padding:8px 10px;margin-top:6px;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+              <b>${escapeFeedbackText(e.name || e.email || '旅伴')}</b>
+              <span style="color:#e8a33d;letter-spacing:1px;">${star(e.tripRating)}</span>
+            </div>
+            <div style="color:#8fa4b8;font-size:12px;">AI 準確度 ${star(e.aiAccuracy)}${Number.isFinite(e.visitedCount) ? ` · 到訪 ${e.visitedCount}/${e.totalStops} 站` : ''}</div>
+            ${e.comment ? `<div style="margin-top:4px;color:#2b4c6b;white-space:pre-wrap;">${escapeFeedbackText(e.comment)}</div>` : ''}
+          </div>`).join('');
+    } catch (e) {
+      host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px;color:#9aa5b1;">（無法載入其他回饋）</div>';
+    }
   }
 
   function escapeFeedbackText(s) {
@@ -4356,6 +4429,132 @@
     document.body.style.paddingTop = '38px';
   }
 
+  // ── 共編行程即時同步（多人同看一份，別人改了立刻重繪）──
+  // 訂閱 micro_trips/{id}：收到遠端 stops 變更時，用「已存的驗證座標」輕量重建 replanStops
+  // 並重繪行程/看板/地圖，不重跑 Places 驗證管線。自己寫入的回音靠「內容簽名比對」跳過。
+  let collabLiveUnsub = null;
+  let collabLivePendingData = null;
+  let collabLiveRetryTimer = null;
+
+  // 行程內容簽名：涵蓋順序/站名/停留/交通/手動時間，用來判斷遠端資料是否與本地相同（＝自己的回音）
+  function collabStopsSignature(stops) {
+    return JSON.stringify((stops || []).map((s) => [
+      s.name || '', s.type || '',
+      Math.round(Number(s.stayMin) || 0),
+      s.transitMode || '', Math.round(Number(s.transitMin) || 0),
+      s.manualStartMin ?? null, s.manualEndMin ?? null
+    ]));
+  }
+
+  // 由 Firestore 存檔的 stops 輕量重建本地 stop 物件（座標一律用存檔值，不再查 Places）
+  function buildStopsFromCollabSnapshot(stops) {
+    const now = Date.now();
+    return (stops || []).map((s, idx) => {
+      const pos = readCoordinateObject(s._lockedCoordinates)
+        || readCoordinateObject(s.scenicCoordinates)
+        || readCoordinateObject(s);
+      return {
+        id: `stop-live-${now}-${idx}`,
+        emoji: s.emoji || '📍',
+        name: s.name || '景點',
+        type: s.type || null,
+        stayMin: resolveStopStayMin(s, 30),
+        transitMin: normalizeTransitMinutesValue(s.transitMin),
+        transitMode: normalizeTransitMode(s.transitMode),
+        mapPinId: s.mapPinId || null,
+        scenicCoordinates: s.scenicCoordinates || pos || null,
+        _lockedCoordinates: s._lockedCoordinates || null,
+        placeId: s.placeId || null,
+        businessHours: s.businessHours || null,
+        coordVerified: s.coordVerified || false,
+        desc: s.desc || '',
+        manualStartMin: s.manualStartMin ?? null,
+        manualEndMin: s.manualEndMin ?? null,
+        isMergedAttraction: s.isMergedAttraction || false,
+        mergedSubSpots: s.mergedSubSpots || null,
+        mergedRadiusMeters: s.mergedRadiusMeters || null,
+        mergedMemberCoords: s.mergedMemberCoords || null,
+        lat: pos ? Number(pos.lat) : (Number.isFinite(Number(s.lat)) ? Number(s.lat) : null),
+        lng: pos ? Number(pos.lng) : (Number.isFinite(Number(s.lng)) ? Number(s.lng) : null),
+        nearbyToiletLocations: s.nearbyToiletLocations || []
+      };
+    });
+  }
+
+  function applyCollabRemoteUpdate(data) {
+    // 使用者正在拖曳/修改視窗開著/本地變更還沒存回 → 先擱置，稍後再套用（避免蓋掉手上的操作）
+    if (draggingStopId || isModifyWindowOpen || persistTripDebounceTimer) {
+      collabLivePendingData = data;
+      clearTimeout(collabLiveRetryTimer);
+      collabLiveRetryTimer = setTimeout(() => {
+        const pending = collabLivePendingData;
+        collabLivePendingData = null;
+        if (pending) applyCollabRemoteUpdate(pending);
+      }, 2000);
+      return;
+    }
+    collabLivePendingData = null;
+
+    // 標題／成員資訊即時更新（角色被擁有者調整時，唯讀狀態跟著切換）
+    if (data.title && data.title !== currentTripTitle) {
+      currentTripTitle = data.title;
+      const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+      if (heroTitleEl) heroTitleEl.textContent = currentTripTitle;
+    }
+    if (data.members) {
+      currentTripMembers = data.members;
+      if (collabRole !== 'guest') {
+        let myEmail = '';
+        try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (_e) {}
+        const ekey = String(myEmail || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+        const mem = data.members[ekey];
+        const newRole = (mem && mem.role) || 'viewer';
+        if (newRole !== collabRole) {
+          collabRole = newRole;
+          const wasReadOnly = collabReadOnly;
+          collabReadOnly = !(newRole === 'owner' || newRole === 'editor');
+          const banner = document.getElementById('collabRoBanner');
+          if (!collabReadOnly && banner) { banner.remove(); document.body.style.paddingTop = ''; }
+          if (collabReadOnly && !banner) showCollabReadOnlyBanner(newRole);
+          if (wasReadOnly !== collabReadOnly && isReplanning) renderReplanBoard();
+        }
+      }
+      const membersView = document.getElementById('view-members');
+      if (membersView && membersView.classList.contains('active')) renderMembersView();
+    }
+
+    // stops 相同（多半是自己寫入的回音）就不重繪
+    if (!Array.isArray(data.stops) || !data.stops.length) return;
+    if (collabStopsSignature(data.stops) === collabStopsSignature(replanStops)) return;
+
+    replanStops = buildStopsFromCollabSnapshot(data.stops);
+    activeStopMenuId = null;
+    renderItineraryDisplay();
+    if (isReplanning) renderReplanBoard();
+    syncMapToCurrentTrip().catch(() => {});
+    const budgetView = document.getElementById('view-budget');
+    if (budgetView && budgetView.classList.contains('active')) renderBudgetTracker();
+    const who = data.lastEditedByName || data.lastEditedBy || '旅伴';
+    showVisitedToast(`🧑‍🤝‍🧑 ${who} 更新了行程，已同步最新內容`);
+  }
+
+  function startCollabTripLiveSync(tripId) {
+    if (!tripId || !firebaseEnabled || !firebaseDb) return;
+    if (collabLiveUnsub) { collabLiveUnsub(); collabLiveUnsub = null; }
+    let isFirstSnapshot = true;
+    collabLiveUnsub = firebaseDb.collection('micro_trips').doc(tripId).onSnapshot((snap) => {
+      // 第一個快照＝訂閱當下的初始狀態，initFromUrl 正在（或已經）用它跑完整載入管線；
+      // 這裡若套用會用「未後處理的原始 stops」蓋掉合併/校正後的結果，故跳過。
+      if (isFirstSnapshot) { isFirstSnapshot = false; return; }
+      if (snap.metadata && snap.metadata.hasPendingWrites) return; // 自己的本地寫入，等 commit
+      if (!snap.exists) {
+        showVisitedToast('⚠️ 這份共編行程已被擁有者刪除');
+        return;
+      }
+      applyCollabRemoteUpdate(snap.data() || {});
+    }, (err) => console.warn('共編即時同步中斷：', err));
+  }
+
   async function persistCurrentTripStops() {
     if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
 
@@ -4410,7 +4609,10 @@
       console.warn('Failed to persist trip stops to localStorage:', e);
     }
 
-    if (firebaseEnabled && firebaseDb) {
+    // 安全規則要求登入才能寫 micro_trips：未登入只存 localStorage（上方已存），
+    // 不打 Firebase，避免每次編輯都噴 permission-denied。
+    const _authed = typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser;
+    if (firebaseEnabled && firebaseDb && _authed) {
       try {
         // 取得登入者 email（與生成頁一致），供 loadState 的 userEmail 查詢能撈到此行程
         let userEmail = '';
@@ -4429,6 +4631,14 @@
         // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail
         if (userEmail) fbPatch.userEmail = userEmail;
         fbPatch.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
+        // 共編行程：標記這次變更是誰改的，讓其他成員的即時同步能顯示「XX 更新了行程」
+        if (currentTripIsCollab && userEmail) {
+          fbPatch.lastEditedBy = userEmail;
+          try {
+            const u2 = JSON.parse(localStorage.getItem('wai_user') || '{}');
+            fbPatch.lastEditedByName = (u2 && u2.currentUser && u2.currentUser.name) || userEmail;
+          } catch (_e) { fbPatch.lastEditedByName = userEmail; }
+        }
         // set+merge 會把含 "." 的 key 當字面欄位名，故改用巢狀物件寫 wizardData.transportMode
         if (hasVehiclePref) {
           fbPatch.wizardData = { ...(fbPatch.wizardData || {}), transportMode: vehiclePref };
@@ -4580,7 +4790,7 @@
     }
 
     listEl.innerHTML = schedule.map((stop) => `
-      <div class="replan-card ${activeStopMenuId === stop.id ? 'selected' : ''}" draggable="${isModifyWindowOpen && modifyTargetStopId === stop.id ? 'false' : 'true'}" data-stop-id="${stop.id}">
+      <div class="replan-card ${activeStopMenuId === stop.id ? 'selected' : ''}" draggable="${(collabReadOnly || stop.type === 'start' || stop.type === 'end' || (isModifyWindowOpen && modifyTargetStopId === stop.id)) ? 'false' : 'true'}" data-stop-id="${stop.id}">
         <div class="replan-handle">⋮⋮</div>
         <div class="replan-time">${minutesToClock(stop.start)} - ${minutesToClock(stop.end)}</div>
         <div class="replan-spot">
@@ -4593,8 +4803,8 @@
           <div class="replan-emoji">${stop.emoji}</div>
         </div>
         <div class="replan-inline-actions ${activeStopMenuId === stop.id ? 'active' : ''}">
-          <button class="replan-inline-btn" onclick="event.stopPropagation(); modifyStopById('${stop.id}')">✎ 修改</button>
-          <button class="replan-inline-btn delete" onclick="event.stopPropagation(); removeStopById('${stop.id}')">－ 刪除</button>
+          ${collabReadOnly ? '' : `<button class="replan-inline-btn" onclick="event.stopPropagation(); modifyStopById('${stop.id}')">✎ 修改</button>
+          <button class="replan-inline-btn delete" onclick="event.stopPropagation(); removeStopById('${stop.id}')">－ 刪除</button>`}
           <button class="replan-inline-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
         </div>
       </div>
@@ -4969,11 +5179,11 @@
 
     if (stackEl) {
       const avatars = members.slice(0, 5).map(m =>
-        `<div class="avatar" title="${(m.name || m.email || '')} · ${membersRoleLabel(m.role)}">${String(m.name || m.email || '?').slice(0, 1)}</div>`
+        `<div class="avatar" title="${escapeHtml((m.name || m.email || '') + ' · ' + membersRoleLabel(m.role))}">${escapeHtml(String(m.name || m.email || '?').slice(0, 1))}</div>`
       ).join('');
       const rows = members.map(m => {
         const isMe = String(m.email || '').toLowerCase().replace(/[^a-z0-9]/g, '_') === myKey;
-        return `${m.name || m.email}${isMe ? '（你）' : ''}：${membersRoleLabel(m.role)}`;
+        return `${escapeHtml(m.name || m.email)}${isMe ? '（你）' : ''}：${membersRoleLabel(m.role)}`;
       }).join('｜');
       stackEl.innerHTML = `${avatars}<div class="avatar-info"><div style="font-weight:600;font-size:16px;">你是${membersRoleLabel(myRole)}</div><div style="font-size:13px;color:var(--ink3);">${rows}</div></div>`;
     }
@@ -5340,7 +5550,26 @@
     const cfg = window.TRAVEL_APP_CONFIG || {};
     const apiKey = (cfg.VERTEX_API_KEY || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_KEY) || '').trim();
     const projectId = (cfg.VERTEX_PROJECT_ID || '').trim() || (window.localStorage.getItem(VERTEX_LOCAL_PROJECT) || '').trim();
-    return { apiKey, projectId, ready: !!(apiKey && projectId) };
+    // 代理模式下前端沒有金鑰也視為 ready（金鑰在伺服器）；直連模式仍需 apiKey + projectId。
+    const proxied = !!VERTEX_PROXY_BASE;
+    return { apiKey, projectId, proxied, ready: proxied || !!(apiKey && projectId) };
+  }
+
+  // 代理模式的 Vertex 呼叫需要登入（後端驗 Firebase ID token，防止陌生人燒 Vertex 額度）。
+  // 未登入時不帶 Authorization（後端回 401，由呼叫端顯示友善訊息）。
+  async function vertexAuthHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    try {
+      const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+      if (u) headers.Authorization = 'Bearer ' + (await u.getIdToken());
+    } catch (_e) { /* token 取失敗就不帶，讓後端 401 */ }
+    return headers;
+  }
+
+  function vertexHttpError(status, kind) {
+    if (status === 401) return new Error('請先登入，登入後才能使用 AI 生成功能。');
+    if (status === 429) return new Error('AI 請求過於頻繁，請休息一下再試。');
+    return new Error(`${kind}（${status}）`);
   }
 
   function initFirebaseIfConfigured() {
@@ -5387,6 +5616,8 @@
 
   async function logTripEvent(eventType, payload = {}) {
     if (!firebaseEnabled || !firebaseDb) return;
+    // 安全規則要求登入才能寫事件：未登入直接略過，避免每個操作都噴 permission-denied
+    if (typeof firebaseAuth === 'undefined' || !firebaseAuth || !firebaseAuth.currentUser) return;
     try {
       await firebaseDb
         .collection('travel_sessions')
@@ -6488,13 +6719,13 @@
 
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await vertexAuthHeaders(),
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData, livePoiHint) }] }],
           generationConfig: { responseMimeType: 'application/json', temperature: 0.8 }
         })
       });
-      if (!response.ok) throw new Error(`Vertex API 錯誤（${response.status}）`);
+      if (!response.ok) throw vertexHttpError(response.status, 'Vertex API 錯誤');
 
       const data = await response.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -6770,12 +7001,12 @@
 
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await vertexAuthHeaders(),
       body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
-      throw new Error(`Gemini API 失敗（${response.status}）`);
+      throw vertexHttpError(response.status, 'Gemini API 失敗');
     }
 
     const data = await response.json();
@@ -9877,6 +10108,21 @@
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   }
 
+  // 資安：把 Firebase 原始錯誤轉成「不可區分」的通用訊息（與 explore 相同邏輯）。
+  // 不可把 e.message 直接秀給使用者——錯誤差異會讓攻擊者列舉有效帳號（撞庫偵察）。
+  function authErrorMessage(e, kind) {
+    const code = (e && e.code) || '';
+    if (code === 'auth/too-many-requests') return '嘗試次數過多，帳號已暫時鎖定，請稍後再試。';
+    if (code === 'auth/network-request-failed') return '網路連線異常，請檢查網路後再試。';
+    if (kind === 'register') {
+      if (code === 'auth/email-already-in-use') return '這個 Email 無法使用，請改用其他信箱，或直接嘗試登入。';
+      if (code === 'auth/weak-password') return '密碼強度不足，請使用至少 8 個字元並混合英數。';
+      if (code === 'auth/invalid-email') return 'Email 格式不正確。';
+      return '註冊失敗，請稍後再試。';
+    }
+    return '帳號或密碼錯誤，請確認後再試。';
+  }
+
   window.doLogin = async function() {
     if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
     const emailEl = document.getElementById('loginEmail');
@@ -9890,7 +10136,7 @@
       feedbackToast('👋 歡迎回來！', 'green');
       window.closeLogin();
     } catch (e) {
-      feedbackToast(`登入失敗: ${e.message}`, 'red');
+      feedbackToast(authErrorMessage(e, 'login'), 'red');
     }
   };
 
@@ -9924,7 +10170,7 @@
       window.closeLogin();
       feedbackToast('您可至「我的微旅行」首頁設定個人偏好。', 'blue');
     } catch (e) {
-      feedbackToast(`註冊失敗: ${e.message}`, 'red');
+      feedbackToast(authErrorMessage(e, 'register'), 'red');
     }
   };
 
@@ -9960,7 +10206,9 @@
       }
       window.closeLogin();
     } catch (e) {
-      feedbackToast(`登入失敗: ${e.message}`, 'red');
+      // 社群登入取消/失敗：不洩漏原始錯誤
+      const code = (e && e.code) || '';
+      feedbackToast(code === 'auth/popup-closed-by-user' ? '已取消登入' : authErrorMessage(e, 'login'), 'red');
     }
   };
 
