@@ -4708,7 +4708,7 @@
         // 否則會用本機過期副本 merge 蓋掉擁有者剛改的角色/成員（#10 加入者權限狀態）。
         const { __saving, members: _m, memberEmails: _me, ownerEmail: _oe, ownerUid: _ou, ownerName: _on,
           role: _role, guestReadable: _gr, shareToken: _stk, inviteCode: _ivc, maxMembers: _mmx,
-          collabCreatedAt: _ccat, ...cleanLocal } = localTrip || {};
+          collabCreatedAt: _ccat, userEmail: _ue, ...cleanLocal } = localTrip || {};
         const fbPatch = localTrip
           ? { 
               ...cleanLocal, 
