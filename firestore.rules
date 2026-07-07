@@ -1,69 +1,74 @@
 rules_version = '2';
 
-// WanderAI — Firestore 安全規則（含多人共作 collab.js 所需）
+// WanderAI / TravelLink AI — Firestore 安全規則（雙端合併版：網頁 + Android）
+// 注意：這份是「網頁端 + Android 端」兩邊集合的合併結果，兩邊共用同一個 Firebase 專案、
+// 同一份規則。任一端只部署自己那半份，都會把對方的集合變成預設拒絕（曾發生：Android 版
+// 缺 invites/travel_sessions，導致網頁共編「Missing or insufficient permissions」）。
+// 修改後務必兩端對齊、只從這份部署。
 // 部署：Firebase Console → Firestore → 規則，或 `firebase deploy --only firestore:rules`
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function signedIn() { return request.auth != null; }
-    function myEmail() { return request.auth.token.email; }
-
-    // ── 使用者帳號／偏好：只能讀寫自己的 ──
-    match /users/{uid} {
-      allow read, write: if signedIn() && request.auth.uid == uid;
+    // ── 使用者個人資料：只能讀寫自己的 ──
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // ── 行程（單人 + 多人共作共用同一集合）──
+    // ── 協作群組 / 行程（單人 + 多人共作共用同一集合）──
+    // read/update 開放給所有登入者：Android 的 join-by-pin 與網頁的共編加入，
+    // 都需要「非成員」先查得到文件並把自己寫進 members。
     match /micro_trips/{tripId} {
-      // 讀：訪客唯讀（guestReadable）｜擁有者（userEmail）｜成員（email 在 memberEmails）
-      // 注意：成員分支「不可」加 `memberEmails is list` 型別檢查——單筆讀取沒問題，
-      // 但 array-contains「查詢」無法靜態證明型別，會讓 fetchMyCollabTrips 整個被拒
-      //（Failed to load collab trips: permission-denied）。`in` 遇缺欄位文件會自動 deny 該筆，安全不變。
-      allow read: if
-        (resource.data.guestReadable == true)
-        || (signedIn() && myEmail() == resource.data.userEmail)
-        || (signedIn() && myEmail() in resource.data.memberEmails);
-
-      // 建立：登入即可（owner 建立自己的行程 / 共用行程）
-      allow create: if signedIn();
-
-      // 更新：擁有者、既有成員，或「登入者加入共編行程」。
-      //   - 新成員第一次加入時還不在 memberEmails，故需 collab 這條才寫得進去（否則人數永遠不會增加）。
-      //   - viewer 不可改「行程內容」＝由前端 / v8 唯讀鎖把關，見 COLLAB.md 的限制說明。
-      allow update: if signedIn() && (
-        myEmail() == resource.data.userEmail
-        || myEmail() == resource.data.ownerEmail
-        || (resource.data.memberEmails is list && myEmail() in resource.data.memberEmails)
-        || (resource.data.collab == true)
+      allow create: if request.auth != null;
+      allow read, update: if request.auth != null;
+      // 刪除：uid 擁有者（共編行程有 ownerUid）或 email 擁有者（網頁一般行程只有 userEmail，
+      // 若只看 ownerUid 會把網頁端一般行程卡住刪不掉）。
+      allow delete: if request.auth != null && (
+        request.auth.uid == resource.data.ownerUid
+        || request.auth.token.email == resource.data.userEmail
+        || request.auth.token.email == resource.data.ownerEmail
       );
-
-      // 刪除：僅擁有者
-      allow delete: if signedIn() && (myEmail() == resource.data.userEmail || myEmail() == resource.data.ownerEmail);
+      // 在線狀態子集合
+      match /presence/{memberId} {
+        allow read, write: if request.auth != null;
+      }
     }
 
-    // ── 邀請碼 → 行程對應 ──
+    // ── 景點資料（App 會查詢；回饋流程可能更新統計）──
+    match /scenic_points/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // ── 營業時間快取（App 端讀寫）──
+    match /hours_cache/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // ── 使用者回饋 ──
+    match /feedback/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // ── 由 seeding script (admin SDK) 維護，App 端唯讀 ──
+    match /poi_knowledge/{docId} {
+      allow read: if request.auth != null;
+    }
+    match /custom_pois/{docId} {
+      allow read: if request.auth != null;
+    }
+
+    // ── 邀請碼 → 行程對應（網頁端共編「建立/加入」必需，缺這段會 permission-denied）──
     match /invites/{code} {
-      allow read:   if signedIn();          // 憑碼查 tripId 才能加入
-      allow create: if signedIn();          // 建立共用行程時寫入
-      allow update: if signedIn();          // 停用邀請碼（active=false）；細分由 App 控管
+      allow read:   if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
       allow delete: if false;
     }
 
-    // ── 既有快取集合（沿用）──
-    match /poi_cache/{doc} {
-      allow read: if true;
-      allow write: if signedIn();
-    }
-    match /scenic_points/{doc} {
-      allow read: if true;
-      allow write: if false;                // 只由後端 crawler（service account）寫入
-    }
-
-    // ── 行程操作事件記錄（analytics；logTripEvent 只寫不讀、append-only）──
+    // ── 行程操作事件記錄（logTripEvent，只新增不可讀改；封閉測試分析用）──
     match /travel_sessions/{sessionId} {
-      allow read, write: if false;          // session 父文件本身不直接使用
+      allow read, write: if false;
       match /events/{eventId} {
-        allow create: if signedIn();        // 登入者記錄行程操作事件（防匿名灌入）
+        allow create: if request.auth != null;
         allow read, update, delete: if false;
       }
     }
