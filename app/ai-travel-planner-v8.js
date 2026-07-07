@@ -1813,6 +1813,7 @@
                     mergedRadiusMeters: s.mergedRadiusMeters || null,
                     mergedMemberCoords: s.mergedMemberCoords || null,
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
+                    manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
                     checkedInAt: s.checkedInAt || null
                   };
                 }
@@ -1895,6 +1896,7 @@
                 lat: _pos.lat,
                 lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || [],
+                manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
                 checkedInAt: s.checkedInAt || null
               };
             }));
@@ -4702,7 +4704,11 @@
         // 用 set(merge) 取代 update()：文件不存在時自動建立（self-heal），存在時只合併傳入欄位。
         // 若是首次建立，帶入 localStorage trip 的頂層核心欄位（id/title/region/wizardData/createdAt…），
         // 避免 Firebase 內留下殘缺文件，且確保 createdAt 存在讓 loadState 的 orderBy 查詢能撈到。
-        const { __saving, ...cleanLocal } = localTrip || {};
+        // 共編結構欄位（成員/角色/擁有者/邀請/分享）由 collab.js 專管，改行程內容的 persist 不可寫回，
+        // 否則會用本機過期副本 merge 蓋掉擁有者剛改的角色/成員（#10 加入者權限狀態）。
+        const { __saving, members: _m, memberEmails: _me, ownerEmail: _oe, ownerUid: _ou, ownerName: _on,
+          role: _role, guestReadable: _gr, shareToken: _stk, inviteCode: _ivc, maxMembers: _mmx,
+          collabCreatedAt: _ccat, ...cleanLocal } = localTrip || {};
         const fbPatch = localTrip
           ? { 
               ...cleanLocal, 
@@ -4718,8 +4724,9 @@
               currentStopIndex: currentStopIndex,
               startedAt: currentTripStartedAt
             };
-        // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail
-        if (userEmail) fbPatch.userEmail = userEmail;
+        // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail。
+        // 共編行程不由 persist 改 userEmail：否則 editor 存檔會把擁有者 email 換成自己（連帶影響刪除權限）。
+        if (userEmail && !currentTripIsCollab) fbPatch.userEmail = userEmail;
         fbPatch.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
         // 共編行程：標記這次變更是誰改的，讓其他成員的即時同步能顯示「XX 更新了行程」
         if (currentTripIsCollab && userEmail) {
