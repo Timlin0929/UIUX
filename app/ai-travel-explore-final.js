@@ -3171,8 +3171,22 @@ function showMainView(view) {
 // ══════════════════════════════════════════════════
 function renderUserMenu() {
   const wrap = document.getElementById('userMenuWrap');
+  // 「📱 流程碼進入」只在登入後顯示（加入共編需要已登入帳號）
+  const journeyBtn = document.getElementById('journeyJoinBtn');
+  if (journeyBtn) journeyBtn.style.display = isLoggedIn ? '' : 'none';
   if (!isLoggedIn) {
-    wrap.innerHTML = `<button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>`;
+    // 桌機顯示「登入/註冊」按鈕；手機改用漢堡（☰）把導覽與動作收進下拉選單
+    wrap.innerHTML = `
+      <button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>
+      <button class="user-avatar-btn hamburger-btn" onclick="toggleUserDropdown()" aria-label="選單" title="選單">☰</button>
+      <div class="user-dropdown" id="userDropdown">
+        <div class="user-dd-item dd-mobile-only" onclick="showMainView('explore');toggleUserDropdown()">🧭 探索</div>
+        <div class="user-dd-item dd-mobile-only" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行</div>
+        <div class="user-dd-item dd-mobile-only" onclick="location.href='ai-travel-planner-v8.html'">✈️ 行程編輯</div>
+        <div class="user-dd-item dd-mobile-only" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
+        <div class="user-dd-sep dd-mobile-only"></div>
+        <div class="user-dd-item dd-mobile-only" onclick="openLogin();toggleUserDropdown()">👤 登入 / 註冊</div>
+      </div>`;
   } else {
     const u = currentUser || {};
     // 僅 Email/密碼帳號顯示「修改密碼」（社群登入無密碼）
@@ -3187,8 +3201,11 @@ function renderUserMenu() {
           <div class="user-dropdown-name">${u.name}</div>
           <div class="user-dropdown-email">${u.email}</div>
         </div>
+        <div class="user-dd-item dd-mobile-only" onclick="showMainView('explore');toggleUserDropdown()">🧭 探索</div>
         <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:13px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
+        <div class="user-dd-item dd-mobile-only" onclick="location.href='ai-travel-planner-v8.html'">✈️ 行程編輯</div>
         <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
+        <div class="user-dd-item dd-mobile-only" onclick="openJourneyJoin();toggleUserDropdown()">📱 流程碼進入</div>
         <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>
         <div class="user-dd-sep"></div>
         <div class="user-dd-item" onclick="openPrefWizard();toggleUserDropdown()">🎯 修改個人喜好</div>
