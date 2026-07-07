@@ -48,6 +48,9 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 /* login prompt */
 .login-prompt-btn{padding:7px 16px;border-radius:8px;border:1.5px solid var(--accent);background:transparent;color:var(--accent);font-size:17px;font-family:inherit;cursor:pointer;font-weight:500;transition:all .2s;}
 .login-prompt-btn:hover{background:var(--accent);color:#fff;}
+/* 漢堡觸發鈕與下拉內「手機才顯示」的收納項：桌機一律隱藏，手機斷點才打開 */
+.hamburger-btn{display:none;border:none;font-family:inherit;}
+.dd-mobile-only{display:none;}
 
 /* ─── HERO STRIP ─── */
 .hero-strip{background:var(--accent);padding:36px 32px 30px;display:flex;align-items:center;justify-content:space-between;gap:24px;}
@@ -782,4 +785,107 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   .explore-layout{grid-template-columns:1fr;}
   .explore-sidebar{display:none;}
   .hero-stats{display:none;}
+}
+
+/* ═══ 手機（≤700px）完整版面：topbar 換行、feed 單欄、所有彈窗窄螢幕收斂 ═══ */
+@media(max-width:700px){
+  body{font-size:16px;}
+
+  /* TOPBAR（漢堡版）：僅保留 logo＋搜尋＋頭像/漢堡；導覽與動作按鈕收進下拉選單 */
+  .topbar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 14px;gap:8px;}
+  .topbar-logo{order:0;font-size:22px;}
+  /* 頂列導覽與動作按鈕在手機隱藏，改由漢堡選單提供 */
+  .topbar-nav{display:none;}
+  .topbar-new-btn{display:none;}
+  #journeyJoinBtn{display:none !important;} /* 覆蓋 JS 設的 inline display，改由選單內「流程碼進入」提供 */
+  /* 頭像/漢堡靠右；position:static → 下拉以 .topbar 為基準靠右，穩定不溢出 */
+  .user-menu-wrap{order:1;margin-left:auto;position:static;}
+  .user-avatar-btn{width:42px;height:42px;font-size:22px;}
+  /* 登出時用漢堡取代「登入/註冊」按鈕（登入項移進選單） */
+  .hamburger-btn{display:inline-flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--ink);width:42px;height:42px;border-radius:50%;font-size:22px;cursor:pointer;}
+  .login-prompt-btn{display:none;}
+  /* 搜尋自成一列 */
+  .topbar-search{order:3;width:100%;flex:1 1 100%;max-width:none;margin-left:0;}
+  .topbar-search input{min-height:42px;font-size:16px;}
+  /* 下拉：以 topbar 為基準固定在其下方、靠右 12px、不超過視窗寬；顯示收納的功能項 */
+  .user-dropdown{position:absolute;top:calc(100% + 4px);right:12px;left:auto;min-width:220px;max-width:calc(100vw - 24px);}
+  .dd-mobile-only{display:flex;}
+  .user-dd-sep.dd-mobile-only{display:block;}
+
+  /* HERO：直向堆疊、統計數字隱藏、按鈕平均分配 */
+  .hero-strip{flex-direction:column;align-items:flex-start;padding:26px 16px 22px;gap:14px;}
+  .hero-strip-text p{font-size:15px;}
+  .hero-btns{flex-wrap:wrap;width:100%;margin-top:14px;}
+  .hero-btn-primary,.hero-btn-secondary{flex:1 1 auto;min-height:46px;font-size:16px;}
+  .hero-stats{display:none;}
+
+  /* 篩選列：橫向捲動、省略排序文字標籤 */
+  .filter-bar{padding:0 12px;}
+  .filter-tab{padding:12px 12px;font-size:15px;}
+  .sort-wrap{padding-left:8px;}
+  .sort-label{display:none;}
+
+  /* 新聞卡片：縮窄 */
+  .news-section{padding:20px 14px 0;}
+  .news-title{font-size:22px;}
+  .news-card{min-width:220px;}
+
+  /* 探索 feed：單欄 */
+  .explore-layout{grid-template-columns:1fr;}
+  .explore-sidebar{display:none;}
+  .trips-section{padding-left:14px;padding-right:14px;}
+  .trips-grid{grid-template-columns:1fr;gap:16px;}
+
+  /* 彈窗共通：縮小外距 */
+  .overlay{padding:12px;}
+
+  /* 社群行程預覽 modal */
+  .preview-modal{max-width:100%;border-radius:16px;max-height:94vh;}
+  .pm-header{padding:20px 18px 16px;}
+  .pm-title{font-size:24px;padding-right:34px;}
+  .pm-stats{gap:14px;}
+  .pm-body{padding:16px 18px;}
+  .pm-footer{padding:14px 18px;flex-wrap:wrap;}
+  .pm-copy-btn{flex:1 1 100%;order:3;min-height:46px;}
+  .pm-like-btn{min-height:46px;}
+
+  /* 登入 modal */
+  .login-modal{padding:24px 20px;border-radius:16px;}
+  .lm-title{font-size:26px;}
+  .lm-sub{font-size:15px;margin-bottom:18px;}
+  .lm-field input,.lm-submit,.lm-social-btn{min-height:46px;}
+  .mode-choice-cards{grid-template-columns:1fr;}
+
+  /* 加入共編 modal */
+  .journey-modal{padding:24px 20px;border-radius:16px;}
+  .journey-title{font-size:26px;}
+  .journey-actions{flex-direction:column;}
+  .journey-code-row input{min-height:46px;}
+
+  /* 分享行程檢視 modal */
+  .journey-itinerary-modal{max-width:100%;border-radius:16px;}
+  .journey-itinerary-hero{padding:22px 18px 18px;}
+  .journey-itinerary-title{font-size:28px;}
+  .journey-itinerary-meta{grid-template-columns:1fr 1fr;padding:14px 18px;}
+  .journey-itinerary-body{padding:18px 18px 6px;}
+  .journey-itinerary-footer{padding:14px 18px 20px;flex-direction:column;}
+
+  .copy-success-modal{padding:24px 20px;}
+  .collab-panel{max-width:100%;}
+  .gen-container{width:calc(100vw - 24px);}
+
+  /* 建立行程精靈：改單欄、步驟兩排、內距收斂 */
+  .wizard-modal{max-width:100%;max-height:94vh;border-radius:18px;}
+  .wizard-header{padding:20px 18px;}
+  .wizard-title{font-size:26px;}
+  .wizard-sub{font-size:14px;}
+  .wizard-badge{font-size:13px;padding:6px 12px;}
+  .wizard-body{grid-template-columns:1fr;padding:12px;gap:12px;}
+  .wizard-steps{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .wizard-form{padding:16px;}
+  .wizard-field input,.wizard-field select,.wizard-field textarea{min-height:46px;}
+  .wizard-nav{padding:14px 16px 16px;}
+  .wizard-btn{min-height:46px;font-size:16px;padding:12px 16px;}
+  .wizard-flow-wrap{padding:16px;min-height:auto;}
+  .wizard-flow-title{font-size:26px;}
 }
