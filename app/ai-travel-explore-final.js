@@ -3698,8 +3698,8 @@ let mtSortMode = (() => {
   return ['date_desc', 'date_asc', 'region', 'status', 'collab'].includes(m) ? m : 'date_desc';
 })();
 let mtSearchQuery = '';
-const MT_STATUS_LABEL = { planning: '規劃中', upcoming: '即將出發', copied: '已複製' };
-const MT_STATUS_ORDER = { planning: 0, upcoming: 1, copied: 2 };
+const MT_STATUS_LABEL = { ongoing: '進行中', planning: '規劃中', upcoming: '即將出發', completed: '已完成', copied: '已複製' };
+const MT_STATUS_ORDER = { ongoing: 0, planning: 1, upcoming: 2, completed: 3, copied: 4 };
 function mtTs(s) { const n = new Date(String(s || '').replace(/-/g, '/')).getTime(); return Number.isFinite(n) ? n : 0; }
 // days 可能是純數字（社群複製，如 1）或已含單位的字串（精靈產生，如「8小時」「2天」「兩天一夜」）。
 // 純數字才補「天」，已含單位就原樣顯示，避免出現「8小時天」。
@@ -3711,12 +3711,17 @@ function mtDurationLabel(d) {
 function sortMyTripsList(list, mode) {
   const a = list.slice();
   switch (mode) {
-    case 'date_asc': return a.sort((x, y) => mtTs(x.createdAt) - mtTs(y.createdAt));
-    case 'region':   return a.sort((x, y) => String(x.region || '').localeCompare(String(y.region || ''), 'zh-Hant'));
-    case 'status':   return a.sort((x, y) => (MT_STATUS_ORDER[x.status] ?? 9) - (MT_STATUS_ORDER[y.status] ?? 9));
-    case 'collab':   return a.sort((x, y) => (y.collab ? 1 : 0) - (x.collab ? 1 : 0));
-    default:         return a.sort((x, y) => mtTs(y.createdAt) - mtTs(x.createdAt)); // date_desc
+    case 'date_asc': a.sort((x, y) => mtTs(x.createdAt) - mtTs(y.createdAt)); break;
+    case 'region':   a.sort((x, y) => String(x.region || '').localeCompare(String(y.region || ''), 'zh-Hant')); break;
+    case 'status':   a.sort((x, y) => (MT_STATUS_ORDER[x.status] ?? 9) - (MT_STATUS_ORDER[y.status] ?? 9)); break;
+    case 'collab':   a.sort((x, y) => (y.collab ? 1 : 0) - (x.collab ? 1 : 0)); break;
+    default:         a.sort((x, y) => mtTs(y.createdAt) - mtTs(x.createdAt)); // date_desc
   }
+  // 「進行中」行程一律優先置頂（不論排序模式），讓使用者一眼回到正在跑的行程。
+  // Array.sort 穩定 + filter 保序，故各群組內原本排序不受影響。
+  const ongoing = a.filter(t => t.status === 'ongoing');
+  const rest = a.filter(t => t.status !== 'ongoing');
+  return ongoing.concat(rest);
 }
 function filterMyTripsList(list, q) {
   q = String(q || '').trim().toLowerCase();
@@ -3777,7 +3782,7 @@ function renderMyTrips() {
     return;
   }
 
-  const statusHtml = (s) => s === 'planning' ? '✏️ 規劃中' : s === 'upcoming' ? '✈️ 即將出發' : '📋 複製的行程';
+  const statusHtml = (s) => s === 'ongoing' ? '⚡ 進行中' : s === 'planning' ? '✏️ 規劃中' : s === 'upcoming' ? '✈️ 即將出發' : s === 'completed' ? '🎉 已完成' : '📋 複製的行程';
   const cards = list.map(t => `
     <div class="my-trip-card">
       <div class="mt-topbar ${t.cc || 'c0'}"></div>
