@@ -7,6 +7,9 @@
   let collabReadOnly = false; // 多人共作：viewer / 訪客唯讀模式（變更不寫回共用行程）
   let collabRole = '';
   let currentTripIsCollab = false;
+  let currentTripStatus = 'planning'; // 'planning' | 'ongoing' | 'completed'
+  let currentStopIndex = -1;
+  let currentTripStartedAt = null;
   let currentTripMembers = null;   // 共編成員 map（members[ekey]）
   let currentTripOwnerName = '';
   let currentTripShareToken = '';
@@ -1704,12 +1707,23 @@
           localStorage.setItem(ACTIVE_TRIP_LOCAL_KEY, trip.id);
           currentItineraryId = trip.id;
           currentTripTitle = trip.title || trip.aiTitle || '微旅行';
+          currentTripStatus = trip.status || 'planning';
+          currentStopIndex = Number.isInteger(trip.currentStopIndex) ? trip.currentStopIndex : -1;
+          currentTripStartedAt = trip.startedAt || null;
           tripSessionId = `${currentItineraryId}-${Date.now()}`;
           if (trip.inviteCode) currentInviteCode = trip.inviteCode;
           
           // Update Titles in DOM immediately
           const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
-          if (heroTitleEl) heroTitleEl.textContent = currentTripTitle;
+          if (heroTitleEl) {
+            let statusSuffix = '';
+            if (currentTripStatus === 'ongoing') {
+              statusSuffix = ' <span class="hero-status-badge ongoing">⚡ 進行中</span>';
+            } else if (currentTripStatus === 'completed') {
+              statusSuffix = ' <span class="hero-status-badge completed">🎉 已完成</span>';
+            }
+            heroTitleEl.innerHTML = escapeHtml(currentTripTitle) + statusSuffix;
+          }
           const bpTitleEl = document.querySelector('.boarding-pass .bp-top > div:nth-child(3)');
           if (bpTitleEl) bpTitleEl.textContent = currentTripTitle;
           
@@ -1798,7 +1812,8 @@
                     mergedSubSpots: s.mergedSubSpots || null,
                     mergedRadiusMeters: s.mergedRadiusMeters || null,
                     mergedMemberCoords: s.mergedMemberCoords || null,
-                    lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: []
+                    lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
+                    checkedInAt: s.checkedInAt || null
                   };
                 }
               }
@@ -1879,7 +1894,8 @@
                 mergedMemberCoords: s.mergedMemberCoords || null,
                 lat: _pos.lat,
                 lng: _pos.lng,
-                nearbyToiletLocations: s.nearbyToiletLocations || []
+                nearbyToiletLocations: s.nearbyToiletLocations || [],
+                checkedInAt: s.checkedInAt || null
               };
             }));
             
@@ -4041,6 +4057,14 @@
   // 給「開始行程」後續完成用的公開介面：自動將整趟行程的景點標為「去過了」
   window.markTripAsCompleted = function() {
     if (!replanStops || !replanStops.length) return feedbackToast('沒有可記錄的行程', 'orange');
+    
+    currentTripStatus = 'completed';
+    updateLocalTripField(currentItineraryId, 'status', 'completed');
+
+    if (typeof logTripEvent === 'function') {
+      logTripEvent('trip_completed');
+    }
+
     let addedCount = 0;
     replanStops.forEach(stop => {
       if (stop.type !== 'start' && stop.type !== 'end' && stop.name) {
@@ -4055,12 +4079,24 @@
         }
       }
     });
+
+    // Update hero title immediately
+    const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+    if (heroTitleEl) {
+      heroTitleEl.innerHTML = escapeHtml(currentTripTitle) + ' <span class="hero-status-badge completed">🎉 已完成</span>';
+    }
+
     if (addedCount > 0) {
       feedbackToast(`🎉 行程已完成！自動將 ${addedCount} 個景點加入去過清單。`, 'green');
       if (document.getElementById('travellog-list')) renderTravelLog();
     } else {
       feedbackToast('此行程的景點皆已記錄過。', 'blue');
     }
+
+    persistCurrentTripStops();
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+
     // 完成行程後邀請使用者評分回饋（B1）；稍微延遲讓完成 toast 先顯示
     setTimeout(() => { if (typeof window.openTripFeedback === 'function') window.openTripFeedback(true); }, 900);
   };
@@ -4436,13 +4472,14 @@
   let collabLivePendingData = null;
   let collabLiveRetryTimer = null;
 
-  // 行程內容簽名：涵蓋順序/站名/停留/交通/手動時間，用來判斷遠端資料是否與本地相同（＝自己的回音）
+  // 行程內容簽名：涵蓋順序/站名/停留/交通/手動時間/打卡時間，用來判斷遠端資料是否與本地相同（＝自己的回音）
   function collabStopsSignature(stops) {
     return JSON.stringify((stops || []).map((s) => [
       s.name || '', s.type || '',
       Math.round(Number(s.stayMin) || 0),
       s.transitMode || '', Math.round(Number(s.transitMin) || 0),
-      s.manualStartMin ?? null, s.manualEndMin ?? null
+      s.manualStartMin ?? null, s.manualEndMin ?? null,
+      s.checkedInAt ?? null
     ]));
   }
 
@@ -4476,7 +4513,8 @@
         mergedMemberCoords: s.mergedMemberCoords || null,
         lat: pos ? Number(pos.lat) : (Number.isFinite(Number(s.lat)) ? Number(s.lat) : null),
         lng: pos ? Number(pos.lng) : (Number.isFinite(Number(s.lng)) ? Number(s.lng) : null),
-        nearbyToiletLocations: s.nearbyToiletLocations || []
+        nearbyToiletLocations: s.nearbyToiletLocations || [],
+        checkedInAt: s.checkedInAt || null
       };
     });
   }
@@ -4496,11 +4534,38 @@
     collabLivePendingData = null;
 
     // 標題／成員資訊即時更新（角色被擁有者調整時，唯讀狀態跟著切換）
+    let hasStatusOrIndexChange = false;
+    if (data.status && data.status !== currentTripStatus) {
+      currentTripStatus = data.status;
+      updateLocalTripField(currentItineraryId, 'status', currentTripStatus);
+      hasStatusOrIndexChange = true;
+    }
+    if (data.currentStopIndex !== undefined && data.currentStopIndex !== currentStopIndex) {
+      currentStopIndex = data.currentStopIndex;
+      updateLocalTripField(currentItineraryId, 'currentStopIndex', currentStopIndex);
+      hasStatusOrIndexChange = true;
+    }
+    if (data.startedAt !== undefined && data.startedAt !== currentTripStartedAt) {
+      currentTripStartedAt = data.startedAt;
+      updateLocalTripField(currentItineraryId, 'startedAt', currentTripStartedAt);
+    }
+
     if (data.title && data.title !== currentTripTitle) {
       currentTripTitle = data.title;
-      const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
-      if (heroTitleEl) heroTitleEl.textContent = currentTripTitle;
     }
+
+    // Always update hero title status badge if title or status changed
+    const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+    if (heroTitleEl) {
+      let statusSuffix = '';
+      if (currentTripStatus === 'ongoing') {
+        statusSuffix = ' <span class="hero-status-badge ongoing">⚡ 進行中</span>';
+      } else if (currentTripStatus === 'completed') {
+        statusSuffix = ' <span class="hero-status-badge completed">🎉 已完成</span>';
+      }
+      heroTitleEl.innerHTML = escapeHtml(currentTripTitle) + statusSuffix;
+    }
+
     if (data.members) {
       currentTripMembers = data.members;
       if (collabRole !== 'guest') {
@@ -4525,7 +4590,13 @@
 
     // stops 相同（多半是自己寫入的回音）就不重繪
     if (!Array.isArray(data.stops) || !data.stops.length) return;
-    if (collabStopsSignature(data.stops) === collabStopsSignature(replanStops)) return;
+    if (collabStopsSignature(data.stops) === collabStopsSignature(replanStops)) {
+      if (hasStatusOrIndexChange) {
+        renderItineraryDisplay();
+        updateItineraryStageUI();
+      }
+      return;
+    }
 
     replanStops = buildStopsFromCollabSnapshot(data.stops);
     activeStopMenuId = null;
@@ -4584,7 +4655,8 @@
       isMergedAttraction: stop.isMergedAttraction || false,
       mergedSubSpots: stop.mergedSubSpots || null,
       mergedRadiusMeters: stop.mergedRadiusMeters || null,
-      mergedMemberCoords: stop.mergedMemberCoords || null
+      mergedMemberCoords: stop.mergedMemberCoords || null,
+      checkedInAt: stop.checkedInAt || null
     }));
 
     // 全程主要交通工具偏好（計程車/機車/汽車）一併保存，重新載入後仍生效
@@ -4597,7 +4669,13 @@
       const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
       const tripIndex = myTrips.findIndex((t) => t.id === currentItineraryId);
       if (tripIndex >= 0) {
-        const patch = { ...myTrips[tripIndex], stops: stopsSnapshot };
+        const patch = { 
+          ...myTrips[tripIndex], 
+          stops: stopsSnapshot,
+          status: currentTripStatus,
+          currentStopIndex: currentStopIndex,
+          startedAt: currentTripStartedAt
+        };
         if (hasVehiclePref) {
           patch.wizardData = { ...(myTrips[tripIndex].wizardData || {}), transportMode: vehiclePref };
         }
@@ -4626,8 +4704,20 @@
         // 避免 Firebase 內留下殘缺文件，且確保 createdAt 存在讓 loadState 的 orderBy 查詢能撈到。
         const { __saving, ...cleanLocal } = localTrip || {};
         const fbPatch = localTrip
-          ? { ...cleanLocal, stops: stopsSnapshot }
-          : { id: currentItineraryId, stops: stopsSnapshot };
+          ? { 
+              ...cleanLocal, 
+              stops: stopsSnapshot,
+              status: currentTripStatus,
+              currentStopIndex: currentStopIndex,
+              startedAt: currentTripStartedAt
+            }
+          : { 
+              id: currentItineraryId, 
+              stops: stopsSnapshot,
+              status: currentTripStatus,
+              currentStopIndex: currentStopIndex,
+              startedAt: currentTripStartedAt
+            };
         // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail
         if (userEmail) fbPatch.userEmail = userEmail;
         fbPatch.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
@@ -4851,6 +4941,103 @@
     });
   }
 
+  function updateLocalTripField(tripId, field, value) {
+    try {
+      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const idx = myTrips.findIndex(t => t.id === tripId);
+      if (idx >= 0) {
+        myTrips[idx][field] = value;
+        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+      }
+    } catch (e) {
+      console.warn('Failed to update local trip field:', e);
+    }
+  }
+
+  window.startTripProgress = function() {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法開始行程', 'orange');
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return feedbackToast('無效行程', 'orange');
+    if (!window.confirm('要開始這趟行程嗎？開始後進入「進行中」逐站打卡模式；若需重新編輯可用「↩ 重設進度」退回規劃中。')) return;
+    currentTripStatus = 'ongoing';
+    currentStopIndex = 0;
+    currentTripStartedAt = Date.now();
+
+    updateLocalTripField(currentItineraryId, 'status', 'ongoing');
+    updateLocalTripField(currentItineraryId, 'currentStopIndex', 0);
+    updateLocalTripField(currentItineraryId, 'startedAt', currentTripStartedAt);
+
+    if (typeof logTripEvent === 'function') {
+      logTripEvent('trip_started');
+    }
+
+    feedbackToast('🎬 行程已開始！開啟進行中模式', 'green');
+    
+    // Update hero title immediately
+    const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+    if (heroTitleEl) {
+      heroTitleEl.innerHTML = escapeHtml(currentTripTitle) + ' <span class="hero-status-badge ongoing">⚡ 進行中</span>';
+    }
+
+    persistCurrentTripStops(); 
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+  };
+
+  window.checkInCurrentStop = function(stopId, event) {
+    if (event) event.stopPropagation();
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法打卡', 'orange');
+    const stopIdx = replanStops.findIndex(s => s.id === stopId);
+    if (stopIdx === -1 || stopIdx !== currentStopIndex) return;
+    const stop = replanStops[stopIdx];
+    const isEndpoint = stop.type === 'start' || stop.type === 'end';
+
+    stop.checkedInAt = Date.now();
+    // 打卡只「加入」造訪清單，不可用 toggle（景點若先前已造訪，toggleVisitedPlace 會反向移除）；起訖點不計入造訪紀錄
+    if (!isEndpoint && !isPlaceVisited(stop.name)) {
+      toggleVisitedPlace(stop);
+    }
+
+    const checkinMsg = stop.type === 'start' ? `🚗 已從 ${stop.name} 出發！`
+      : stop.type === 'end' ? `🏁 抵達 ${stop.name}，行程完成！`
+      : `✅ ${stop.name} 到達打卡成功！`;
+    feedbackToast(checkinMsg, 'green');
+
+    if (currentStopIndex === replanStops.length - 1) {
+      window.markTripAsCompleted();
+    } else {
+      currentStopIndex++;
+      updateLocalTripField(currentItineraryId, 'currentStopIndex', currentStopIndex);
+      persistCurrentTripStops();
+      renderItineraryDisplay();
+      updateItineraryStageUI();
+      syncMapToCurrentTrip().catch(() => {});
+    }
+  };
+
+  // 把行程退回「規劃中」：清掉打卡進度，讓誤按「開始行程」或已完成的行程可重新編輯
+  window.resetTripProgress = function() {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法重設行程', 'orange');
+    if (currentTripStatus === 'planning') return;
+    if (!window.confirm('要把行程重設回「規劃中」嗎？將清除所有打卡進度。')) return;
+
+    currentTripStatus = 'planning';
+    currentStopIndex = -1;
+    currentTripStartedAt = null;
+    (replanStops || []).forEach(s => { s.checkedInAt = null; });
+
+    updateLocalTripField(currentItineraryId, 'status', 'planning');
+    updateLocalTripField(currentItineraryId, 'currentStopIndex', -1);
+    updateLocalTripField(currentItineraryId, 'startedAt', null);
+
+    const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+    if (heroTitleEl) heroTitleEl.innerHTML = escapeHtml(currentTripTitle);
+
+    feedbackToast('↩ 已重設為規劃中', 'blue');
+    persistCurrentTripStops();
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+  };
+
   function updateItineraryStageUI() {
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     const planningBlock = document.getElementById('itineraryPlanningBlock');
@@ -4858,6 +5045,9 @@
     const editBtn = document.getElementById('replanEditOrderBtn');
     const applyBtn = document.getElementById('replanApplyBtn');
     const cancelBtn = document.getElementById('replanCancelBtn');
+    const startTripBtn = document.getElementById('replanStartTripBtn');
+    const completeTripBtn = document.getElementById('replanCompleteTripBtn');
+    const resetTripBtn = document.getElementById('replanResetTripBtn');
 
     if (plannedBlock) {
       plannedBlock.style.display = isReplanning ? 'none' : '';
@@ -4870,10 +5060,24 @@
       renderReplanBoard();
     }
 
-    if (startBtn) startBtn.style.display = isReplanning ? 'none' : '';
-    if (editBtn) editBtn.style.display = isReplanning ? 'none' : '';
-    if (applyBtn) applyBtn.style.display = isReplanning ? '' : 'none';
+    const showEditActions = !collabReadOnly && !isReplanning;
+    // 規劃中或已完成都可重新規劃／調整順序；只有「進行中」鎖住編輯（專心執行）
+    const canEditOrder = showEditActions && currentTripStatus !== 'ongoing';
+    if (startBtn) startBtn.style.display = canEditOrder ? '' : 'none';
+    if (editBtn) editBtn.style.display = canEditOrder ? '' : 'none';
+    if (applyBtn) applyBtn.style.display = (isReplanning && !collabReadOnly) ? '' : 'none';
     if (cancelBtn) cancelBtn.style.display = isReplanning ? '' : 'none';
+
+    if (startTripBtn) {
+      startTripBtn.style.display = (showEditActions && currentTripStatus === 'planning') ? '' : 'none';
+    }
+    if (completeTripBtn) {
+      completeTripBtn.style.display = (showEditActions && currentTripStatus === 'ongoing') ? '' : 'none';
+    }
+    if (resetTripBtn) {
+      // 進行中或已完成時提供「退回規劃中」的出口
+      resetTripBtn.style.display = (showEditActions && currentTripStatus !== 'planning') ? '' : 'none';
+    }
   }
 
   function getSuggestedStayDurations(stop) {
@@ -4997,8 +5201,9 @@
       
       // 判断是否是最后一个停靠点
       const isLast = index === schedule.length - 1;
-      const nodeDotStyle = isLast ? 'background: var(--accent2); box-shadow: 0 0 0 4px var(--accent2-light);' : '';
-      const spotCardStyle = isLast ? 'border-color: var(--accent2);' : '';
+      const useLastStyle = isLast && currentTripStatus !== 'ongoing';
+      const nodeDotStyle = useLastStyle ? 'style="background: var(--accent2); box-shadow: 0 0 0 4px var(--accent2-light);"' : '';
+      const spotCardStyle = useLastStyle ? 'style="border-color: var(--accent2);"' : '';
       const tagStyle = tag.style ? `style="${tag.style}"` : '';
       const isEndpointStop = stop.type === 'start' || stop.type === 'end';
       const endpointLabel = stop.type === 'start' ? '🚩 起點' : stop.type === 'end' ? '🏁 終點' : '';
@@ -5022,8 +5227,40 @@
         }
       }
 
+      let actionButtonsHtml = '';
+      let itemClasses = 'timeline-item';
+      if (currentTripStatus === 'ongoing') {
+        // 進行中仍以唯讀方式顯示各站預計停留時間（不提供「調整」，專心執行）
+        const stayTagHtml = (!isEndpointStop && stop.stayMin > 0)
+          ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>`
+          : '';
+        if (index < currentStopIndex) {
+          itemClasses += ' visited-stop';
+          actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#e0f2fe;color:#0369a1;">✓ 已打卡</span>`;
+        } else if (index === currentStopIndex) {
+          itemClasses += ' ongoing-active';
+          if (collabReadOnly) {
+            actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#fef3c7;color:#d97706;font-weight:700;">⚡ 目前站 (唯讀)</span>`;
+          } else {
+            const checkinLabel = stop.type === 'start' ? '🚗 出發' : stop.type === 'end' ? '🏁 抵達終點' : '✅ 到達打卡';
+            actionButtonsHtml = stayTagHtml + `<button class="checkin-btn" onclick="event.stopPropagation(); checkInCurrentStop('${stop.id}', event)">${checkinLabel}</button>`;
+          }
+        } else {
+          actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#f3f4f6;color:#6b7280;">⏳ 未到</span>`;
+        }
+      } else {
+        // Normal planning/completed mode buttons
+        actionButtonsHtml = isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
+          <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
+          <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
+          <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
+        ` : '');
+      }
+
+      const endpointTagHtml = (isEndpointStop && currentTripStatus === 'ongoing') ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);margin-right:6px;">${endpointLabel}</span>` : '';
+
       html += `
-        <div id="itinerary-stop-${stop.id}" class="timeline-item" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
+        <div id="itinerary-stop-${stop.id}" class="${itemClasses}" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
           <div class="time-box"><div class="time-val">${timeStr}</div></div>
           <div class="node"><div class="node-dot" ${nodeDotStyle}></div></div>
           <div class="content-box">
@@ -5032,7 +5269,7 @@
               <div class="spot-card-copy">
                 <div class="spot-name">${stop.name}</div>
                 ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:12px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
-                <div class="spot-tags">${isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button><button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>` : ''}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                <div class="spot-tags">${endpointTagHtml}${actionButtonsHtml}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
                 ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
@@ -7452,6 +7689,47 @@
     updateDriverPanelState();
   }
 
+  function buildRideStopList() {
+    const schedule = buildReplanSchedule();
+    if (!schedule || schedule.length === 0) return [];
+    
+    return schedule.map((stop, idx) => {
+      const isEndpointStop = stop.type === 'start' || stop.type === 'end';
+      const timeStr = minutesToClock(stop.start);
+      
+      let dotStyle = '';
+      if (currentTripStatus === 'ongoing') {
+        if (idx < currentStopIndex) {
+          dotStyle = 'background: var(--ink3);'; // Grayed out
+        } else if (idx === currentStopIndex) {
+          dotStyle = 'background: var(--accent); box-shadow: 0 0 0 3px var(--accent-light);'; // Active highlight
+        } else {
+          dotStyle = 'background: var(--accent2);'; // Normal upcoming
+        }
+      } else {
+        if (idx === 0) {
+          dotStyle = 'background: var(--accent);';
+        } else if (idx === schedule.length - 1) {
+          dotStyle = 'background: var(--ink2);';
+        } else {
+          dotStyle = 'background: var(--accent2);';
+        }
+      }
+
+      return {
+        id: stop.id,
+        emoji: stop.emoji || '📍',
+        name: stop.name,
+        timeStr,
+        isEndpointStop,
+        dotStyle,
+        isCurrent: (currentTripStatus === 'ongoing' && idx === currentStopIndex),
+        isVisited: (currentTripStatus === 'ongoing' && idx < currentStopIndex),
+        desc: stop.desc || ''
+      };
+    });
+  }
+
   const rideModes = [
     {
       id: 'identity',
@@ -7594,35 +7872,72 @@
     {
       id: 'driver-route',
       label: 'Driver route',
-      title: '今日路線',
-      subtitle: '顯示每日出發點、停靠點與時間標記。',
-      badge: '路線總覽',
-      icon: '🗺️',
-      chips: ['Day 1', 'Route', 'Stops'],
-      template: () => `
+    title: '今日路線',
+    subtitle: '顯示每日出發點、停靠點與時間標記。',
+    badge: '路線總覽',
+    icon: '🗺️',
+    chips: ['Day 1', 'Route', 'Stops'],
+    template: () => {
+      const stops = buildRideStopList();
+      if (stops.length === 0) {
+        return `
+          <div class="phone-status"><span>9:41</span><span class="status-icons">◉ ◉ ◉ 100%</span></div>
+          <div class="screen-header">
+            <div class="screen-title">今日路線</div>
+            <div class="screen-subtitle">尚未載入路線</div>
+          </div>
+          <div class="screen-body" style="justify-content:center;align-items:center;color:var(--ink3);">
+            <div>🗺️ 暫無路線資料</div>
+          </div>
+        `;
+      }
+
+      const startStop = stops[0];
+      const remainingStops = stops.slice(1);
+      
+      const listHtml = remainingStops.map(s => {
+        let extraClass = s.isCurrent ? ' active' : (s.isVisited ? ' visited' : '');
+        const textDecoration = s.isVisited ? 'style="text-decoration:line-through;color:var(--ink3);"' : '';
+        return `
+          <div class="timeline-mini-item${extraClass}">
+            <div class="timeline-mini-dot" style="${s.dotStyle}"></div>
+            <div class="timeline-mini-content">
+              <div class="timeline-mini-title" ${textDecoration}>${s.emoji} ${escapeHtml(s.name)}</div>
+              <div class="timeline-mini-sub">${s.timeStr} · ${escapeHtml(s.desc || '暫無描述')}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      return `
         <div class="phone-status"><span>9:41</span><span class="status-icons">◉ ◉ ◉ 100%</span></div>
         <div class="screen-header">
           <div class="screen-title">今日路線</div>
-          <div class="screen-subtitle">Day 1 · 4 筆停靠點 · 可直接拖曳調整順序。</div>
+          <div class="screen-subtitle">Day 1 · ${stops.length} 筆停靠點 · 進行中狀態同步。</div>
         </div>
         <div class="screen-body">
           <div class="screen-card soft">
-            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">起點</div><div class="screen-kv-value" style="font-size:15px;">台東火車站</div></div><span class="screen-pill blue">08:00</span></div>
+            <div class="screen-row">
+              <div class="screen-kv">
+                <div class="screen-kv-label">起點</div>
+                <div class="screen-kv-value" style="font-size:15px;">${escapeHtml(startStop.name)}</div>
+              </div>
+              <span class="screen-pill blue">${startStop.timeStr}</span>
+            </div>
           </div>
           <div class="screen-card">
             <div class="timeline-mini">
-              <div class="timeline-mini-item"><div class="timeline-mini-dot"></div><div class="timeline-mini-content"><div class="timeline-mini-title">小吃攤</div><div class="timeline-mini-sub">10:20 · 補給與短暫休息。</div></div></div>
-              <div class="timeline-mini-item"><div class="timeline-mini-dot" style="background: var(--accent2);"></div><div class="timeline-mini-content"><div class="timeline-mini-title">海濱公園</div><div class="timeline-mini-sub">12:10 · 主要停留節點。</div></div></div>
-              <div class="timeline-mini-item"><div class="timeline-mini-dot" style="background: var(--ink3);"></div><div class="timeline-mini-content"><div class="timeline-mini-title">夜市</div><div class="timeline-mini-sub">18:30 · 晚餐與散步。</div></div></div>
+              ${listHtml}
             </div>
           </div>
           <div class="screen-actions">
-            <button class="screen-btn primary">開始導航</button>
-            <button class="screen-btn secondary">編輯路線</button>
+            <button class="screen-btn primary" onclick="setRideMode('driver-mode')">開始導航</button>
+            <button class="screen-btn secondary" onclick="switchView('itinerary')">編輯路線</button>
           </div>
         </div>
-      `
-    },
+      `;
+    }
+  },
     {
       id: 'passenger',
       label: 'passenger',
@@ -7752,35 +8067,80 @@
     {
       id: 'trip-detail',
       label: 'trip detail',
-      title: '今天行程',
-      subtitle: '完整時間線與地點清單，方便總覽與分享。',
-      badge: '行程詳情',
-      icon: '🧾',
-      chips: ['Day 1', '細節', '分享'],
-      template: () => `
+    title: '今天行程',
+    subtitle: '完整時間線與地點清單，方便總覽與分享。',
+    badge: '行程詳情',
+    icon: '🧾',
+    chips: ['Day 1', '細節', '分享'],
+    template: () => {
+      const stops = buildRideStopList();
+      if (stops.length === 0) {
+        return `
+          <div class="phone-status"><span>9:41</span><span class="status-icons">◉ ◉ ◉ 100%</span></div>
+          <div class="screen-header">
+            <div class="screen-title">今天行程</div>
+            <div class="screen-subtitle">尚未載入行程</div>
+          </div>
+          <div class="screen-body" style="justify-content:center;align-items:center;color:var(--ink3);">
+            <div>🗺️ 暫無行程資料</div>
+          </div>
+        `;
+      }
+
+      let totalTransit = 0;
+      replanStops.forEach(s => {
+        if (s.transitMin) totalTransit += s.transitMin;
+      });
+      const transitText = totalTransit > 0 ? `${totalTransit} 分鐘移動` : '開始今日旅程';
+
+      const titleText = currentTripRegion ? `${currentTripRegion}探索` : '微旅行';
+      const subtitleText = `Day 1 · ${stops.length} 個節點。`;
+
+      const listHtml = stops.map(s => {
+        let extraClass = s.isCurrent ? ' active' : (s.isVisited ? ' visited' : '');
+        const textDecoration = s.isVisited ? 'style="text-decoration:line-through;color:var(--ink3);"' : '';
+        return `
+          <div class="timeline-mini-item${extraClass}">
+            <div class="timeline-mini-dot" style="${s.dotStyle}"></div>
+            <div class="timeline-mini-content">
+              <div class="timeline-mini-title" ${textDecoration}>${s.emoji} ${escapeHtml(s.name)}</div>
+              <div class="timeline-mini-sub">${s.timeStr} · ${escapeHtml(s.desc || '暫無描述')}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      return `
         <div class="phone-status"><span>9:41</span><span class="status-icons">◉ ◉ ◉ 100%</span></div>
         <div class="screen-header">
           <div class="screen-title">今天行程</div>
-          <div class="screen-subtitle">Day 1 · 台東車站到海濱散策 · 4 個節點。</div>
+          <div class="screen-subtitle">${escapeHtml(titleText)} · ${subtitleText}</div>
         </div>
         <div class="screen-body">
           <div class="screen-card soft">
-            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">預估時間</div><div class="screen-kv-value" style="font-size:15px;">23 分鐘移動</div></div><span class="screen-pill blue">今日</span></div>
+            <div class="screen-row">
+              <div class="screen-kv">
+                <div class="screen-kv-label">行程狀態</div>
+                <div class="screen-kv-value" style="font-size:15px;color:var(--accent);font-weight:700;">
+                  ${currentTripStatus === 'ongoing' ? '⚡ 進行中' : currentTripStatus === 'completed' ? '🎉 已完成' : '✏️ 規劃中'}
+                </div>
+              </div>
+              <span class="screen-pill blue">${transitText}</span>
+            </div>
           </div>
           <div class="screen-card">
             <div class="timeline-mini">
-              <div class="timeline-mini-item"><div class="timeline-mini-dot"></div><div class="timeline-mini-content"><div class="timeline-mini-title">台東車站出發</div><div class="timeline-mini-sub">14:00 · 取車 / 集合。</div></div></div>
-              <div class="timeline-mini-item"><div class="timeline-mini-dot" style="background: var(--accent2);"></div><div class="timeline-mini-content"><div class="timeline-mini-title">海濱公園</div><div class="timeline-mini-sub">16:30 · 看夕陽與休息。</div></div></div>
-              <div class="timeline-mini-item"><div class="timeline-mini-dot" style="background: var(--ink3);"></div><div class="timeline-mini-content"><div class="timeline-mini-title">觀光夜市</div><div class="timeline-mini-sub">18:30 · 晚餐與逛街。</div></div></div>
+              ${listHtml}
             </div>
           </div>
           <div class="screen-actions">
             <button class="screen-btn primary" onclick="openTravelTools('export')">分享行程</button>
-            <button class="screen-btn secondary">編輯內容</button>
+            <button class="screen-btn secondary" onclick="switchView('itinerary')">查看詳細</button>
           </div>
         </div>
-      `
-    },
+      `;
+    }
+  },
     {
       id: 'memory',
       label: 'memory',

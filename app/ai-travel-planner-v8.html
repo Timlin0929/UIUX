@@ -58,6 +58,9 @@
           </label>
           <button class="replan-btn secondary" id="replanEditOrderBtn" onclick="enterReplanMode()">✏️ 調整順序</button>
           <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
+          <button class="replan-btn primary" id="replanStartTripBtn" onclick="startTripProgress()" style="display:none;">▶ 開始行程</button>
+          <button class="replan-btn primary" id="replanCompleteTripBtn" onclick="window.markTripAsCompleted()" style="display:none;">🏁 結束行程</button>
+          <button class="replan-btn secondary" id="replanResetTripBtn" onclick="window.resetTripProgress()" style="display:none;">↩ 重設進度</button>
           <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
           <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           <button class="replan-btn primary" id="replanApplyBtn" onclick="applyReplan()" style="display:none;">套用新規劃</button>
