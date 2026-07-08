@@ -219,7 +219,60 @@ app.get('/api/tdx/*', tdxLimiter, async (req, res) => {
   }
 });
 
+// ══════════════ CWA 中央氣象署（金鑰留在伺服器；dataset 白名單；限流＋快取）══════════════
+
+const CWA_API_KEY = (process.env.CWA_API_KEY || '').trim();
+const CWA_UPSTREAM = 'https://opendata.cwa.gov.tw';
+// 只放行實際使用的資料集：
+//  - F-C0032-001：36 小時縣市天氣預報（天氣頁晨間簡報用，locationName=臺東縣）
+//  - F-D0047-089：臺東縣鄉鎮逐 12 小時預報（之後細化到鄉鎮時用）
+const CWA_ALLOWED_DATASET = /^(?:F-C0032-001|F-D0047-089)$/;
+
+const cwaLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+
+// 天氣資料變動慢：伺服器端快取 10 分鐘，全站共用同一份，省 CWA 配額
+const _cwaCache = new Map(); // url → { exp, status, contentType, body }
+app.get('/api/cwa/v1/rest/datastore/:dataset', cwaLimiter, async (req, res) => {
+  // 金鑰未設時回 200＋標記（不回 503）：瀏覽器對非 2xx 會在 console 印紅色錯誤，
+  // 違反前端「F12 零紅字」驗收標準；前端看到沒有 records 就靜默保留原內容。
+  if (!CWA_API_KEY) return res.json({ ok: false, error: 'cwa key not set', message: 'CWA 金鑰未設定。' });
+  const dataset = String(req.params.dataset || '');
+  if (!CWA_ALLOWED_DATASET.test(dataset)) return res.status(403).json({ error: 'dataset not allowed' });
+
+  const url = new URL(CWA_UPSTREAM + '/api/v1/rest/datastore/' + dataset);
+  for (const [k, v] of Object.entries(req.query)) {
+    if (k !== 'Authorization') url.searchParams.set(k, String(v)); // 金鑰一律用伺服器端的
+  }
+  url.searchParams.set('Authorization', CWA_API_KEY);
+
+  const cacheKey = url.href;
+  const hit = _cwaCache.get(cacheKey);
+  if (hit && Date.now() < hit.exp) {
+    res.status(hit.status).set('Content-Type', hit.contentType);
+    return res.send(hit.body);
+  }
+
+  try {
+    const upstream = await fetch(url);
+    const body = await upstream.text();
+    const contentType = upstream.headers.get('content-type') || 'application/json';
+    if (upstream.ok) {
+      _cwaCache.set(cacheKey, { exp: Date.now() + 10 * 60 * 1000, status: upstream.status, contentType, body });
+    }
+    res.status(upstream.status).set('Content-Type', contentType).send(body);
+  } catch (err) {
+    console.error('[proxy] cwa upstream fetch 失敗：', err && err.message);
+    res.status(502).json({ error: 'upstream fetch failed' });
+  }
+});
+
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`[proxy] 代理已啟動 http://127.0.0.1:${PORT}（僅本機；對外請經 nginx /api/）`);
-  console.log('[proxy] /api/vertex：需登入 + 20req/10min/IP；/api/tdx：60req/10min/IP');
+  console.log('[proxy] /api/vertex：需登入 + 20req/10min/IP；/api/tdx：60req/10min/IP；/api/cwa：60req/10min/IP＋10min 快取');
 });
