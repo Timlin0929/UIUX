@@ -19,7 +19,11 @@ service cloud.firestore {
     // 都需要「非成員」先查得到文件並把自己寫進 members。
     match /micro_trips/{tripId} {
       allow create: if request.auth != null;
-      allow read, update: if request.auth != null;
+      // 讀取：登入者皆可（join-by-pin／共編加入），或 guestReadable 的行程開放「未登入訪客」
+      // 唯讀（網頁分享連結 ?sharedId=..&token=..&guest=1 是未登入開啟的——少了 guestReadable
+      // 分支，所有分享連結都會 permission-denied，2026-07-08 已踩過）。
+      allow read: if request.auth != null || resource.data.guestReadable == true;
+      allow update: if request.auth != null;
       // 刪除：uid 擁有者（共編行程有 ownerUid）或 email 擁有者（網頁一般行程只有 userEmail，
       // 若只看 ownerUid 會把網頁端一般行程卡住刪不掉）。
       allow delete: if request.auth != null && (
