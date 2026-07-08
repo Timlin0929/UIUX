@@ -4696,9 +4696,10 @@ function selectDest(label) {
 }
 
 function selectTheme(theme) {
-  wizData.theme = theme;
+  // 再點一次同一顆標籤＝取消選取（回到未選任何主題的狀態）
+  wizData.theme = (wizData.theme === theme) ? '' : theme;
   const input = document.getElementById('theme');
-  if (input) input.value = theme;
+  if (input) input.value = wizData.theme;
   scheduleWizardPreviewRequest('step4-theme');
   renderWizard();
 }
