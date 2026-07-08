@@ -4109,7 +4109,8 @@
   // 資料寫入 micro_trips/{tripId}.feedback.{emailKey}（見 docs/FEEDBACK_SCHEMA.md）。
   // ══════════════════════════════════════════════════
   const TRIP_FEEDBACK_KEY = 'wai_trip_feedback';
-  let tripFeedbackDraft = { tripRating: 0, aiAccuracy: 0, comment: '' };
+  let tripFeedbackDraft = { tripRating: 0, aiAccuracy: 0, comment: '', stopRatings: {} };
+  let tripFeedbackStopNames = []; // 本次評分視窗的景點名清單（index → name，onclick 用索引避免名稱跳脫問題）
 
   // planner 執行期沒有全域 showToast（僅 explore 有）；安全退回 showVisitedToast，避免 ReferenceError。
   function feedbackToast(msg, color) {
@@ -4154,8 +4155,8 @@
     // 預填：優先讀本機快取（離線 / 個人行程也能回填）
     const existing = getLocalTripFeedback(currentItineraryId);
     tripFeedbackDraft = existing
-      ? { tripRating: existing.tripRating || 0, aiAccuracy: existing.aiAccuracy || 0, comment: existing.comment || '' }
-      : { tripRating: 0, aiAccuracy: 0, comment: '' };
+      ? { tripRating: existing.tripRating || 0, aiAccuracy: existing.aiAccuracy || 0, comment: existing.comment || '', stopRatings: existing.stopRatings || {} }
+      : { tripRating: 0, aiAccuracy: 0, comment: '', stopRatings: {} };
     renderTripFeedbackModal(!!existing);
     const overlay = document.getElementById('tripfb-overlay');
     if (overlay) requestAnimationFrame(() => overlay.classList.add('open'));
@@ -4176,6 +4177,18 @@
     if (submitBtn) submitBtn.disabled = !(tripFeedbackDraft.tripRating > 0 && tripFeedbackDraft.aiAccuracy > 0);
   };
 
+  // 單一景點評分（選填）：再點同一顆星＝取消該景點評分
+  window.setStopFeedbackStar = function(idx, val) {
+    const name = tripFeedbackStopNames[idx];
+    if (!name) return;
+    const cur = tripFeedbackDraft.stopRatings[name] || 0;
+    if (cur === val) delete tripFeedbackDraft.stopRatings[name];
+    else tripFeedbackDraft.stopRatings[name] = val;
+    const row = document.getElementById('tripfb-stopstars-' + idx);
+    const now = tripFeedbackDraft.stopRatings[name] || 0;
+    if (row) row.querySelectorAll('.tripfb-star').forEach((b, i) => b.classList.toggle('on', i < now));
+  };
+
   window.submitTripFeedback = async function() {
     const commentEl = document.getElementById('tripfb-comment');
     tripFeedbackDraft.comment = commentEl ? commentEl.value.trim().slice(0, 500) : '';
@@ -4191,6 +4204,7 @@
       tripRating: tripFeedbackDraft.tripRating,
       aiAccuracy: tripFeedbackDraft.aiAccuracy,
       comment: tripFeedbackDraft.comment,
+      stopRatings: tripFeedbackDraft.stopRatings || {}, // 單一景點評分 {景點名: 1-5}（Android schema 對齊）
       visitedCount, totalStops,
       submittedAt: Date.now(),
       appPlatform: 'web'
@@ -4201,7 +4215,7 @@
       const map = getLocalTripFeedbackMap();
       map[currentItineraryId] = {
         tripRating: entry.tripRating, aiAccuracy: entry.aiAccuracy,
-        comment: entry.comment, submittedAt: entry.submittedAt
+        comment: entry.comment, stopRatings: entry.stopRatings, submittedAt: entry.submittedAt
       };
       localStorage.setItem(TRIP_FEEDBACK_KEY, JSON.stringify(map));
     } catch (e) { console.warn('Save feedback to localStorage failed:', e); }
@@ -4234,6 +4248,10 @@
     }
     const { visitedCount, totalStops } = computeVisitedSummary();
     const title = currentTripTitle || '這趟旅程';
+    // 單一景點評分清單（不含起訖點）；用索引對應名稱，避免景點名帶引號時 onclick 壞掉
+    tripFeedbackStopNames = (replanStops || [])
+      .filter(s => s && s.type !== 'start' && s.type !== 'end' && s.name)
+      .map(s => s.name);
     const starsRow = (field, val) => `
       <div class="tripfb-stars" id="tripfb-stars-${field}">
         ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= val ? 'on' : ''}" onclick="setFeedbackStar('${field}',${i})">★</button>`).join('')}
@@ -4254,6 +4272,20 @@
           ${starsRow('aiAccuracy', tripFeedbackDraft.aiAccuracy)}
           <div class="tripfb-scalehint"><span>很不準</span><span>非常準</span></div>
         </div>
+
+        ${tripFeedbackStopNames.length ? `
+        <div class="tripfb-field">
+          <div class="tripfb-label">各景點評分<span class="tripfb-hint">選填，再點同一顆星可取消</span></div>
+          ${tripFeedbackStopNames.map((n, idx) => {
+            const v = tripFeedbackDraft.stopRatings[n] || 0;
+            return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px;">
+              <span style="font-size:13px;color:#2b4c6b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeFeedbackText(n)}</span>
+              <div class="tripfb-stars" id="tripfb-stopstars-${idx}" style="flex-shrink:0;">
+                ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= v ? 'on' : ''}" style="font-size:17px;" onclick="setStopFeedbackStar(${idx},${i})">★</button>`).join('')}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>` : ''}
 
         <div class="tripfb-field">
           <div class="tripfb-label">想法與建議<span class="tripfb-hint">選填</span></div>
@@ -4296,6 +4328,7 @@
               <span style="color:#e8a33d;letter-spacing:1px;">${star(e.tripRating)}</span>
             </div>
             <div style="color:#8fa4b8;font-size:12px;">AI 準確度 ${star(e.aiAccuracy)}${Number.isFinite(e.visitedCount) ? ` · 到訪 ${e.visitedCount}/${e.totalStops} 站` : ''}</div>
+            ${e.stopRatings && Object.keys(e.stopRatings).length ? `<div style="margin-top:3px;color:#5f7d99;font-size:12px;">${Object.entries(e.stopRatings).map(([n, r]) => `${escapeFeedbackText(n)} <span style="color:#e8a33d;">${star(r)}</span>`).join('　')}</div>` : ''}
             ${e.comment ? `<div style="margin-top:4px;color:#2b4c6b;white-space:pre-wrap;">${escapeFeedbackText(e.comment)}</div>` : ''}
           </div>`).join('');
     } catch (e) {
@@ -5008,6 +5041,10 @@
       : stop.type === 'end' ? `🏁 抵達 ${stop.name}，行程完成！`
       : `✅ ${stop.name} 到達打卡成功！`;
     feedbackToast(checkinMsg, 'green');
+    // 到達景點後提醒拍照（起訖點不提醒）；延遲讓打卡 toast 先顯示完
+    if (!isEndpoint) {
+      setTimeout(() => feedbackToast('📸 拍張照替這一站留下回憶吧！', 'blue'), 2400);
+    }
 
     if (currentStopIndex === replanStops.length - 1) {
       window.markTripAsCompleted();
@@ -5462,6 +5499,7 @@
     if (viewId === 'travellog') renderTravelLog();
     if (viewId === 'budget') renderBudgetTracker();
     if (viewId === 'members') renderMembersView();
+    if (viewId === 'weather') refreshWeatherView(); // C5：切到天氣頁時抓 CWA 真實預報（失敗保留原內容）
 
     // 手機上的視圖模式邏輯
     if (isMobileLayout()) {
@@ -5471,6 +5509,98 @@
         setMobileMode(currentUserRole === 'driver' ? 'map' : 'functions');
       }
     }
+  }
+
+  // ══════════════════════════════════════════════════
+  // C5 天氣預報（CWA 中央氣象署，經 /api/cwa 後端代理；金鑰不在前端）
+  // F-C0032-001＝36 小時縣市預報（臺東縣），三個 12 小時時段。
+  // 失敗一律靜默（保留頁面原內容，不噴紅字）；30 分鐘 localStorage 快取。
+  // ══════════════════════════════════════════════════
+  const CWA_CACHE_KEY = 'wai_cwa_taitung_36h';
+
+  async function fetchTaitungWeather() {
+    if (!VERTEX_PROXY_BASE) return null; // file:// 或未設代理時測不到 /api，保留 mock
+    try {
+      const cached = JSON.parse(localStorage.getItem(CWA_CACHE_KEY) || 'null');
+      if (cached && cached.exp > Date.now() && cached.data) return cached.data;
+    } catch (_e) {}
+    try {
+      const url = `${VERTEX_PROXY_BASE}/cwa/v1/rest/datastore/F-C0032-001?locationName=${encodeURIComponent('臺東縣')}`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const json = await r.json();
+      const loc = json && json.records && Array.isArray(json.records.location) && json.records.location[0];
+      if (!loc || !Array.isArray(loc.weatherElement)) return null;
+      // 整形成 periods[{start,end,wx,pop,minT,maxT,ci}]
+      const byName = {};
+      loc.weatherElement.forEach((el) => { byName[el.elementName] = el.time || []; });
+      const wx = byName.Wx || [];
+      const periods = wx.map((t, i) => ({
+        start: t.startTime, end: t.endTime,
+        wx: (t.parameter && t.parameter.parameterName) || '',
+        pop: Number((byName.PoP && byName.PoP[i] && byName.PoP[i].parameter.parameterName) || 0),
+        minT: (byName.MinT && byName.MinT[i] && byName.MinT[i].parameter.parameterName) || '',
+        maxT: (byName.MaxT && byName.MaxT[i] && byName.MaxT[i].parameter.parameterName) || '',
+        ci: (byName.CI && byName.CI[i] && byName.CI[i].parameter.parameterName) || ''
+      })).filter(p => p.wx);
+      if (!periods.length) return null;
+      const data = { locationName: loc.locationName, periods, fetchedAt: Date.now() };
+      try { localStorage.setItem(CWA_CACHE_KEY, JSON.stringify({ exp: Date.now() + 30 * 60 * 1000, data })); } catch (_e) {}
+      return data;
+    } catch (_e) {
+      return null; // 靜默降級：F12 零紅字標準
+    }
+  }
+
+  function weatherIconFor(wxText, pop) {
+    const t = String(wxText || '');
+    if (t.includes('雷')) return '⛈️';
+    if (t.includes('豪雨') || t.includes('大雨')) return '🌧️';
+    if (t.includes('雨')) return pop >= 60 ? '🌧️' : '🌦️';
+    if (t.includes('陰')) return '☁️';
+    if (t.includes('多雲')) return t.includes('晴') ? '⛅' : '🌥️';
+    return '☀️';
+  }
+
+  function weatherAdviceFor(p) {
+    if (p.pop >= 70) return `☔ 降雨機率 ${p.pop}%，記得帶傘並優先安排室內景點。`;
+    if (p.pop >= 30) return `🌂 降雨機率 ${p.pop}%，包包放把折傘比較安心。`;
+    if (String(p.ci).includes('悶熱') || Number(p.maxT) >= 33) return `🧢 ${p.ci || '天氣偏熱'}，記得防曬補水，中午安排陰涼處休息。`;
+    return `👕 ${p.ci || '天氣穩定'}，適合步行散策，不用擔心下雨！`;
+  }
+
+  function weatherPeriodLabel(p) {
+    try {
+      const s = new Date(String(p.start).replace(/-/g, '/'));
+      const e = new Date(String(p.end).replace(/-/g, '/'));
+      const hh = (d) => String(d.getHours()).padStart(2, '0') + ':00';
+      const sameDay = s.getDate() === e.getDate();
+      return `${s.getMonth() + 1}/${s.getDate()} ${hh(s)}–${sameDay ? '' : `${e.getMonth() + 1}/${e.getDate()} `}${hh(e)}`;
+    } catch (_e) { return ''; }
+  }
+
+  async function refreshWeatherView() {
+    const data = await fetchTaitungWeather();
+    if (!data || !data.periods.length) return; // 抓不到就保留原（mock）內容
+    const cards = document.querySelectorAll('#view-weather .weather-card');
+    const heroTag = document.querySelector('#view-weather .hero-meta .hero-tag');
+    if (heroTag) heroTag.textContent = `🌤 ${data.locationName} 36 小時預報（中央氣象署）`;
+    const fill = (card, p, label) => {
+      if (!card || !p) return;
+      const labelEl = card.querySelector('.wc-header > div > div:first-child');
+      const tempEl = card.querySelector('.wc-temp');
+      const iconEl = card.querySelector('.wc-icon');
+      const adviceEl = card.querySelector('.wc-advice');
+      if (labelEl) labelEl.textContent = `${label} · ${weatherPeriodLabel(p)}`;
+      if (tempEl) tempEl.textContent = (p.minT && p.maxT) ? `${p.minT}–${p.maxT}°` : `${p.maxT || p.minT || '--'}°`;
+      if (iconEl) iconEl.textContent = weatherIconFor(p.wx, p.pop);
+      if (adviceEl) adviceEl.textContent = `${p.wx}。${weatherAdviceFor(p)}`;
+      // 卡片底色跟著降雨機率換（沿用既有 sunny/rainy 樣式）
+      card.classList.toggle('rainy', p.pop >= 30);
+      card.classList.toggle('sunny', p.pop < 30);
+    };
+    fill(cards[0], data.periods[0], `${data.locationName} 目前時段`);
+    fill(cards[1], data.periods[1], '下一時段');
   }
 
   // 花費追蹤卡片：把人均預算拆成「交通（離島船票＋站間移動）」與「可動用餐飲/活動」並顯示。
