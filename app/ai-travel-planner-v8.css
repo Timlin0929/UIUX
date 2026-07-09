@@ -1479,6 +1479,7 @@ body.prototype-mode .prototype-id-chip {
   color: var(--ink);
   box-shadow: var(--shadow-sm);
   transition: all 0.2s ease;
+  white-space: nowrap; /* 短標籤不可裂行（見 skill: cjk-line-wrap） */
 }
 
 .tool-btn:hover {
@@ -3215,3 +3216,12 @@ body.prototype-mode .prototype-id-chip {
   border: 1px solid #e5e7eb;
 }
 
+
+/* ── 中文不亂換行（skill: cjk-line-wrap）──────────────────────────
+   中文預設任兩字皆可斷行，易出現詞被拆（享受空／檔）、按鈕裂行、句尾孤字。 */
+/* 內文敘述：改善斷點、避免句尾孤字（現代瀏覽器；不支援自動退回一般換行） */
+.wc-advice, .spot-desc, .spot-detail-desc, .tripfb-sub, .screen-subtitle { text-wrap: pretty; }
+/* 短標籤／徽章一律不裂行 */
+.wc-icon, .hero-tag, .nav-pill, .stay-time-tag, .checkin-btn { white-space: nowrap; }
+/* 通用工具：拆開會怪的片段（數字+單位、時間區間、專有名詞）包這個 */
+.nowrap { white-space: nowrap; }
