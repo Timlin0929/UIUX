@@ -1814,7 +1814,8 @@
                     mergedMemberCoords: s.mergedMemberCoords || null,
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
                     manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
-                    checkedInAt: s.checkedInAt || null
+                    checkedInAt: s.checkedInAt || null,
+                    isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null // Plan B 替代景點跟著載入
                   };
                 }
               }
@@ -1897,7 +1898,8 @@
                 lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || [],
                 manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
-                checkedInAt: s.checkedInAt || null
+                checkedInAt: s.checkedInAt || null,
+                isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null // Plan B 替代景點跟著載入
               };
             }));
             
@@ -4549,7 +4551,9 @@
         lat: pos ? Number(pos.lat) : (Number.isFinite(Number(s.lat)) ? Number(s.lat) : null),
         lng: pos ? Number(pos.lng) : (Number.isFinite(Number(s.lng)) ? Number(s.lng) : null),
         nearbyToiletLocations: s.nearbyToiletLocations || [],
-        checkedInAt: s.checkedInAt || null
+        checkedInAt: s.checkedInAt || null,
+        isOutdoor: s.isOutdoor || false,
+        altNearby: s.altNearby || null
       };
     });
   }
@@ -4691,7 +4695,9 @@
       mergedSubSpots: stop.mergedSubSpots || null,
       mergedRadiusMeters: stop.mergedRadiusMeters || null,
       mergedMemberCoords: stop.mergedMemberCoords || null,
-      checkedInAt: stop.checkedInAt || null
+      checkedInAt: stop.checkedInAt || null,
+      isOutdoor: stop.isOutdoor || false,          // Plan B：室內/戶外標記
+      altNearby: stop.altNearby || null            // Plan B：附近替代景點（查看替換用）
     }));
 
     // 全程主要交通工具偏好（計程車/機車/汽車）一併保存，重新載入後仍生效
@@ -5298,6 +5304,7 @@
           <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
           <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
           <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
+          ${(!collabReadOnly && stop.altNearby && stop.altNearby.length) ? `<button class="stay-edit-btn swap-btn" onclick="event.stopPropagation(); openSwapPanel('${stop.id}')">🔄 替換</button>` : ''}
         ` : '');
       }
 
@@ -5516,7 +5523,65 @@
   // F-C0032-001＝36 小時縣市預報（臺東縣），三個 12 小時時段。
   // 失敗一律靜默（保留頁面原內容，不噴紅字）；30 分鐘 localStorage 快取。
   // ══════════════════════════════════════════════════
-  const CWA_CACHE_KEY = 'wai_cwa_taitung_36h';
+  const CWA_CACHE_KEY = 'wai_cwa_taitung_wk';
+
+  // 天氣時間欄位可能是 "2026-07-09 18:00:00"（F-C0032）或 ISO "2026-07-09T18:00:00+08:00"（F-D0047）
+  function parseWeatherTime(s) {
+    s = String(s || '');
+    const d = new Date(s.includes('T') ? s : s.replace(/-/g, '/'));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // 主來源：F-D0047-091 縣市未來一週（12 小時間隔約 7 天，取臺東縣；新版大寫 schema）
+  async function fetchCwaWeekly() {
+    const url = `${VERTEX_PROXY_BASE}/cwa/v1/rest/datastore/F-D0047-091?LocationName=${encodeURIComponent('臺東縣')}`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const json = await r.json();
+    const locs = (json.records && json.records.Locations && json.records.Locations[0] && json.records.Locations[0].Location) || [];
+    const tt = locs.find((x) => x.LocationName === '臺東縣') || locs[0];
+    if (!tt || !Array.isArray(tt.WeatherElement)) return null;
+    const byName = {};
+    tt.WeatherElement.forEach((e) => { byName[e.ElementName] = e.Time || []; });
+    const wxT = byName['天氣現象'] || [];
+    const valByStart = (arr, start, field) => {
+      const m = (arr || []).find((x) => x.StartTime === start);
+      return (m && m.ElementValue && m.ElementValue[0] && m.ElementValue[0][field]) || '';
+    };
+    const periods = wxT.map((t) => ({
+      start: t.StartTime, end: t.EndTime,
+      wx: (t.ElementValue && t.ElementValue[0] && t.ElementValue[0].Weather) || '',
+      pop: Number(valByStart(byName['12小時降雨機率'], t.StartTime, 'ProbabilityOfPrecipitation')) || 0,
+      maxT: valByStart(byName['最高溫度'], t.StartTime, 'MaxTemperature'),
+      minT: valByStart(byName['最低溫度'], t.StartTime, 'MinTemperature'),
+      ci: ''
+    })).filter((p) => p.wx);
+    if (!periods.length) return null;
+    return { locationName: '臺東縣', periods };
+  }
+
+  // Fallback：F-C0032-001 今明 36 小時（舊版小寫 schema）
+  async function fetchCwa36h() {
+    const url = `${VERTEX_PROXY_BASE}/cwa/v1/rest/datastore/F-C0032-001?locationName=${encodeURIComponent('臺東縣')}`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const json = await r.json();
+    const loc = json && json.records && Array.isArray(json.records.location) && json.records.location[0];
+    if (!loc || !Array.isArray(loc.weatherElement)) return null;
+    const byName = {};
+    loc.weatherElement.forEach((el) => { byName[el.elementName] = el.time || []; });
+    const wx = byName.Wx || [];
+    const periods = wx.map((t, i) => ({
+      start: t.startTime, end: t.endTime,
+      wx: (t.parameter && t.parameter.parameterName) || '',
+      pop: Number((byName.PoP && byName.PoP[i] && byName.PoP[i].parameter.parameterName) || 0),
+      minT: (byName.MinT && byName.MinT[i] && byName.MinT[i].parameter.parameterName) || '',
+      maxT: (byName.MaxT && byName.MaxT[i] && byName.MaxT[i].parameter.parameterName) || '',
+      ci: (byName.CI && byName.CI[i] && byName.CI[i].parameter.parameterName) || ''
+    })).filter((p) => p.wx);
+    if (!periods.length) return null;
+    return { locationName: loc.locationName, periods };
+  }
 
   async function fetchTaitungWeather() {
     if (!VERTEX_PROXY_BASE) return null; // file:// 或未設代理時測不到 /api，保留 mock
@@ -5524,32 +5589,11 @@
       const cached = JSON.parse(localStorage.getItem(CWA_CACHE_KEY) || 'null');
       if (cached && cached.exp > Date.now() && cached.data) return cached.data;
     } catch (_e) {}
-    try {
-      const url = `${VERTEX_PROXY_BASE}/cwa/v1/rest/datastore/F-C0032-001?locationName=${encodeURIComponent('臺東縣')}`;
-      const r = await fetch(url);
-      if (!r.ok) return null;
-      const json = await r.json();
-      const loc = json && json.records && Array.isArray(json.records.location) && json.records.location[0];
-      if (!loc || !Array.isArray(loc.weatherElement)) return null;
-      // 整形成 periods[{start,end,wx,pop,minT,maxT,ci}]
-      const byName = {};
-      loc.weatherElement.forEach((el) => { byName[el.elementName] = el.time || []; });
-      const wx = byName.Wx || [];
-      const periods = wx.map((t, i) => ({
-        start: t.startTime, end: t.endTime,
-        wx: (t.parameter && t.parameter.parameterName) || '',
-        pop: Number((byName.PoP && byName.PoP[i] && byName.PoP[i].parameter.parameterName) || 0),
-        minT: (byName.MinT && byName.MinT[i] && byName.MinT[i].parameter.parameterName) || '',
-        maxT: (byName.MaxT && byName.MaxT[i] && byName.MaxT[i].parameter.parameterName) || '',
-        ci: (byName.CI && byName.CI[i] && byName.CI[i].parameter.parameterName) || ''
-      })).filter(p => p.wx);
-      if (!periods.length) return null;
-      const data = { locationName: loc.locationName, periods, fetchedAt: Date.now() };
-      try { localStorage.setItem(CWA_CACHE_KEY, JSON.stringify({ exp: Date.now() + 30 * 60 * 1000, data })); } catch (_e) {}
-      return data;
-    } catch (_e) {
-      return null; // 靜默降級：F12 零紅字標準
-    }
+    let data = null;
+    try { data = await fetchCwaWeekly(); } catch (_e) {}            // 主：未來一週
+    if (!data) { try { data = await fetchCwa36h(); } catch (_e) {} } // 退：36 小時
+    if (data) { data.fetchedAt = Date.now(); try { localStorage.setItem(CWA_CACHE_KEY, JSON.stringify({ exp: Date.now() + 30 * 60 * 1000, data })); } catch (_e) {} }
+    return data; // 靜默降級：F12 零紅字標準
   }
 
   function weatherIconFor(wxText, pop) {
@@ -5571,8 +5615,9 @@
 
   function weatherPeriodLabel(p) {
     try {
-      const s = new Date(String(p.start).replace(/-/g, '/'));
-      const e = new Date(String(p.end).replace(/-/g, '/'));
+      const s = parseWeatherTime(p.start);
+      const e = parseWeatherTime(p.end);
+      if (!s || !e) return '';
       const hh = (d) => String(d.getHours()).padStart(2, '0') + ':00';
       const sameDay = s.getDate() === e.getDate();
       return `${s.getMonth() + 1}/${s.getDate()} ${hh(s)}–${sameDay ? '' : `${e.getMonth() + 1}/${e.getDate()} `}${hh(e)}`;
@@ -5615,8 +5660,8 @@
   // 36 小時預報 periods 中「起始日＝目標日」的段落
   function periodsForDate(periods, date) {
     return (periods || []).filter((p) => {
-      const s = new Date(String(p.start).replace(/-/g, '/'));
-      return s.getFullYear() === date.getFullYear() && s.getMonth() === date.getMonth() && s.getDate() === date.getDate();
+      const s = parseWeatherTime(p.start);
+      return s && s.getFullYear() === date.getFullYear() && s.getMonth() === date.getMonth() && s.getDate() === date.getDate();
     });
   }
 
@@ -5734,6 +5779,107 @@
     _weatherExpanded = {};
     const single = days.length === 1;
     container.innerHTML = days.map((x, i) => weatherDayCardHtml(x.date, x.day, i, single)).join('');
+
+    // Plan B 1c：行程期間任一天有雨 → 提示把戶外景點換成附近室內替代
+    const rainy = getRainyTripDays(days);
+    if (rainy.length && !collabReadOnly && Array.isArray(replanStops)) {
+      const outdoorStops = replanStops.filter((s) => s && s.type !== 'start' && s.type !== 'end'
+        && s.isOutdoor && Array.isArray(s.altNearby) && s.altNearby.some((a) => a.isOutdoor === false));
+      if (outdoorStops.length) {
+        const rd = rainy.map((x) => `${x.date.getMonth() + 1}/${x.date.getDate()}`).join('、');
+        const items = outdoorStops.map((s) => `
+          <div class="wc-rain-swap-item">
+            <span>🌳 ${escapeHtml(s.name)}</span>
+            <button class="wc-rain-swap-btn" onclick="openSwapPanel('${s.id}', true)">換室內</button>
+          </div>`).join('');
+        const div = document.createElement('div');
+        div.className = 'wc-rain-swap';
+        div.innerHTML = `<div class="wc-rain-swap-title">🌧 ${rd} 可能有雨，這些戶外景點可換成附近室內替代：</div>${items}`;
+        container.appendChild(div);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════
+  // Plan B：查看替換（用生成時保留的附近替代景點換掉某站）
+  // ══════════════════════════════════════════════════
+  let _swapPanelStopId = null;
+
+  window.openSwapPanel = function (stopId, filterIndoor) {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法替換景點', 'orange');
+    const stop = (replanStops || []).find((s) => s.id === stopId);
+    if (!stop || !Array.isArray(stop.altNearby) || !stop.altNearby.length) {
+      return feedbackToast('這一站沒有可用的替代景點', 'orange');
+    }
+    _swapPanelStopId = stopId;
+    let alts = stop.altNearby.slice();
+    if (filterIndoor) alts = alts.filter((a) => a.isOutdoor === false);
+    let overlay = document.getElementById('swap-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'swap-overlay';
+      overlay.className = 'swap-overlay';
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSwapPanel(); });
+      document.body.appendChild(overlay);
+    }
+    const rows = alts.map((a, i) => `
+      <button class="swap-item" onclick="applySwap(${i}, ${filterIndoor ? 'true' : 'false'})">
+        <div class="swap-item-main">
+          <span class="swap-item-name">${escapeHtml(a.name)}</span>
+          <span class="swap-badge ${a.isOutdoor ? 'out' : 'in'}">${a.isOutdoor ? '🌳 戶外' : '🏠 室內'}</span>
+        </div>
+        <div class="swap-item-sub">${a.distM != null ? '距離約 ' + (a.distM >= 1000 ? (a.distM / 1000).toFixed(1) + ' km' : a.distM + ' m') : ''}${a.rating ? ' · ★ ' + a.rating : ''}</div>
+        ${a.desc ? `<div class="swap-item-desc">${escapeHtml(a.desc)}</div>` : ''}
+      </button>`).join('');
+    overlay.innerHTML = `
+      <div class="swap-card" role="dialog" aria-modal="true">
+        <div class="swap-title">替換「${escapeHtml(stop.name)}」</div>
+        <div class="swap-sub">${filterIndoor ? '🌧 下雨天推薦的室內替代（依距離排序）' : '附近可替換的景點（依距離排序）'}</div>
+        <div class="swap-list">${rows || '<div class="swap-sub">沒有符合條件的替代景點</div>'}</div>
+        <button class="swap-close" onclick="closeSwapPanel()">取消</button>
+      </div>`;
+    requestAnimationFrame(() => overlay.classList.add('open'));
+  };
+
+  window.closeSwapPanel = function () {
+    const overlay = document.getElementById('swap-overlay');
+    if (overlay) overlay.classList.remove('open');
+    _swapPanelStopId = null;
+  };
+
+  window.applySwap = function (altIndex, wasIndoorFilter) {
+    const stop = (replanStops || []).find((s) => s.id === _swapPanelStopId);
+    if (!stop || !Array.isArray(stop.altNearby)) return closeSwapPanel();
+    let alts = stop.altNearby.slice();
+    if (wasIndoorFilter) alts = alts.filter((a) => a.isOutdoor === false);
+    const alt = alts[altIndex];
+    if (alt) swapStopWithAlternative(stop, alt);
+    closeSwapPanel();
+  };
+
+  function swapStopWithAlternative(stop, alt) {
+    const prev = { name: stop.name, lat: stop.lat, lng: stop.lng, desc: stop.desc, isOutdoor: stop.isOutdoor };
+    // 用替代景點覆蓋此站；座標鎖定跳過 Places 重驗
+    stop.name = alt.name;
+    stop.desc = alt.desc || '';
+    stop.lat = alt.lat; stop.lng = alt.lng;
+    stop.scenicCoordinates = { lat: alt.lat, lng: alt.lng };
+    stop._lockedCoordinates = { lat: alt.lat, lng: alt.lng };
+    stop.coordVerified = true;
+    stop.isOutdoor = (alt.isOutdoor === true);
+    stop.placeId = null; stop.businessHours = null; stop.checkedInAt = null;
+    // 被換掉的原景點放回替代池最前（可再換回去）；移除已採用的
+    if (Array.isArray(stop.altNearby)) {
+      stop.altNearby = stop.altNearby.filter((a) => a.name !== alt.name);
+      if (prev.name && Number.isFinite(prev.lat)) {
+        stop.altNearby.unshift({ name: prev.name, lat: prev.lat, lng: prev.lng, desc: prev.desc || '', rating: null, isOutdoor: prev.isOutdoor, distM: 0 });
+      }
+    }
+    feedbackToast(`🔄 已換成「${alt.name}」`, 'green');
+    renderItineraryDisplay();
+    if (isReplanning && typeof renderReplanBoard === 'function') renderReplanBoard();
+    persistCurrentTripStops();
+    if (typeof syncMapToCurrentTrip === 'function') syncMapToCurrentTrip().catch(() => {});
   }
 
   // 花費追蹤卡片：把人均預算拆成「交通（離島船票＋站間移動）」與「可動用餐飲/活動」並顯示。

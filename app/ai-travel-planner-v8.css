@@ -3234,3 +3234,26 @@ body.prototype-mode .prototype-id-chip {
 .wc-period-meta { color: var(--ink3); white-space: nowrap; }
 .wc-climate-note { font-size: 13px; line-height: 1.6; color: var(--ink2); }
 .wc-badge { display: inline-block; font-size: 11px; font-weight: 700; color: #7a5e10; background: var(--gold-light, #f5e8c0); border-radius: 999px; padding: 2px 8px; margin-left: 4px; vertical-align: middle; white-space: nowrap; }
+
+/* ── Plan B：查看替換面板 ── */
+.swap-btn { color: var(--accent-dark); }
+.swap-overlay { position: fixed; inset: 0; background: rgba(26,24,20,.5); z-index: 400; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity .2s; padding: 16px; }
+.swap-overlay.open { opacity: 1; pointer-events: auto; }
+.swap-card { background: var(--surface); border-radius: 18px; width: 100%; max-width: 420px; max-height: 84vh; overflow-y: auto; padding: 20px; box-shadow: var(--shadow-lg); }
+.swap-title { font-size: 18px; font-weight: 800; color: var(--ink); margin-bottom: 4px; }
+.swap-sub { font-size: 13px; color: var(--ink3); margin-bottom: 14px; }
+.swap-list { display: flex; flex-direction: column; gap: 8px; }
+.swap-item { text-align: left; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; cursor: pointer; font-family: inherit; transition: all .15s; }
+.swap-item:hover { border-color: var(--accent); background: var(--accent-light); }
+.swap-item-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.swap-item-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.swap-badge { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 8px; white-space: nowrap; flex-shrink: 0; }
+.swap-badge.out { background: #e0f0e8; color: #1f6b4a; }
+.swap-badge.in { background: var(--accent2-light); color: var(--accent2-dark); }
+.swap-item-sub { font-size: 12px; color: var(--ink3); margin-top: 3px; }
+.swap-item-desc { font-size: 12px; color: var(--ink2); margin-top: 4px; line-height: 1.5; text-wrap: pretty; }
+.swap-close { width: 100%; margin-top: 14px; padding: 11px; border-radius: 10px; border: 1.5px solid var(--border); background: transparent; color: var(--ink2); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.wc-rain-swap { margin-top: 14px; background: #eef4ff; border: 1px solid #cfe0f7; border-radius: 14px; padding: 14px 16px; }
+.wc-rain-swap-title { font-size: 14px; font-weight: 700; color: #2b4c6b; margin-bottom: 8px; }
+.wc-rain-swap-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; font-size: 13px; }
+.wc-rain-swap-btn { flex-shrink: 0; white-space: nowrap; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
