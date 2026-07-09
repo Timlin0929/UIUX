@@ -224,9 +224,10 @@ app.get('/api/tdx/*', tdxLimiter, async (req, res) => {
 const CWA_API_KEY = (process.env.CWA_API_KEY || '').trim();
 const CWA_UPSTREAM = 'https://opendata.cwa.gov.tw';
 // 只放行實際使用的資料集：
-//  - F-C0032-001：36 小時縣市天氣預報（天氣頁晨間簡報用，locationName=臺東縣）
-//  - F-D0047-089：臺東縣鄉鎮逐 12 小時預報（之後細化到鄉鎮時用）
-const CWA_ALLOWED_DATASET = /^(?:F-C0032-001|F-D0047-089)$/;
+//  - F-D0047-091：縣市未來一週天氣預報（主來源，12 小時間隔約 7 天，取臺東縣）
+//  - F-C0032-001：36 小時縣市天氣預報（一週抓不到時的 fallback）
+//  - F-D0047-089：臺東縣鄉鎮逐 12 小時預報（保留備用）
+const CWA_ALLOWED_DATASET = /^(?:F-D0047-091|F-C0032-001|F-D0047-089)$/;
 
 const cwaLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
