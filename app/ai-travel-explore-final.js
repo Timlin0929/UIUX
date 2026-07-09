@@ -308,6 +308,47 @@ function getLocalFoodList(destination) {
   return getLocalPoiList(destination, (typeof window !== 'undefined' && window.WAI_RESTAURANT_DATA) || null);
 }
 
+// ── Plan B 替代景點（查看替換）：生成時保留 ──
+// 本地 POI 無室內/戶外欄位，用名稱＋描述關鍵字啟發式判斷（供「下雨換室內」用）。
+function classifyIndoorOutdoor(name, desc) {
+  const t = String(name || '') + ' ' + String(desc || '');
+  const indoor = /館|博物|美術|文創|展覽|展館|中心|咖啡|餐廳|飯店|商場|市集|室內|廟|宮|寺|教堂|教會|書店|酒莊|觀光工廠|文物|故事館/;
+  const outdoor = /公園|海|沙灘|山|步道|瀑布|森林|部落|漁港|濕地|景觀|農場|牧場|溫泉|草原|溪|湖|島|岬|燈塔|花海|稻田|大道|自行車/;
+  if (outdoor.test(t) && !indoor.test(t)) return false; // 戶外
+  if (indoor.test(t)) return true;                       // 室內
+  return false;                                          // 預設戶外（台東多戶外景點）
+}
+function haversineM(a, b) {
+  if (!a || !b) return Infinity;
+  const R = 6371000, toR = (d) => d * Math.PI / 180;
+  const dLat = toR(b.lat - a.lat), dLng = toR(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toR(a.lat)) * Math.cos(toR(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+// 為每個非起訖站附上「附近替代景點」（本地池扣掉已排入者，依距離排序），並標室內/戶外。
+function attachStopAlternatives(stops, destination) {
+  if (!Array.isArray(stops) || !stops.length) return stops;
+  const pool = getLocalPoiList(destination) || [];
+  const usedNames = new Set(stops.map((s) => String((s && s.name) || '').trim()));
+  stops.forEach((stop) => {
+    if (!stop || stop.type === 'start' || stop.type === 'end' || !stop.name) return;
+    stop.isOutdoor = classifyIndoorOutdoor(stop.name, stop.desc);
+    const here = (Number.isFinite(stop.lat) && Number.isFinite(stop.lng)) ? { lat: stop.lat, lng: stop.lng } : null;
+    stop.altNearby = pool
+      .filter((p) => p && p.name && !usedNames.has(String(p.name).trim()) && Number.isFinite(p.lat) && Number.isFinite(p.lng))
+      .map((p) => ({
+        name: p.name, lat: p.lat, lng: p.lng,
+        desc: String(p.desc || '').slice(0, 80),
+        rating: p.rating || null,
+        isOutdoor: classifyIndoorOutdoor(p.name, p.desc),
+        distM: here ? Math.round(haversineM(here, { lat: p.lat, lng: p.lng })) : null
+      }))
+      .sort((a, b) => (a.distM ?? Infinity) - (b.distM ?? Infinity))
+      .slice(0, 6);
+  });
+  return stops;
+}
+
 // 用本地景點清單組「【已驗證景點快取】」hint（格式與 buildFirebasePoiHintBlock 一致），交給 AI 只做排序。
 function buildLocalPoiHintBlock(destination) {
   const pois = getLocalPoiList(destination);
@@ -5094,6 +5135,8 @@ async function _doGeneration(trip, wData) {
 
     if (finalPlan && finalPlan.stops) {
       trip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wData, livePlaces);
+      // Plan B：生成時為每站保留附近替代景點＋室內/戶外標記（供 planner 的「查看替換」與天氣驅動替換）
+      attachStopAlternatives(trip.stops, wData.dest || wData.destCustom || wData.region || '');
       // 使用者自訂名稱（customTitle）優先：AI 標題只在未自訂時作為別名保存
       trip.aiTitle = trip.customTitle ? trip.title : (finalPlan.title || trip.title);
       trip.aiReply = finalPlan.reply || '';
