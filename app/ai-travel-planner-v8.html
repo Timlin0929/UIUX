@@ -188,33 +188,21 @@
 
     <div id="view-weather" class="view-section">
       <div class="hero-section" style="padding-bottom: 24px;">
-        <div class="hero-title">晨間簡報</div>
-        <div class="hero-meta"><div class="hero-tag">🌤 接下來兩小時天氣</div></div>
+        <div class="hero-title">行程天氣</div>
+        <div class="hero-meta"><div class="hero-tag">🌤 載入有出發日期的行程後顯示</div></div>
       </div>
       <div class="weather-container">
-        
+        <!-- 卡片由 refreshWeatherView() 依行程日期動態產生；以下為尚未載入行程時的 placeholder -->
         <div class="weather-card sunny">
           <div class="wc-header">
             <div>
-              <div style="font-weight: 600; margin-bottom: 8px;">目前 · 等待指定地點</div>
-              <div class="wc-temp">28°</div>
+              <div style="font-weight: 600; margin-bottom: 8px;">載入行程後顯示天氣</div>
+              <div class="wc-temp">–°</div>
             </div>
-            <div class="wc-icon">☀️</div>
+            <div class="wc-icon">🌤</div>
           </div>
-          <div class="wc-advice">👕 天氣晴朗，適合步行散策，不用擔心下雨！</div>
+          <div class="wc-advice">建立或開啟一份有出發日期的行程，這裡會依行程長短顯示每天的天氣。</div>
         </div>
-
-        <div class="weather-card rainy">
-          <div class="wc-header">
-            <div>
-              <div style="font-weight: 600; margin-bottom: 8px;">一小時後預測</div>
-              <div class="wc-temp">24°</div>
-            </div>
-            <div class="wc-icon">🌦️</div>
-          </div>
-          <div class="wc-advice">☂️ 氣溫微降，維持多雲到晴，完全不影響行程。</div>
-        </div>
-
       </div>
     </div>
 

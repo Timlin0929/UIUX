@@ -5579,28 +5579,161 @@
     } catch (_e) { return ''; }
   }
 
-  async function refreshWeatherView() {
-    const data = await fetchTaitungWeather();
-    if (!data || !data.periods.length) return; // 抓不到就保留原（mock）內容
-    const cards = document.querySelectorAll('#view-weather .weather-card');
-    const heroTag = document.querySelector('#view-weather .hero-meta .hero-tag');
-    if (heroTag) heroTag.textContent = `🌤 ${data.locationName} 36 小時預報（中央氣象署）`;
-    const fill = (card, p, label) => {
-      if (!card || !p) return;
-      const labelEl = card.querySelector('.wc-header > div > div:first-child');
-      const tempEl = card.querySelector('.wc-temp');
-      const iconEl = card.querySelector('.wc-icon');
-      const adviceEl = card.querySelector('.wc-advice');
-      if (labelEl) labelEl.textContent = `${label} · ${weatherPeriodLabel(p)}`;
-      if (tempEl) tempEl.textContent = (p.minT && p.maxT) ? `${p.minT}–${p.maxT}°` : `${p.maxT || p.minT || '--'}°`;
-      if (iconEl) iconEl.textContent = weatherIconFor(p.wx, p.pop);
-      if (adviceEl) adviceEl.textContent = `${p.wx}。${weatherAdviceFor(p)}`;
-      // 卡片底色跟著降雨機率換（沿用既有 sunny/rainy 樣式）
-      card.classList.toggle('rainy', p.pop >= 30);
-      card.classList.toggle('sunny', p.pop < 30);
+  // 台東各月氣候平均（概略常態值；供超出預報範圍的行程參考）
+  const TAITUNG_CLIMATE = [
+    { hi: 24, lo: 16, note: '涼爽乾燥，偶有東北季風' },
+    { hi: 25, lo: 17, note: '溫和少雨，適合出遊' },
+    { hi: 27, lo: 19, note: '回暖舒適' },
+    { hi: 29, lo: 22, note: '漸熱，偶有陣雨' },
+    { hi: 31, lo: 24, note: '進入雨季，午後雷陣雨' },
+    { hi: 32, lo: 25, note: '炎熱多雨，注意防曬' },
+    { hi: 33, lo: 26, note: '最熱月，颱風季開始' },
+    { hi: 32, lo: 26, note: '炎熱，颱風季，留意路況' },
+    { hi: 31, lo: 25, note: '仍偏熱，颱風季尾聲' },
+    { hi: 29, lo: 23, note: '轉涼，天氣漸穩' },
+    { hi: 27, lo: 20, note: '舒適乾爽，旅遊旺季' },
+    { hi: 25, lo: 17, note: '涼爽，東北季風偶雨' }
+  ];
+  const WEEKDAY_ZH = ['日', '一', '二', '三', '四', '五', '六'];
+  function weatherDateLabel(d) { return `${d.getMonth() + 1}/${d.getDate()}（${WEEKDAY_ZH[d.getDay()]}）`; }
+
+  // 取行程涵蓋的日期（出發→回程；無回程＝單日）；無出發日回 null
+  function getTripWeatherDates() {
+    const prefs = currentTripPreferences || {};
+    const depStr = prefs.departureDate || currentTripDepartureDate || '';
+    if (!depStr) return null;
+    const start = new Date(String(depStr) + 'T00:00:00');
+    if (isNaN(start.getTime())) return null;
+    let end = new Date(start);
+    const retStr = prefs.returnDate || '';
+    if (retStr) { const e = new Date(String(retStr) + 'T00:00:00'); if (!isNaN(e.getTime()) && e >= start) end = e; }
+    const dates = [];
+    for (let d = new Date(start); d <= end && dates.length < 10; d.setDate(d.getDate() + 1)) dates.push(new Date(d));
+    return dates;
+  }
+
+  // 36 小時預報 periods 中「起始日＝目標日」的段落
+  function periodsForDate(periods, date) {
+    return (periods || []).filter((p) => {
+      const s = new Date(String(p.start).replace(/-/g, '/'));
+      return s.getFullYear() === date.getFullYear() && s.getMonth() === date.getMonth() && s.getDate() === date.getDate();
+    });
+  }
+
+  // 把某日的預報段落聚合成一天摘要
+  function aggregateForecastDay(periods) {
+    if (!periods.length) return null;
+    const temps = periods.flatMap((p) => [Number(p.minT), Number(p.maxT)].filter(Number.isFinite));
+    const pop = Math.max(...periods.map((p) => Number(p.pop) || 0));
+    const rep = periods.slice().sort((a, b) => (Number(b.pop) || 0) - (Number(a.pop) || 0))[0];
+    return {
+      source: 'forecast',
+      minT: temps.length ? Math.min(...temps) : null,
+      maxT: temps.length ? Math.max(...temps) : null,
+      pop, wx: rep.wx, ci: rep.ci, periods
     };
-    fill(cards[0], data.periods[0], `${data.locationName} 目前時段`);
-    fill(cards[1], data.periods[1], '下一時段');
+  }
+
+  function climateDay(date) {
+    const c = TAITUNG_CLIMATE[date.getMonth()];
+    const rainy = /雨/.test(c.note);
+    return { source: 'climate', minT: c.lo, maxT: c.hi, pop: rainy ? 40 : 10, wx: c.note, ci: '', note: c.note };
+  }
+
+  // 某趟行程「有雨的日期」清單（供 Plan B 天氣驅動替換用）：回傳 [{date, pop, outdoorRainy:true}]
+  function getRainyTripDays(days) {
+    return (days || []).filter((x) => (Number(x.day.pop) || 0) >= 50);
+  }
+
+  let _weatherExpanded = {}; // dayIndex → 是否展開
+  window.toggleWeatherDay = function (i) {
+    _weatherExpanded[i] = !_weatherExpanded[i];
+    const detail = document.getElementById('wcDetail-' + i);
+    const chev = document.getElementById('wcChev-' + i);
+    if (detail) detail.style.display = _weatherExpanded[i] ? 'block' : 'none';
+    if (chev) chev.textContent = _weatherExpanded[i] ? '▲' : '▼';
+  };
+
+  function weatherDayCardHtml(date, day, idx, expandedDefault) {
+    const rainy = (Number(day.pop) || 0) >= 30;
+    const icon = day.source === 'climate' ? (rainy ? '🌧️' : '⛅') : weatherIconFor(day.wx, day.pop);
+    const temp = (day.minT != null && day.maxT != null) ? `${day.minT}–${day.maxT}°` : '--';
+    const expanded = expandedDefault || _weatherExpanded[idx];
+    let detailHtml;
+    if (day.source === 'forecast') {
+      detailHtml = day.periods.map((p) => `
+        <div class="wc-period">
+          <span class="wc-period-time">${weatherPeriodLabel(p)}</span>
+          <span>${weatherIconFor(p.wx, p.pop)} ${escapeHtml(p.wx)}</span>
+          <span class="wc-period-meta">${p.minT}–${p.maxT}° · 降雨 ${p.pop}%</span>
+        </div>`).join('');
+    } else {
+      detailHtml = `<div class="wc-climate-note">📊 ${escapeHtml(day.note)}<br><span style="color:var(--ink3)">中央氣象署預報僅到未來一週，接近出發日會自動更新為即時預報。</span></div>`;
+    }
+    const badge = day.source === 'climate' ? `<span class="wc-badge">氣候平均</span>` : '';
+    const advice = day.source === 'forecast'
+      ? escapeHtml(day.wx) + '。' + escapeHtml(weatherAdviceFor(day))
+      : `此為 ${date.getMonth() + 1} 月的氣候平均值，僅供參考；接近出發日再回來看即時預報。`;
+    return `
+      <div class="weather-card ${rainy ? 'rainy' : 'sunny'}">
+        <div class="wc-header" onclick="toggleWeatherDay(${idx})" style="cursor:pointer;">
+          <div>
+            <div style="font-weight:600;margin-bottom:8px;">${weatherDateLabel(date)} ${badge}</div>
+            <div class="wc-temp">${temp}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div class="wc-icon">${icon}</div>
+            <span id="wcChev-${idx}" style="color:var(--ink3);font-size:13px;">${expanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
+        <div class="wc-advice">${advice}</div>
+        <div class="wc-detail" id="wcDetail-${idx}" style="display:${expanded ? 'block' : 'none'};margin-top:12px;border-top:1px dashed var(--border);padding-top:12px;">
+          ${detailHtml}
+        </div>
+      </div>`;
+  }
+
+  // 給 Plan B 1c 用：目前天氣頁算出的每日資料（供「下雨換室內」判定）
+  let currentWeatherDays = [];
+
+  async function refreshWeatherView() {
+    const container = document.querySelector('#view-weather .weather-container');
+    const titleEl = document.querySelector('#view-weather .hero-title');
+    const tagEl = document.querySelector('#view-weather .hero-meta .hero-tag');
+    if (!container) return;
+
+    const dates = getTripWeatherDates();
+    if (!dates || !dates.length) {
+      if (titleEl) titleEl.textContent = '行程天氣';
+      if (tagEl) tagEl.textContent = '🌤 載入有出發日期的行程後顯示';
+      currentWeatherDays = [];
+      return; // 沒有行程日期就保留現況
+    }
+
+    if (titleEl) {
+      const a = dates[0], b = dates[dates.length - 1];
+      titleEl.textContent = dates.length === 1
+        ? `行程天氣 · ${a.getMonth() + 1}/${a.getDate()}`
+        : `行程天氣 · ${a.getMonth() + 1}/${a.getDate()}–${b.getMonth() + 1}/${b.getDate()}`;
+    }
+
+    const fc = await fetchTaitungWeather(); // {locationName, periods} 或 null
+    const periods = (fc && fc.periods) || [];
+    let anyForecast = false;
+    const days = dates.map((d) => {
+      const day = aggregateForecastDay(periodsForDate(periods, d)) || climateDay(d);
+      if (day.source === 'forecast') anyForecast = true;
+      return { date: d, day };
+    });
+    currentWeatherDays = days;
+
+    if (tagEl) tagEl.textContent = anyForecast
+      ? `🌤 ${(fc && fc.locationName) || '臺東縣'} 行程期間預報（中央氣象署）`
+      : '🌤 行程尚遠，先看該月氣候平均值';
+
+    _weatherExpanded = {};
+    const single = days.length === 1;
+    container.innerHTML = days.map((x, i) => weatherDayCardHtml(x.date, x.day, i, single)).join('');
   }
 
   // 花費追蹤卡片：把人均預算拆成「交通（離島船票＋站間移動）」與「可動用餐飲/活動」並顯示。

@@ -3225,3 +3225,12 @@ body.prototype-mode .prototype-id-chip {
 .wc-icon, .hero-tag, .nav-pill, .stay-time-tag, .checkin-btn { white-space: nowrap; }
 /* 通用工具：拆開會怪的片段（數字+單位、時間區間、專有名詞）包這個 */
 .nowrap { white-space: nowrap; }
+
+/* ── 天氣頁：每日卡展開詳情（C5 改版）── */
+.wc-detail { font-size: 13px; }
+.wc-period { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.wc-period:last-child { border-bottom: none; }
+.wc-period-time { font-weight: 600; color: var(--ink2); white-space: nowrap; }
+.wc-period-meta { color: var(--ink3); white-space: nowrap; }
+.wc-climate-note { font-size: 13px; line-height: 1.6; color: var(--ink2); }
+.wc-badge { display: inline-block; font-size: 11px; font-weight: 700; color: #7a5e10; background: var(--gold-light, #f5e8c0); border-radius: 999px; padding: 2px 8px; margin-left: 4px; vertical-align: middle; white-space: nowrap; }
