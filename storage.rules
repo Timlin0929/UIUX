@@ -1,25 +1,33 @@
 rules_version = '2';
 
-// Firebase Storage 規則（需在 Firebase Console → Storage → Rules 手動發布，同 firestore.rules 流程）
+// Firebase Storage 規則（合併版：Console 既有兩段原樣保留 ＋ 新增 trip-photos）
+// 發布方式：整份貼到 Firebase Console → Storage → Rules → 發布
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // 既有「行程海報」上傳（uploadPosterToStorage）：分享連結需公開讀
-    match /posters/{file} {
+    // App 端（Android）：AI 行程插圖 —— 既有段落，原樣保留
+    match /itinerary_backgrounds/{file} {
       allow read: if true;
-      allow create: if request.auth != null
-                    && request.resource.size < 5 * 1024 * 1024
-                    && request.resource.contentType.matches('image/.*');
+      allow write: if request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType == 'image/jpeg';
     }
 
-    // 旅記景點照片：僅本人可寫/刪；顯示走含 token 的 downloadURL（不經規則），read 收緊不影響前端
+    // 網頁端：行程海報（uploadPosterToStorage）—— 既有段落，原樣保留
+    match /posters/{file} {
+      allow read: if true;
+      allow write: if request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType == 'image/png';
+    }
+
+    // 網頁端：旅記景點照片（本次新增）—— 僅本人可寫/刪；
+    // 縮圖顯示走含 token 的 downloadURL（不經規則），read 收緊不影響前端
     match /trip-photos/{uid}/{tripId}/{file} {
       allow read: if request.auth != null;
       allow create: if request.auth != null && request.auth.uid == uid
                     && request.resource.size < 5 * 1024 * 1024
-                    && request.resource.contentType.matches('image/jpeg');
-      // delete 必須獨立寫：合併成 allow write 會讓 delete 也吃到 request.resource 條件
-      //（delete 沒有 request.resource → 永遠失敗）
+                    && request.resource.contentType == 'image/jpeg';
+      // delete 必須獨立寫：併進含 request.resource 條件的 write 會讓刪除永遠失敗
+      //（delete 沒有 request.resource）
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
   }
