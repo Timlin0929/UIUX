@@ -81,6 +81,10 @@
   let replanStops = [];
   let persistTripDebounceTimer = null;
   let persistTripMaxWaitTimer = null;
+  // 本次工作階段內使用者是否實際改過行程。載入路徑一律「只讀不寫」——
+  // 開頁自動流程（超時壓縮、enrichment、路線繪製回填 transitMin）只改記憶體，
+  // 不寫回 Firestore，否則會用重算值覆寫 App 端剛寫入的共編資料。
+  let tripUserDirty = false;
   const TRANSIT_MODE_OPTIONS = [
     { value: 'taxi', label: '計程車', icon: '🚕' },
     { value: 'scooter', label: '機車', icon: '🛵' },
@@ -1630,6 +1634,31 @@
     return s.duration || s.stayMin || fallback;
   }
 
+  // ── App 端（Android）共編欄位保留 ──
+  // App 端在每個 stop 上寫自己的欄位（duration/time/order/stopId…，未來還會加）。
+  // Firestore 的陣列無法逐元素 merge，網頁端存檔是整包覆寫 stops，
+  // 所以載入時把「非網頁 schema」的欄位原樣收進 stop.__appExtras，
+  // 存檔時鋪回快照，避免把他端資料剝掉。網頁 schema 欄位（含 duration，
+  // 由 stayMin 同步）不進 extras，以免舊值蓋掉網頁端的編輯。
+  const WEB_STOP_FIELDS = new Set([
+    'name', 'emoji', 'type', 'stayMin', 'duration', 'transitMin', 'transitMode',
+    'lat', 'lng', 'scenicCoordinates', '_lockedCoordinates', 'nearbyToiletLocations',
+    'mapPinId', 'manualStartMin', 'manualEndMin', 'placeId', 'businessHours',
+    'coordVerified', 'desc', 'isMergedAttraction', 'mergedSubSpots',
+    'mergedRadiusMeters', 'mergedMemberCoords', 'checkedInAt', 'isOutdoor', 'altNearby'
+  ]);
+  function extractAppStopExtras(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    let extras = null;
+    Object.keys(raw).forEach((k) => {
+      if (WEB_STOP_FIELDS.has(k) || k === '__appExtras') return;
+      if (raw[k] === undefined) return; // Firestore 不接受 undefined
+      if (!extras) extras = {};
+      extras[k] = raw[k];
+    });
+    return extras;
+  }
+
   // 港口/端點站描述清理：去掉完整「（含 …）」，再移除尾端未閉合的破碎括號片段
   // （如 AI desc 末端殘留「…探索（s…」沒有對應的右括號），避免顯示亂碼。
   function sanitizeHarborDesc(desc) {
@@ -1815,7 +1844,8 @@
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
                     manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
                     checkedInAt: s.checkedInAt || null,
-                    isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null // Plan B 替代景點跟著載入
+                    isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                    __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
                   };
                 }
               }
@@ -1899,7 +1929,8 @@
                 nearbyToiletLocations: s.nearbyToiletLocations || [],
                 manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
                 checkedInAt: s.checkedInAt || null,
-                isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null // Plan B 替代景點跟著載入
+                isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
               };
             }));
             
@@ -1974,14 +2005,15 @@
               }
             }
 
-            // 載入後若超出設定時長 → 平均壓縮（餐廳例外）並寫回存檔；
-            // 否則合併大景點停留會被 enrich「只加長不縮短」回脹，導致重載又變回未壓縮。
+            // 載入後若超出設定時長 → 平均壓縮（餐廳例外），僅作畫面顯示。
+            // 注意：載入路徑不可寫回 Firestore——壓縮/enrich 的重算值一旦回寫，
+            // 會把 App 端剛存的 stayMin/duration 覆蓋掉（雙端共編互洗資料）。
+            // 壓縮結果留在記憶體，待使用者實際互動存檔時才一併寫回。
             currentTripWindow.start = (trip.wizardData && trip.wizardData.startTime)
               || (replanStops[0] && replanStops[0].time)
               || '09:00';
             try {
-              const _loadFit = fitScheduleToTimeLimit();
-              if (_loadFit.changed) persistCurrentTripStops();
+              fitScheduleToTimeLimit();
             } catch (_e) { console.warn('[load] 超時壓縮略過：', _e); }
 
             const durationSum = replanStops.reduce((sum, s, idx) => {
@@ -2012,8 +2044,10 @@
           // 載入後背景補各站「附近廁所」文字（地圖 pin 仍只在點選階段時顯示）
           prefetchAllStopToiletData();
 
-          // 載入 + enrichment 完畢，回寫補上的 placeId / businessHours / scenicCoordinates
-          schedulePersistTrip();
+          // 載入 + enrichment 補上的 placeId / businessHours / 座標只留在記憶體，
+          // 不在載入路徑回寫（只讀不寫）：開頁即整包 set stops 會把 App 端共編欄位
+          // （duration/time/order/stopId…）洗掉、stayMin 也被重算值覆蓋。
+          // 這些補值會在使用者下次實際互動存檔時一併帶上。
         }
       }
     } catch(e) { console.error('Init error:', e); }
@@ -4553,7 +4587,8 @@
         nearbyToiletLocations: s.nearbyToiletLocations || [],
         checkedInAt: s.checkedInAt || null,
         isOutdoor: s.isOutdoor || false,
-        altNearby: s.altNearby || null
+        altNearby: s.altNearby || null,
+        __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
       };
     });
   }
@@ -4669,12 +4704,19 @@
     if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
 
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+    tripUserDirty = true; // 走到這裡＝有互動觸發的存檔，之後的自動回填（如路線 transitMin）才允許跟著存
 
     const stopsSnapshot = replanStops.map((stop) => ({
+      // App 端（Android）的欄位（time/order/stopId…）先鋪回，整包覆寫 stops 才不會剝掉他端資料；
+      // 網頁 schema 欄位在後面覆寫，以網頁當前狀態為準。
+      ...(stop.__appExtras || {}),
       name: stop.name,
       emoji: stop.emoji || '📍',
       type: stop.type || null,
       stayMin: stop.stayMin,
+      // App 端停留欄位與 stayMin 同步寫（App 寫入時也是 duration＋stayMin 一起），
+      // 兩端讀取（duration 優先）才會一致；否則網頁改停留後重載會被舊 duration 蓋回。
+      duration: stop.stayMin ?? null,
       transitMin: stop.transitMin,
       transitMode: stop.transitMode,
       lat: stop.lat,
@@ -4787,6 +4829,7 @@
   }
 
   function schedulePersistTrip() {
+    tripUserDirty = true;
     clearTimeout(persistTripDebounceTimer);
     persistTripDebounceTimer = setTimeout(() => {
       persistTripDebounceTimer = null;
@@ -10605,7 +10648,9 @@
 
               if (typeof origin.stopIndex === 'number' && replanStops[origin.stopIndex]) {
                 replanStops[origin.stopIndex].transitMin = legEstimate.durationMinutes;
-                schedulePersistTrip();
+                // 開頁自動繪路線也會走到這裡：使用者尚未互動就不寫回（載入只讀不寫），
+                // 避免每次重新整理都以 Google 回填的 transitMin 改動 Firestore。
+                if (tripUserDirty) schedulePersistTrip();
               }
             }
 
