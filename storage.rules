@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Firebase Storage 規則（需在 Firebase Console → Storage → Rules 手動發布，同 firestore.rules 流程）
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // 既有「行程海報」上傳（uploadPosterToStorage）：分享連結需公開讀
+    match /posters/{file} {
+      allow read: if true;
+      allow create: if request.auth != null
+                    && request.resource.size < 5 * 1024 * 1024
+                    && request.resource.contentType.matches('image/.*');
+    }
+
+    // 旅記景點照片：僅本人可寫/刪；顯示走含 token 的 downloadURL（不經規則），read 收緊不影響前端
+    match /trip-photos/{uid}/{tripId}/{file} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.auth.uid == uid
+                    && request.resource.size < 5 * 1024 * 1024
+                    && request.resource.contentType.matches('image/jpeg');
+      // delete 必須獨立寫：合併成 allow write 會讓 delete 也吃到 request.resource 條件
+      //（delete 沒有 request.resource → 永遠失敗）
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

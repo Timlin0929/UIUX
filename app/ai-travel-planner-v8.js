@@ -954,6 +954,45 @@
     return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
+  // ── GPS 驗證式打卡工具 ──
+  // 抓一次目前定位。永不 reject（避免 unhandled rejection 紅字）：
+  // 成功 resolve {ok:true, lat, lng, accuracy}；失敗 resolve {ok:false, reason}。
+  function getCurrentPositionOnce(timeoutMs = 8000) {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== 'function') {
+        return resolve({ ok: false, reason: 'unsupported' });
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({
+          ok: true,
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: Number(pos.coords.accuracy) || 0
+        }),
+        (err) => {
+          const reason = err && err.code === 1 ? 'denied'
+            : err && err.code === 2 ? 'unavailable'
+            : 'timeout';
+          resolve({ ok: false, reason });
+        },
+        { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 30000 }
+      );
+    });
+  }
+
+  // 站點座標讀取，優先序同共編快照（鎖定座標 → 已解析座標 → 頂層 lat/lng）
+  function getStopLatLng(stop) {
+    if (!stop) return null;
+    return readCoordinateObject(stop._lockedCoordinates)
+      || readCoordinateObject(stop.scenicCoordinates)
+      || readCoordinateObject(stop);
+  }
+
+  function formatDistanceZh(meters) {
+    if (!Number.isFinite(meters)) return '';
+    return meters < 1000 ? `${Math.round(meters)} 公尺` : `${(meters / 1000).toFixed(1)} 公里`;
+  }
+
   function scorePlaceCandidate(place, stop, region, title = '', biasCenter = null, candidatePosition = null) {
     const haystack = normalizeMapText(
       `${place?.name || ''} ${place?.formatted_address || ''} ${place?.vicinity || ''}`
@@ -3074,6 +3113,241 @@
     }
   }
 
+  // ── 旅記照片（拍照 → 壓縮 → Firebase Storage → 掛回造訪紀錄）──
+
+  // 壓縮成 JPEG（長邊 maxEdge、quality）。EXIF 方向：優先 createImageBitmap 的
+  // from-image（Chrome/Android 正確轉正）；fallback 的 <img> 在 iOS 15+ drawImage
+  // 也會自動套方向。decode 失敗（如 HEIC）會 throw，呼叫端負責友善提示。
+  async function compressImageToJpeg(file, maxEdge = 1600, quality = 0.8) {
+    let source = null;
+    let objectUrl = null;
+    try {
+      if (typeof createImageBitmap === 'function') {
+        source = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => null);
+      }
+      if (!source) {
+        objectUrl = URL.createObjectURL(file);
+        source = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('image decode failed'));
+          img.src = objectUrl;
+        });
+      }
+      const w = source.width || source.naturalWidth;
+      const h = source.height || source.naturalHeight;
+      const scale = Math.min(1, maxEdge / Math.max(w, h));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (!blob) throw new Error('toBlob failed');
+      return blob;
+    } finally {
+      if (source && typeof source.close === 'function') source.close();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  async function uploadTripPhoto(blob, tripId) {
+    const uid = firebaseAuth.currentUser.uid;
+    const ts = Date.now();
+    const path = `trip-photos/${uid}/${tripId || 'no-trip'}/${ts}.jpg`;
+    const snapshot = await firebaseStorage.ref(path).put(blob, { contentType: 'image/jpeg' });
+    const url = await snapshot.ref.getDownloadURL();
+    return { url, path, ts };
+  }
+
+  // 拍照/選圖入口（旅記卡「📷」與打卡後 snackbar 共用）。
+  // input 不加 capture：iOS 加了會強制只開相機；不加則 iOS/Android 都出「拍照／相簿」選單。
+  function addPhotoForVisitedPlace(name) {
+    if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) {
+      return feedbackToast('登入後即可保存照片', 'orange');
+    }
+    const input = document.getElementById('tripPhotoInput');
+    if (!input) return;
+    if (!input.dataset.bound) {
+      input.dataset.bound = '1';
+      input.addEventListener('change', handleTripPhotoInputChange);
+    }
+    input.dataset.targetName = name || '';
+    input.value = '';
+    input.click();
+  }
+
+  async function handleTripPhotoInputChange(evt) {
+    const input = evt.target;
+    const name = input.dataset.targetName || '';
+    const files = Array.from(input.files || []);
+    if (!name || !files.length) return;
+    const norm = name.replace(/\s/g, '').toLowerCase();
+    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    if (!rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
+    feedbackToast('📤 照片上傳中…', 'blue');
+    const results = [];
+    for (const f of files) {
+      try {
+        const blob = await compressImageToJpeg(f);
+        results.push(await uploadTripPhoto(blob, rec.tripId || ''));
+      } catch (e) { console.warn('照片上傳失敗：', e); }
+    }
+    if (!results.length) return feedbackToast('照片上傳失敗，這張格式可能不支援', 'orange');
+    updateVisitedPlaceByName(name, (p) => { (p.photos = p.photos || []).push(...results); });
+    if (document.getElementById('travellog-list')) renderTravelLog();
+    feedbackToast(`✅ 已加入 ${results.length} 張照片`, 'green');
+  }
+
+  // 打卡成功後的拍照提示：登入時給可點的 snackbar（拍照按鈕），未登入退回純文字 toast
+  function showPhotoPromptSnackbar(stopName) {
+    if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) {
+      return feedbackToast('📸 拍張照替這一站留下回憶吧！', 'blue');
+    }
+    const old = document.getElementById('photoPromptSnackbar');
+    if (old) old.remove();
+    const bar = document.createElement('div');
+    bar.id = 'photoPromptSnackbar';
+    bar.className = 'photo-prompt-snackbar';
+    const msg = document.createElement('span');
+    msg.className = 'photo-prompt-msg';
+    msg.textContent = '📸 拍張照替這一站留下回憶';
+    const btn = document.createElement('button');
+    btn.className = 'photo-prompt-btn';
+    btn.textContent = '拍照';
+    btn.onclick = () => { bar.remove(); addPhotoForVisitedPlace(stopName); };
+    const close = document.createElement('button');
+    close.className = 'photo-prompt-close';
+    close.textContent = '✕';
+    close.onclick = () => bar.remove();
+    bar.append(msg, btn, close);
+    document.body.appendChild(bar);
+    setTimeout(() => {
+      if (!bar.isConnected) return;
+      bar.classList.add('hide');
+      setTimeout(() => bar.remove(), 400);
+    }, 7000);
+  }
+
+  function deleteTripPhoto(name, ts) {
+    if (!window.confirm('要刪除這張照片嗎？')) return;
+    const norm = (name || '').replace(/\s/g, '').toLowerCase();
+    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    const photo = rec && Array.isArray(rec.photos) ? rec.photos.find(p => p && p.ts === ts) : null;
+    if (photo && photo.path && firebaseStorage) {
+      firebaseStorage.ref(photo.path).delete().catch(() => {}); // object-not-found 等一律靜默
+    }
+    updateVisitedPlaceByName(name, (p) => { p.photos = (p.photos || []).filter(x => x && x.ts !== ts); });
+    renderTravelLog();
+    feedbackToast('照片已刪除', 'blue');
+  }
+
+  // ── 旅程拼貼（把一趟旅程的照片合成一張大圖，分享/下載）──
+
+  function renderCollageBar() {
+    const bar = document.getElementById('travellog-collage-bar');
+    if (!bar) return;
+    const groups = {};
+    getVisitedPlaces().forEach((p) => {
+      if (!Array.isArray(p.photos) || !p.photos.length) return;
+      const key = p.tripId || 'no-trip';
+      if (!groups[key]) groups[key] = { tripId: key, tripTitle: p.tripTitle || '我的旅程', count: 0 };
+      groups[key].count += p.photos.length;
+    });
+    const list = Object.values(groups);
+    bar.style.display = list.length ? '' : 'none';
+    bar.innerHTML = list.map((g) => {
+      const idEsc = escapeHtml(g.tripId).replace(/'/g, '&#39;');
+      return `<button class="travellog-collage-btn" onclick="exportTripCollage('${idEsc}')">🖼 匯出拼貼 · ${escapeHtml(g.tripTitle)}（${g.count} 張）</button>`;
+    }).join('');
+  }
+
+  async function exportTripCollage(tripId) {
+    const records = getVisitedPlaces().filter(p => (p.tripId || 'no-trip') === tripId);
+    const items = [];
+    records.forEach((p) => (p.photos || []).forEach((ph) => {
+      if (ph && ph.url) items.push({ spotName: p.name || '', url: ph.url, ts: ph.ts || 0 });
+    }));
+    if (!items.length) return;
+    items.sort((a, b) => a.ts - b.ts);
+    const picked = items.slice(-16); // 上限 16 張，超過取最新
+    feedbackToast('🖼 拼貼製作中…', 'blue');
+
+    // crossOrigin='anonymous' 是關鍵：少了它 canvas 會被污染，toBlob 直接 SecurityError
+    const loaded = (await Promise.all(picked.map(it => new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve({ ...it, img });
+      img.onerror = () => resolve(null);
+      img.src = it.url;
+    })))).filter(Boolean);
+    if (!loaded.length) return feedbackToast('照片載入失敗，請稍後再試', 'orange');
+
+    const title = (records[0] && records[0].tripTitle) || '我的旅程';
+    const dates = records.map(p => p.visitDate).filter(Boolean).sort();
+    const dateRange = !dates.length ? ''
+      : dates[0] === dates[dates.length - 1] ? dates[0]
+      : `${dates[0]} – ${dates[dates.length - 1]}`;
+
+    const n = loaded.length;
+    const cols = n <= 4 ? 2 : n <= 9 ? 3 : 4;
+    const rows = Math.ceil(n / cols);
+    const W = 1200, headerH = 140, pad = 12;
+    const cell = Math.floor((W - pad * (cols + 1)) / cols);
+    const H = headerH + rows * (cell + pad) + pad;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#f6f4ef'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#2c3e50';
+    ctx.font = 'bold 44px "Noto Sans TC", "PingFang TC", sans-serif';
+    ctx.fillText(title, pad + 12, 64);
+    ctx.font = '24px "Noto Sans TC", "PingFang TC", sans-serif';
+    ctx.fillStyle = '#8fa4b8';
+    ctx.fillText(dateRange, pad + 12, 102);
+
+    loaded.forEach((it, i) => {
+      const cx = pad + (i % cols) * (cell + pad);
+      const cy = headerH + Math.floor(i / cols) * (cell + pad);
+      const iw = it.img.naturalWidth, ih = it.img.naturalHeight;
+      const s = Math.max(cell / iw, cell / ih); // cover 裁切置中
+      const sw = cell / s, sh = cell / s;
+      ctx.drawImage(it.img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, cx, cy, cell, cell);
+      const barH = 34;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(cx, cy + cell - barH, cell, barH);
+      ctx.fillStyle = '#fff';
+      ctx.font = '20px "Noto Sans TC", "PingFang TC", sans-serif';
+      let label = it.spotName;
+      while (label && ctx.measureText(label + '…').width > cell - 20) label = label.slice(0, -1);
+      if (label !== it.spotName) label += '…';
+      ctx.fillText(label, cx + 10, cy + cell - 11);
+    });
+
+    let blob = null;
+    try {
+      blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    } catch (e) { console.warn('拼貼輸出失敗（可能是圖片 CORS）：', e); }
+    if (!blob) return feedbackToast('拼貼輸出失敗，請稍後再試', 'orange');
+
+    const file = new File([blob], `${title}-拼貼.jpg`, { type: 'image/jpeg' });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title });
+        feedbackToast('✅ 拼貼已完成', 'green');
+        return;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return; // 使用者取消分享
+      console.warn('拼貼分享失敗，改為下載：', e);
+    }
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = `${title}-拼貼.jpg`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(anchor.href), 5000);
+    feedbackToast('✅ 拼貼已下載', 'green');
+  }
+
   async function copyImageUrl() {
     if (!posterGeneratedImageBase64) {
       window.alert('請先生成插圖再複製連結。'); return;
@@ -4427,24 +4701,49 @@
       <div class="travellog-region">
         <div class="travellog-region-title">📍 ${region}（${spots.length} 個景點）</div>
         <div class="travellog-spots">
-          ${spots.map(s => `
+          ${spots.map(s => {
+            const nameEsc = s.name.replace(/'/g, '&#39;');
+            const photos = Array.isArray(s.photos) ? s.photos.filter(p => p && p.url) : [];
+            // downloadURL 帶 &token=，進 attribute 一定要 escapeHtml
+            const photoRow = `
+              <div class="travellog-photo-row">
+                ${photos.map(p => `
+                  <div class="travellog-photo-thumb">
+                    <img src="${escapeHtml(p.url)}" alt="" loading="lazy" onclick="openImageLightbox(this.src)">
+                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameEsc}', ${Number(p.ts) || 0})">✕</button>
+                  </div>
+                `).join('')}
+                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameEsc}')" title="新增照片">📷</button>
+              </div>`;
+            return `
             <div class="travellog-spot-card">
-              <span class="travellog-spot-emoji">${s.emoji || '📍'}</span>
-              <div class="travellog-spot-info">
-                <span class="travellog-spot-name">${s.name}</span>
-                <span class="travellog-spot-meta">${s.visitDate || ''}${s.tripTitle ? ' · ' + s.tripTitle : ''}</span>
+              <div class="travellog-spot-main">
+                <span class="travellog-spot-emoji">${s.emoji || '📍'}</span>
+                <div class="travellog-spot-info">
+                  <span class="travellog-spot-name">${s.name}</span>
+                  <span class="travellog-spot-meta">${s.visitDate || ''}${s.tripTitle ? ' · ' + s.tripTitle : ''}${s.gpsVerified === true ? ' <span class="travellog-gps-badge">📍 GPS</span>' : ''}</span>
+                </div>
+                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameEsc}')">✕</button>
               </div>
-              <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${s.name.replace(/'/g, '&#39;')}')">✕</button>
-            </div>
-          `).join('')}
+              ${photoRow}
+            </div>`;
+          }).join('')}
         </div>
       </div>
     `).join('');
+
+    renderCollageBar();
   }
 
   function removeVisitedPlaceByName(name) {
-    const places = getVisitedPlaces().filter(p => p.name !== name);
-    localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places));
+    const all = getVisitedPlaces();
+    // 被移除紀錄的照片一併清 Storage（失敗靜默）
+    if (typeof firebaseStorage !== 'undefined' && firebaseStorage) {
+      all.filter(p => p.name === name && Array.isArray(p.photos))
+        .forEach(p => p.photos.forEach(ph => { if (ph && ph.path) firebaseStorage.ref(ph.path).delete().catch(() => {}); }));
+    }
+    const places = all.filter(p => p.name !== name);
+    saveVisitedPlaces(places); // 走統一出口，順修此處原本不同步 Firestore 的缺口
     renderTravelLog();
     refreshStopVisitedButtons();
     showVisitedToast(`${name} 已從旅遊紀錄移除`);
@@ -5072,27 +5371,68 @@
     updateItineraryStageUI();
   };
 
-  window.checkInCurrentStop = function(stopId, event) {
+  // GPS 等待期間（最長 8 秒）防重複點擊
+  let checkInInFlight = false;
+
+  window.checkInCurrentStop = async function(stopId, event) {
     if (event) event.stopPropagation();
     if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法打卡', 'orange');
+    if (checkInInFlight) return;
     const stopIdx = replanStops.findIndex(s => s.id === stopId);
     if (stopIdx === -1 || stopIdx !== currentStopIndex) return;
     const stop = replanStops[stopIdx];
     const isEndpoint = stop.type === 'start' || stop.type === 'end';
 
+    // GPS 驗證：站點有座標才驗；拒絕權限/逾時/不支援一律照舊手動打卡（不擋人）。
+    const target = getStopLatLng(stop);
+    let gpsVerified = null; // true=GPS 驗證到場、false=超距強制打卡、null=無法定位（手動）
+    if (target) {
+      checkInInFlight = true;
+      try {
+        feedbackToast('📡 正在確認你的位置…', 'blue');
+        const pos = await getCurrentPositionOnce(8000);
+        // await 期間狀態可能被改（共編遠端打卡/重設）→ 重新驗證後再繼續
+        if (replanStops.findIndex(s => s.id === stopId) !== currentStopIndex) return;
+        if (pos.ok) {
+          const dist = measureDistanceMeters(pos, target);
+          // 低精度定位放寬門檻，避免 GPS 飄移冤枉真的到場的使用者
+          const threshold = 300 + Math.min(pos.accuracy || 0, 400);
+          if (dist <= threshold) {
+            gpsVerified = true;
+          } else {
+            const go = window.confirm(`📍 你距離 ${stop.name} 還有 ${formatDistanceZh(dist)}，確定要打卡嗎？`);
+            if (!go) return;
+            gpsVerified = false;
+          }
+        } else if (pos.reason === 'denied') {
+          feedbackToast('📡 未取得定位權限，已為你手動打卡', 'blue');
+        } else if (pos.reason === 'timeout' || pos.reason === 'unavailable') {
+          feedbackToast('📡 定位逾時，已為你手動打卡', 'blue');
+        } // unsupported → 靜默手動
+      } finally {
+        checkInInFlight = false;
+      }
+    }
+
+    completeCheckIn(stop, isEndpoint, gpsVerified);
+  };
+
+  function completeCheckIn(stop, isEndpoint, gpsVerified) {
     stop.checkedInAt = Date.now();
     // 打卡只「加入」造訪清單，不可用 toggle（景點若先前已造訪，toggleVisitedPlace 會反向移除）；起訖點不計入造訪紀錄
     if (!isEndpoint && !isPlaceVisited(stop.name)) {
-      toggleVisitedPlace(stop);
+      toggleVisitedPlace(stop, { gpsVerified });
     }
 
     const checkinMsg = stop.type === 'start' ? `🚗 已從 ${stop.name} 出發！`
       : stop.type === 'end' ? `🏁 抵達 ${stop.name}，行程完成！`
+      : gpsVerified === true ? `✅ ${stop.name} GPS 打卡成功！`
       : `✅ ${stop.name} 到達打卡成功！`;
     feedbackToast(checkinMsg, 'green');
     // 到達景點後提醒拍照（起訖點不提醒）；延遲讓打卡 toast 先顯示完
     if (!isEndpoint) {
-      setTimeout(() => feedbackToast('📸 拍張照替這一站留下回憶吧！', 'blue'), 2400);
+      const stopName = stop.name;
+      setTimeout(() => showPhotoPromptSnackbar(stopName), 2400);
     }
 
     if (currentStopIndex === replanStops.length - 1) {
@@ -5105,7 +5445,7 @@
       updateItineraryStageUI();
       syncMapToCurrentTrip().catch(() => {});
     }
-  };
+  }
 
   // 把行程退回「規劃中」：清掉打卡進度，讓誤按「開始行程」或已完成的行程可重新編輯
   window.resetTripProgress = function() {
@@ -7124,44 +7464,56 @@
     return getVisitedPlaces().some(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
   }
 
-  function toggleVisitedPlace(stop) {
+  // 造訪紀錄的唯一存檔出口：localStorage ＋ 登入時整包鏡像到 users/{uid}.visitedSpots。
+  // 用整包重寫而非 arrayUnion/arrayRemove：紀錄帶 photos 後會「修改既有元素」，
+  // arrayUnion 蓋不掉、arrayRemove 又靠完全相等比對（帶 photos 的元素永遠刪不掉）；
+  // 且登入流程本來就是 Firestore 整包覆蓋 localStorage，整包重寫與之對稱。
+  function saveVisitedPlaces(places) {
+    try { localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places)); } catch (e) { console.warn('Save visited to localStorage failed:', e); }
+    if (firebaseEnabled && firebaseAuth && firebaseAuth.currentUser && firebaseDb) {
+      firebaseDb.collection('users').doc(firebaseAuth.currentUser.uid)
+        .set({ visitedSpots: places }, { merge: true })
+        .catch(e => console.warn('Sync visitedSpots failed:', e));
+    }
+  }
+
+  // 找到同名造訪紀錄 → mutator 就地修改 → 存檔。照片增刪都走這裡。
+  function updateVisitedPlaceByName(name, mutator) {
+    const places = getVisitedPlaces();
+    const norm = (name || '').replace(/\s/g, '').toLowerCase();
+    const place = places.find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    if (!place) return false;
+    mutator(place);
+    saveVisitedPlaces(places);
+    return true;
+  }
+
+  function toggleVisitedPlace(stop, extras = {}) {
     const places = getVisitedPlaces();
     const norm = (stop.name || '').replace(/\s/g, '').toLowerCase();
     const idx = places.findIndex(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
     const isAdding = idx < 0;
-    
-    let spotData = null;
+
     if (isAdding) {
-      spotData = {
+      places.push({
         name: stop.name,
         region: currentTripRegion || '',
         visitDate: new Date().toISOString().slice(0, 10),
         tripId: currentItineraryId || '',
         tripTitle: currentTripTitle || '',
-        emoji: stop.emoji || '📍'
-      };
-      places.push(spotData);
+        emoji: stop.emoji || '📍',
+        gpsVerified: extras.gpsVerified ?? null, // true=GPS 驗證到場、false=超距強制打卡、null=手動/舊資料
+        photos: []                               // {url, path, ts}；path=Storage 路徑（刪檔用）
+      });
     } else {
-      spotData = places[idx];
-      places.splice(idx, 1);
-    }
-    
-    localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places));
-    
-    // Sync with Firebase
-    if (firebaseEnabled && firebaseAuth && firebaseAuth.currentUser && firebaseDb) {
-      const uid = firebaseAuth.currentUser.uid;
-      const userRef = firebaseDb.collection('users').doc(uid);
-      if (isAdding) {
-        userRef.update({
-          visitedSpots: firebase.firestore.FieldValue.arrayUnion(spotData)
-        }).catch(e => console.warn('Sync visitedSpots add failed:', e));
-      } else {
-        userRef.update({
-          visitedSpots: firebase.firestore.FieldValue.arrayRemove(spotData)
-        }).catch(e => console.warn('Sync visitedSpots remove failed:', e));
+      // 移除紀錄時一併清掉 Storage 上的照片（失敗靜默，孤兒檔可容忍）
+      const removed = places.splice(idx, 1)[0];
+      if (removed && Array.isArray(removed.photos) && typeof firebaseStorage !== 'undefined' && firebaseStorage) {
+        removed.photos.forEach(p => { if (p && p.path) firebaseStorage.ref(p.path).delete().catch(() => {}); });
       }
     }
+
+    saveVisitedPlaces(places);
     return isAdding;
   }
 
