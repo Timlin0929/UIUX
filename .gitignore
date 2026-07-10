@@ -28,3 +28,6 @@ Thumbs.db
 
 # 開發計畫文件（個人排程，不進版控）
 /TravelLink_AI_*.md
+
+# /codex-verify 產出的審查報告（本機參考用）
+/codex-review.md
