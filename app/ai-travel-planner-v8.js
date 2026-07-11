@@ -3236,7 +3236,13 @@
     if (photo && photo.path && firebaseStorage) {
       firebaseStorage.ref(photo.path).delete().catch(() => {}); // object-not-found 等一律靜默
     }
-    updateVisitedPlaceByName(name, (p) => { p.photos = (p.photos || []).filter(x => x && x.ts !== ts); });
+    // 只移除「找到的那一張」（用 path 精準比對）：ts 理論上可能撞號，filter by ts 會誤刪多張
+    updateVisitedPlaceByName(name, (p) => {
+      const arr = p.photos || [];
+      const i = arr.findIndex(x => x && (photo ? x.path === photo.path : x.ts === ts));
+      if (i >= 0) arr.splice(i, 1);
+      p.photos = arr;
+    });
     renderTravelLog();
     feedbackToast('照片已刪除', 'blue');
   }
@@ -4699,10 +4705,14 @@
 
     listEl.innerHTML = Object.entries(byRegion).map(([region, spots]) => `
       <div class="travellog-region">
-        <div class="travellog-region-title">📍 ${region}（${spots.length} 個景點）</div>
+        <div class="travellog-region-title">📍 ${escapeHtml(region)}（${spots.length} 個景點）</div>
         <div class="travellog-spots">
           ${spots.map(s => {
-            const nameEsc = s.name.replace(/'/g, '&#39;');
+            // 紀錄欄位可能來自共編/AI 站名，全部 escapeHtml 後才進 innerHTML。
+            // 進 onclick 的 JS 字串要「先 JS 跳脫再 escapeHtml」：屬性值的 HTML 實體會先被
+            // 瀏覽器解碼，只做 escapeHtml 的單引號解碼後仍會破壞 JS 字面量。
+            const nameEsc = escapeHtml(s.name);
+            const nameJs = escapeHtml(String(s.name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
             const photos = Array.isArray(s.photos) ? s.photos.filter(p => p && p.url) : [];
             // downloadURL 帶 &token=，進 attribute 一定要 escapeHtml
             const photoRow = `
@@ -4710,20 +4720,20 @@
                 ${photos.map(p => `
                   <div class="travellog-photo-thumb">
                     <img src="${escapeHtml(p.url)}" alt="" loading="lazy" onclick="openImageLightbox(this.src)">
-                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameEsc}', ${Number(p.ts) || 0})">✕</button>
+                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(p.ts) || 0})">✕</button>
                   </div>
                 `).join('')}
-                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameEsc}')" title="新增照片">📷</button>
+                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameJs}')" title="新增照片">📷</button>
               </div>`;
             return `
             <div class="travellog-spot-card">
               <div class="travellog-spot-main">
-                <span class="travellog-spot-emoji">${s.emoji || '📍'}</span>
+                <span class="travellog-spot-emoji">${escapeHtml(s.emoji || '📍')}</span>
                 <div class="travellog-spot-info">
-                  <span class="travellog-spot-name">${s.name}</span>
-                  <span class="travellog-spot-meta">${s.visitDate || ''}${s.tripTitle ? ' · ' + s.tripTitle : ''}${s.gpsVerified === true ? ' <span class="travellog-gps-badge">📍 GPS</span>' : ''}</span>
+                  <span class="travellog-spot-name">${nameEsc}</span>
+                  <span class="travellog-spot-meta">${escapeHtml(s.visitDate || '')}${s.tripTitle ? ' · ' + escapeHtml(s.tripTitle) : ''}${s.gpsVerified === true ? ' <span class="travellog-gps-badge">📍 GPS</span>' : ''}</span>
                 </div>
-                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameEsc}')">✕</button>
+                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameJs}')">✕</button>
               </div>
               ${photoRow}
             </div>`;
@@ -5402,6 +5412,8 @@
           } else {
             const go = window.confirm(`📍 你距離 ${stop.name} 還有 ${formatDistanceZh(dist)}，確定要打卡嗎？`);
             if (!go) return;
+            // confirm 阻塞期間共編遠端可能已改狀態（排隊的 snapshot callback 在關閉後執行）→ 再驗一次
+            if (replanStops.findIndex(s => s.id === stopId) !== currentStopIndex) return;
             gpsVerified = false;
           }
         } else if (pos.reason === 'denied') {
