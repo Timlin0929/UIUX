@@ -10447,7 +10447,14 @@
     return null;
   }
 
-  // 解析某景點最近、步行 ≤10 分鐘可達的停車點：TDX 優先 → Google Places 退回 → null
+  // 台東縣府公有／民營路外停車場（app/parking-data.js，crawler `crawl:parking`＋`export:local` 產生）。
+  // TDX 對台東這種鄉村縣覆蓋很稀疏，這份是縣府自己維護的資料，零額外 API 成本，優先使用。
+  function getLocalParkingList() {
+    const data = window.WAI_PARKING_DATA;
+    return (data && Array.isArray(data.taitungCounty)) ? data.taitungCounty : [];
+  }
+
+  // 解析某景點最近、步行 ≤10 分鐘可達的停車點：本地縣府資料 → TDX → Google Places 退回 → null
   async function resolveParkingCoord(center) {
     if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) {
       return null;
@@ -10457,14 +10464,20 @@
     const finish = (coord) => { _parkingCoordCache.set(key, coord || null); return coord || null; };
 
     try {
-      // 1) TDX 候選 → 用步行時間挑
       const county = resolveTdxCounty(currentTripRegion);
+      // 1) 本地縣府資料（僅台東本島；目前資料集不含綠島／蘭嶼）→ 用步行時間挑
+      if (county === 'Taitung') {
+        const localList = getLocalParkingList();
+        const chosenLocal = await pickWalkableParking(center, nearbyTdxParkings(center, localList, PARKING_WALKABLE_RADIUS_METERS, 3));
+        if (chosenLocal) return finish(chosenLocal);
+      }
+      // 2) TDX 候選 → 用步行時間挑
       if (county) {
         const list = await fetchTdxParking(county);
         const chosen = await pickWalkableParking(center, nearbyTdxParkings(center, list, PARKING_WALKABLE_RADIUS_METERS, 3));
         if (chosen) return finish(chosen);
       }
-      // 2) Places 候選 → 用步行時間挑
+      // 3) Places 候選 → 用步行時間挑
       const placeCands = await listParkingFromPlaces(center);
       const chosen2 = await pickWalkableParking(center, placeCands);
       return finish(chosen2);

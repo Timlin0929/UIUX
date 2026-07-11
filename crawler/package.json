@@ -16,6 +16,8 @@
     "enrich:fees:dry": "node worker.js --enrich-fees --dry-run",
     "crawl:food": "node worker.js --crawl-food",
     "crawl:food:dry": "node worker.js --crawl-food --dry-run",
+    "crawl:parking": "node worker.js --crawl-parking",
+    "crawl:parking:dry": "node worker.js --crawl-parking --dry-run",
     "cleanup:collab": "node worker.js --cleanup-collab",
     "cleanup:collab:dry": "node worker.js --cleanup-collab --dry-run"
   },

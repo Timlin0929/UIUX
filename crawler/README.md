@@ -234,6 +234,37 @@ npm run crawl:food
 - 成本：改用 `searchNearby` 後每目的地 1 次呼叫（原本 `searchText` 3 詞需 3 次）。
 - 由 `..\ai-travel-explore-final.html` 以 `<script src="restaurant-data.js">` 載入；檔案不存在時前端自動回退即時抓。
 
+## 停車場資料（crawl:parking → parking-data.js）
+
+TDX 對台東這種鄉村縣的路外停車場覆蓋很稀疏，改用**臺東縣政府自己維護的開放資料**
+（政府資料開放平臺 [dataset 165292](https://data.gov.tw/dataset/165292)，臺東縣政府公有及民營路外停車場，
+XLSX 格式）：下載 → 解析 30 筆 → 依地址呼叫 Geocoding API 補經緯度（地址查不到時退回用「名稱＋台東」查）→
+寫入 Firestore `parking_lots` collection（預設**跳過已地理編碼**過的，`--force` 全部重查）。
+
+⚠️ **需要一支「不限 HTTP referrer」的 Google Maps API key**：`app/weather.env.js` 的
+`GOOGLE_MAPS_API_KEY` 是給瀏覽器用的 referrer 限制鍵，伺服器端呼叫 Geocoding／Places 一律
+403（`API_KEY_HTTP_REFERRER_BLOCKED`）。請在 GCP Console 另建一支 Application restrictions
+設 **None 或 IP addresses**、API restrictions 只勾 **Geocoding API + Places API (New)** 的鍵，
+執行前用環境變數覆寫（優先於 weather.env.js）：
+
+```powershell
+$env:GOOGLE_MAPS_API_KEY = "你的爬蟲專用鍵"
+npm run crawl:parking:dry   # 先預覽，不寫 Firestore
+npm run crawl:parking       # 正式寫入
+npm run export:local        # 一併把 parking_lots 匯出成 app/parking-data.js（window.WAI_PARKING_DATA）
+```
+
+說明：
+
+- 欄位：`name / address / phone / evSpots / largeSpots / smallSpots / motoSpots / notes / lat / lng`。
+- 只涵蓋台東本島（資料源本身無綠島／蘭嶼），前端 `resolveParkingCoord` 只在 `region` 判定為
+  `Taitung` 本島時才會查這份本地資料，其餘（含離島）仍走 TDX → Places 既有邏輯。
+- 「不定期更新」，資料源沒有 API/JSON，只有 XLSX 下載——crawler 用零依賴的手刻 zip/XML
+  解析（見 `worker.js` 內註解），沒有引入 npm `xlsx` 套件（該套件 npm 上最新版有未修的
+  prototype-pollution／ReDoS 已知漏洞，SheetJS 把後續修補移到自家 CDN 未再發布到 npm）。
+- 由 `..\ai-travel-planner-v8.html` 以 `<script src="parking-data.js">` 載入；集合為空時
+  `export:local` 會跳過匯出、前端直接退回 TDX/Places（不會噴錯）。
+
 ## 每兩週自動爬餐廳（Windows 工作排程）
 
 由 [`run-food-crawl.bat`](run-food-crawl.bat) + 工作排程執行，工作名稱 **`WanderAI Food Crawl`**，每 2 週週日 03:00，輸出寫到 `crawler/crawl-food.log`。
@@ -316,6 +347,7 @@ npm run cleanup:collab
 |---|---|---|---|
 | `..\poi-data.js` | `window.WAI_POI_DATA` | `export:local`（資料來自 `verify:places` + `enrich:fees`） | 景點/座標校正有變時：`verify:places -- --force` → `export:local`；門票有變時：`enrich:fees -- --force` → `export:local` |
 | `..\restaurant-data.js` | `window.WAI_RESTAURANT_DATA` | `crawl:food` | 每兩週自動；要立即更新就手動 `crawl:food` |
+| `..\parking-data.js` | `window.WAI_PARKING_DATA` | `export:local`（資料來自 `crawl:parking`） | 縣府資料「不定期更新」，需要時手動 `crawl:parking -- --force` → `export:local` |
 | [`app/attraction-fee-config.js`](../app/attraction-fee-config.js) | `window.WAI_ATTRACTION_FEE` | 手動維護（非爬蟲產出） | 想覆蓋 `poi-data.js` 門票時直接編輯，不必重跑爬蟲 |
 
 前兩者為自動產生檔，請勿手動編輯；`attraction-fee-config.js` 相反，是唯一預期手動編輯的覆蓋層。

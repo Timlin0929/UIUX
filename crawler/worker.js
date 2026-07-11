@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const zlib = require('zlib');
 const axios = require('axios');
 const admin = require('firebase-admin');
 const minimist = require('minimist');
@@ -37,12 +38,18 @@ const EXPORT_LOCAL_MODE = !!(argv['export-local'] || argv.export || argv.mode ==
 const VERIFY_PLACES_MODE = !!(argv['verify-places'] || argv.mode === 'verify-places');
 const ENRICH_FEES_MODE = !!(argv['enrich-fees'] || argv.mode === 'enrich-fees');
 const CRAWL_FOOD_MODE = !!(argv['crawl-food'] || argv.mode === 'crawl-food');
+const CRAWL_PARKING_MODE = !!(argv['crawl-parking'] || argv.mode === 'crawl-parking');
 const CLEANUP_COLLAB_MODE = !!(argv['cleanup-collab'] || argv.mode === 'cleanup-collab');
 const CLEANUP_DAYS = parseInt(argv.days || process.env.CLEANUP_COLLAB_DAYS || '7', 10);
 const FORCE = !!argv.force;
 const VERIFY_NEAR_METERS = parseInt(process.env.VERIFY_NEAR_METERS || '5000', 10);
 const EXPORT_LOCAL_PATH = process.env.EXPORT_LOCAL_PATH || path.resolve(__dirname, '..', 'app', 'poi-data.js');
 const RESTAURANT_DATA_PATH = process.env.RESTAURANT_DATA_PATH || path.resolve(__dirname, '..', 'app', 'restaurant-data.js');
+const PARKING_DATA_PATH = process.env.PARKING_DATA_PATH || path.resolve(__dirname, '..', 'app', 'parking-data.js');
+const PARKING_COLLECTION = process.env.PARKING_COLLECTION || 'parking_lots';
+// 臺東縣政府公有及民營路外停車場（政府資料開放平臺 dataset 165292）。無經緯度，crawler 端一次性地理編碼。
+const TAITUNG_PARKING_XLSX_URL = process.env.TAITUNG_PARKING_XLSX_URL
+  || 'https://ttone.taitung.gov.tw/download?id=OSQVpF5NQ2Aq4%2F7%2FTFR90g%3D%3D';
 const MIN_FOOD_POIS = parseInt(process.env.MIN_FOOD_POIS || '3', 10);
 const FOOD_PER_DEST = parseInt(process.env.FOOD_PER_DEST || '25', 10);
 const LIMIT = parseInt(argv.limit || process.env.CRAWL_LIMIT || '50', 10);
@@ -138,6 +145,185 @@ async function geocodeAddress(address) {
     console.error('geocode error', e.message);
   }
   return null;
+}
+
+// ── 極簡零依賴 XLSX 讀取（zip + XML）──
+// 不用 npm `xlsx`：該套件目前 npm 上最新版（0.18.5）有未修的 prototype-pollution／ReDoS
+// 已知漏洞（SheetJS 把後續修補移到自家 CDN，未再發布到 npm）。xlsx 本質就是標準（未加密）
+// zip 內含 XML，這裡直接用 Node 內建 zlib 手動解 zip 中央目錄＋raw deflate，只做讀取，
+// 足夠應付本專案唯一的用途（讀政府開放資料 XLSX）。
+function readZipEntries(buf) {
+  const eocdSig = 0x06054b50;
+  let eocdOff = -1;
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf.readUInt32LE(i) === eocdSig) { eocdOff = i; break; }
+  }
+  if (eocdOff < 0) throw new Error('EOCD not found — 不是有效的 zip/xlsx');
+  const cdCount = buf.readUInt16LE(eocdOff + 10);
+  const cdOffset = buf.readUInt32LE(eocdOff + 16);
+  const entries = new Map();
+  let p = cdOffset;
+  for (let i = 0; i < cdCount; i++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error('壞的 zip 中央目錄項目');
+    const method = buf.readUInt16LE(p + 10);
+    const compSize = buf.readUInt32LE(p + 20);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const localHeaderOffset = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
+    entries.set(name, { method, compSize, localHeaderOffset });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+function readZipEntry(buf, entries, name) {
+  const meta = entries.get(name);
+  if (!meta) return null;
+  const lp = meta.localHeaderOffset;
+  if (buf.readUInt32LE(lp) !== 0x04034b50) throw new Error('壞的 zip 本機檔頭：' + name);
+  const nameLen = buf.readUInt16LE(lp + 26);
+  const extraLen = buf.readUInt16LE(lp + 28);
+  const dataStart = lp + 30 + nameLen + extraLen;
+  const data = buf.subarray(dataStart, dataStart + meta.compSize);
+  if (meta.method === 0) return data;
+  if (meta.method === 8) return zlib.inflateRawSync(data);
+  throw new Error(`不支援的 zip 壓縮法 ${meta.method}（${name}）`);
+}
+function xmlUnescape(s) {
+  return String(s)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&amp;/g, '&');
+}
+function parseSharedStrings(xml) {
+  const blocks = xml.match(/<si>[\s\S]*?<\/si>/g) || [];
+  return blocks.map((b) => {
+    const parts = b.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+    return xmlUnescape(parts.map((p) => p.replace(/<t[^>]*>/, '').replace(/<\/t>/, '')).join(''));
+  });
+}
+function parseSheetRows(xml, sharedStrings) {
+  const rowBlocks = xml.match(/<row[^>]*r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g) || [];
+  const rows = {};
+  for (const rowXml of rowBlocks) {
+    const rNumMatch = rowXml.match(/r="(\d+)"/);
+    const rNum = rNumMatch ? parseInt(rNumMatch[1], 10) : null;
+    if (!rNum) continue;
+    const cellRe = /<c r="([A-Z]+)\d+"(?:[^>]*?\st="(\w+)")?[^>]*?(?:\/>|>([\s\S]*?)<\/c>)/g;
+    const cells = {};
+    let m;
+    while ((m = cellRe.exec(rowXml))) {
+      const [, col, type, inner] = m;
+      if (!inner) { cells[col] = ''; continue; }
+      const vMatch = inner.match(/<v>([\s\S]*?)<\/v>/);
+      const raw = vMatch ? vMatch[1] : '';
+      cells[col] = (type === 's') ? (sharedStrings[parseInt(raw, 10)] || '') : xmlUnescape(raw);
+    }
+    rows[rNum] = cells;
+  }
+  return rows;
+}
+// 依標題列文字比對找出目標工作表（不依賴固定 sheet 順序），回傳 { rows: {rowNum:{colLetter:value}} }
+function readXlsxSheetByHeaderMatch(buf, requiredHeaderTexts) {
+  const entries = readZipEntries(buf);
+  const sstEntry = entries.has('xl/sharedStrings.xml') ? readZipEntry(buf, entries, 'xl/sharedStrings.xml') : null;
+  const sharedStrings = sstEntry ? parseSharedStrings(sstEntry.toString('utf8')) : [];
+  const sheetFiles = [...entries.keys()].filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort();
+  for (const sf of sheetFiles) {
+    const xml = readZipEntry(buf, entries, sf).toString('utf8');
+    const rows = parseSheetRows(xml, sharedStrings);
+    const rowNums = Object.keys(rows).map(Number);
+    if (!rowNums.length) continue;
+    const headerRow = rows[Math.min(...rowNums)];
+    const headerVals = new Set(Object.values(headerRow));
+    if (requiredHeaderTexts.every((h) => headerVals.has(h))) return { rows };
+  }
+  return null;
+}
+
+// 台東縣府停車場臺東範圍粗篩（拒絕地理編碼明顯落在縣外/查無結果的極端值）
+function isInsideTaitungBounds(lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng)
+    && lat >= 22.0 && lat <= 23.6 && lng >= 120.7 && lng <= 121.7;
+}
+
+async function crawlParking(db) {
+  if (!GOOGLE_KEY) { console.warn('無 GOOGLE_MAPS_API_KEY，停車場地理編碼略過。'); return; }
+  console.log('下載臺東縣府停車場 XLSX …', TAITUNG_PARKING_XLSX_URL);
+  const res = await axios.get(TAITUNG_PARKING_XLSX_URL, { responseType: 'arraybuffer', timeout: 30000 });
+  const buf = Buffer.from(res.data);
+  const parsed = readXlsxSheetByHeaderMatch(buf, ['名稱', '地址', '連絡電話', '充電停車位', '大型車', '小型車', '機車格', '備註']);
+  if (!parsed) { console.warn('找不到符合欄位的工作表，來源格式可能已變更，略過。'); return; }
+  const rowNums = Object.keys(parsed.rows).map(Number).sort((a, b) => a - b);
+  const headerRowNum = rowNums[0];
+  const dataRows = rowNums.slice(1).map((rn) => parsed.rows[rn]).filter((r) => r.A && r.A.trim());
+  console.log(`解析出 ${dataRows.length} 筆停車場（工作表標題列 row${headerRowNum}）`);
+
+  const parseSpotCount = (text) => {
+    const m = String(text || '').match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+  const ensureCountyPrefix = (addr) => {
+    const a = String(addr || '').trim();
+    return /^(台|臺)東/.test(a) ? a : `臺東縣${a}`;
+  };
+
+  let scanned = 0, geocoded = 0, skipped = 0, failed = 0, sliced = 0, eligibleIdx = -1;
+  for (const row of dataRows) {
+    const name = String(row.A).trim();
+    const address = String(row.B || '').trim();
+    eligibleIdx += 1;
+    if (!inSlice(eligibleIdx, WORK_SLICE)) { sliced += 1; continue; }
+    if (argv.limit !== undefined && scanned >= LIMIT) break;
+    if (callBudgetExhausted()) { console.log('已達本次 API 呼叫預算上限，提前結束。'); break; }
+    scanned += 1;
+
+    const docId = normalizeText(name).slice(0, 120) || `parking-${eligibleIdx}`;
+    const docRef = db.collection(PARKING_COLLECTION).doc(docId);
+    if (!FORCE) {
+      const existing = await docRef.get();
+      if (existing.exists && Number.isFinite(existing.data().lat)) { skipped += 1; continue; }
+    }
+
+    // 地理編碼：先用「地址」，明顯失敗/落在縣外再退回用「名稱＋台東」搜（部分地址是模糊描述，如「台東火車站周邊區域」）
+    let geo = await geocodeAddress(ensureCountyPrefix(address));
+    let usedQuery = 'address';
+    let loc = geo && geo.geometry && geo.geometry.location;
+    if (!loc || !isInsideTaitungBounds(loc.lat, loc.lng)) {
+      geo = await geocodeAddress(`${name} 台東`);
+      usedQuery = 'name';
+      loc = geo && geo.geometry && geo.geometry.location;
+    }
+    if (!loc || !isInsideTaitungBounds(loc.lat, loc.lng)) {
+      console.warn(`✗ ${name}：地理編碼失敗或超出台東範圍，略過`);
+      failed += 1;
+      continue;
+    }
+
+    const data = {
+      name,
+      address,
+      phone: String(row.C || '').trim() || null,
+      evSpots: parseSpotCount(row.D),
+      largeSpots: parseSpotCount(row.E),
+      smallSpots: parseSpotCount(row.F),
+      motoSpots: parseSpotCount(row.G),
+      notes: String(row.H || '').trim() || null,
+      lat: loc.lat,
+      lng: loc.lng,
+      geocodeQuery: usedQuery,
+      source: 'taitung_gov_parking',
+      geocodedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    console.log(`✓ ${name} → (${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)})｜小型車位 ${data.smallSpots}｜(${usedQuery})`);
+    if (DRY) { geocoded += 1; continue; }
+    await docRef.set(data, { merge: true });
+    geocoded += 1;
+  }
+  console.log('Crawl-parking summary', { scanned, geocoded, skipped, failed, sliced, dryRun: DRY });
 }
 
 function measureDistanceMeters(origin, target) {
@@ -1106,6 +1292,38 @@ async function exportLocal(db) {
   }
   fs.writeFileSync(EXPORT_LOCAL_PATH, fileBody, 'utf8');
   console.log('Export-local wrote', EXPORT_LOCAL_PATH);
+
+  await exportParkingLocal(db);
+}
+
+// parking_lots（縣府停車場，crawl:parking 寫入）→ app/parking-data.js 扁平陣列。
+// 不像 scenic_points 依目的地分桶：停車場覆蓋整個台東縣本島，前端用座標就近比對即可。
+async function exportParkingLocal(db) {
+  const snap = await db.collection(PARKING_COLLECTION).get();
+  if (snap.empty) { console.log(`No documents in ${PARKING_COLLECTION}; skip parking export.`); return; }
+  const list = [];
+  snap.forEach((doc) => {
+    const d = doc.data();
+    if (!Number.isFinite(d.lat) || !Number.isFinite(d.lng) || !d.name) return;
+    const poi = { name: d.name, lat: d.lat, lng: d.lng };
+    if (d.address) poi.address = d.address;
+    if (d.phone) poi.phone = d.phone;
+    if (d.evSpots) poi.evSpots = d.evSpots;
+    if (d.largeSpots) poi.largeSpots = d.largeSpots;
+    if (d.smallSpots) poi.smallSpots = d.smallSpots;
+    if (d.motoSpots) poi.motoSpots = d.motoSpots;
+    if (d.notes) poi.notes = d.notes;
+    list.push(poi);
+  });
+  const payload = { __generatedAt: new Date().toISOString(), taitungCounty: list };
+  const fileBody = `// Auto-generated by crawler (npm run export:local). Do not edit by hand.\n`
+    + `window.WAI_PARKING_DATA = ${JSON.stringify(payload, null, 2)};\n`;
+  if (DRY) {
+    console.log(`DRY export-local (parking); would write ${PARKING_DATA_PATH}（${list.length} 筆）`);
+    return;
+  }
+  fs.writeFileSync(PARKING_DATA_PATH, fileBody, 'utf8');
+  console.log(`Export-local wrote ${PARKING_DATA_PATH}（${list.length} 筆停車場）`);
 }
 
 // priceLevel enum → 0..4；並提供各級的人均消費估值（無 priceRange 時退回用）。
@@ -1290,6 +1508,8 @@ async function main() {
     await cleanupCollab(db);
   } else if (CRAWL_FOOD_MODE) {
     await crawlFood(db);
+  } else if (CRAWL_PARKING_MODE) {
+    await crawlParking(db);
   } else if (VERIFY_PLACES_MODE) {
     await verifyPlaces(db);
   } else if (ENRICH_FEES_MODE) {
