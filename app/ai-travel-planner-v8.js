@@ -85,6 +85,26 @@
   // 開頁自動流程（超時壓縮、enrichment、路線繪製回填 transitMin）只改記憶體，
   // 不寫回 Firestore，否則會用重算值覆寫 App 端剛寫入的共編資料。
   let tripUserDirty = false;
+
+  // 路線回填 transitMin 後的「顯示端」補壓縮：載入時先用估算交通做超時壓縮，
+  // Google 實測交通通常更長，會把剛好壓進時限的行程再推回超時（橫幅顯示「超出規劃時間 N 分」）。
+  // 這裡在路線全部回填後補跑一次壓縮——只改記憶體不存檔；使用者互動過就不再自動壓（避免蓋手動時間）。
+  let routeRefitTimer = null;
+  function scheduleDisplayRefit() {
+    if (tripUserDirty) return;
+    clearTimeout(routeRefitTimer);
+    routeRefitTimer = setTimeout(() => {
+      routeRefitTimer = null;
+      if (tripUserDirty) return;
+      try {
+        const fit = fitScheduleToTimeLimit();
+        if (fit.changed) {
+          renderItineraryDisplay(); // 內部會依新排程更新時間橫幅與 hero 時間
+          try { syncRouteStageScheduleTimes(buildReplanSchedule()); } catch (_e) {}
+        }
+      } catch (e) { console.warn('[route refit] 略過：', e); }
+    }, 900);
+  }
   const TRANSIT_MODE_OPTIONS = [
     { value: 'taxi', label: '計程車', icon: '🚕' },
     { value: 'scooter', label: '機車', icon: '🛵' },
@@ -11015,6 +11035,7 @@
                 // 開頁自動繪路線也會走到這裡：使用者尚未互動就不寫回（載入只讀不寫），
                 // 避免每次重新整理都以 Google 回填的 transitMin 改動 Firestore。
                 if (tripUserDirty) schedulePersistTrip();
+                else scheduleDisplayRefit(); // Google 實測交通比估算長 → 顯示端補壓縮，免得橫幅顯示「超出規劃時間」
               }
             }
 
