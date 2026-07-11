@@ -105,6 +105,22 @@
       } catch (e) { console.warn('[route refit] 略過：', e); }
     }, 900);
   }
+
+  // 「停車後步行」時間寫入後的排程重繪：與 scheduleDisplayRefit 不同，這裡一定要
+  // 重繪（時間軸要顯示步行段），使用者互動過也照樣重繪；只有「顯示端補壓縮」維持
+  // 未互動才做（避免蓋掉手動時間）。
+  let parkWalkRefreshTimer = null;
+  function scheduleParkWalkRefresh() {
+    clearTimeout(parkWalkRefreshTimer);
+    parkWalkRefreshTimer = setTimeout(() => {
+      parkWalkRefreshTimer = null;
+      try { if (!tripUserDirty) fitScheduleToTimeLimit(); } catch (_e) {}
+      try {
+        renderItineraryDisplay();
+        syncRouteStageScheduleTimes(buildReplanSchedule());
+      } catch (e) { console.warn('[park walk refresh] 略過：', e); }
+    }, 600);
+  }
   const TRANSIT_MODE_OPTIONS = [
     { value: 'taxi', label: '計程車', icon: '🚕' },
     { value: 'scooter', label: '機車', icon: '🛵' },
@@ -4027,8 +4043,12 @@
       let transit = 0;
       if (index < replanStops.length - 1) {
         transit = Number.isFinite(normalizedTransitMin) ? normalizedTransitMin : getDefaultTransitMinutes(transitMode);
+        // 開車段的目的地若停在鄰近停車場，「停車後步行」也算進段落交通，
+        // 下一站的開始時刻與行程總時長才會反映真實情況（暫態欄位，畫路線時寫入）。
+        const nextParkWalk = Number(replanStops[index + 1] && replanStops[index + 1].parkWalkMin);
+        if (Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
       }
-      
+
       cursor = end + transit;
       return {
         ...stop,
@@ -5752,7 +5772,13 @@
         const nextStop = schedule[index + 1];
         const transitMode = normalizeTransitMode(stop.transitMode);
         const transitMin = stop.transit || 0;
-        let transitText = getTransitSummaryText(transitMode, transitMin);
+        // stop.transit 已含「停車後步行」；顯示時拆回「車程＋步行」兩段，避免把步行混進「汽車約 N 分鐘」
+        const parkWalkMin = Number(nextStop.parkWalkMin) || 0;
+        const driveMin = Math.max(0, transitMin - parkWalkMin);
+        let transitText = getTransitSummaryText(transitMode, driveMin);
+        if (parkWalkMin > 0) {
+          transitText += ` ＋ 🅿️ 停車後步行約 ${parkWalkMin} 分鐘`;
+        }
         if (transitMin > 0) {
           // 添加停靠点间的描述
           if (stop.id === 'luggage' && nextStop.id === 'cafe') {
@@ -10603,10 +10629,11 @@
   }
 
   // 畫一條停車點↔景點的綠色虛線步行線；回傳步行時間文字（取不到回 ''）
+  // 回傳 { text, minutes }：text 供階段卡提示、minutes 供排程納入「停車後步行」時間
   function drawWalkOverlay(stageIndex, parking, attraction, renderToken) {
     const dash = { icon: { path: 'M 0,-1 0,1', strokeColor: WALK_LINE_COLOR, strokeOpacity: 1, strokeWeight: 6, scale: 3 }, offset: '0', repeat: '14px' };
     return resolveWalkRoute(parking, attraction).then((result) => {
-      if (renderToken !== routeRenderToken || !map) return '';
+      if (renderToken !== routeRenderToken || !map) return { text: '', minutes: null };
       const arr = (walkRenderers[stageIndex] = walkRenderers[stageIndex] || []);
       const visMap = stageVisible(stageIndex) ? map : null;
       if (result && result.routes && result.routes[0] && result.routes[0].overview_path) {
@@ -10620,7 +10647,11 @@
         });
         arr.push(wr);
         const leg = result.routes[0].legs && result.routes[0].legs[0];
-        return (leg && leg.duration && leg.duration.text) || '';
+        const sec = leg && leg.duration ? Number(leg.duration.value) : null;
+        return {
+          text: (leg && leg.duration && leg.duration.text) || '',
+          minutes: Number.isFinite(sec) ? Math.max(1, Math.round(sec / 60)) : null
+        };
       }
       const line = new google.maps.Polyline({
         map: visMap,
@@ -10628,7 +10659,7 @@
         strokeColor: WALK_LINE_COLOR, strokeOpacity: 0, geodesic: true, zIndex: 1100, icons: [dash]
       });
       arr.push(line);
-      return '';
+      return { text: '', minutes: null };
     });
   }
 
@@ -10963,6 +10994,10 @@
         routeStageCache[i].parkingSearched = isParkingMode;
         routeStageCache[i].parkingFound = !!destParking;
       }
+      // 這段沒有停車點（走路段/找不到停車場/切換交通工具）→ 清掉目的站殘留的停車步行時間
+      if (!destParking && typeof destination.stopIndex === 'number' && replanStops[destination.stopIndex]) {
+        replanStops[destination.stopIndex].parkWalkMin = null;
+      }
       const driveOrigin = originParking || origin;
       const driveDest = destParking || destination;
       const directionRequest = buildGoogleRouteRequest(stageMode, driveOrigin, driveDest);
@@ -11097,12 +11132,22 @@
             // 停車樞紐：畫 🅿️ 停車點 + 停車點↔景點綠色虛線步行線
             if (destParking) {
               drawParkingMarker(i, destParking, renderToken);
-              drawWalkOverlay(i, destParking, destination, renderToken).then((walkText) => {
-                if (renderToken !== routeRenderToken || !walkText) return;
-                const note = stageDiv.querySelector('.stage-walk-note');
-                if (note) {
-                  note.textContent = `🅿️ 停車後步行約 ${walkText} 到${destination.name || destination.title || '景點'}`;
-                  note.style.display = 'block';
+              drawWalkOverlay(i, destParking, destination, renderToken).then((walk) => {
+                if (renderToken !== routeRenderToken || !walk) return;
+                if (walk.text) {
+                  const note = stageDiv.querySelector('.stage-walk-note');
+                  if (note) {
+                    note.textContent = `🅿️ 停車後步行約 ${walk.text} 到${destination.name || destination.title || '景點'}`;
+                    note.style.display = 'block';
+                  }
+                }
+                // 「停車後步行」納入排程：寫進目的站的暫態欄位（不存 Firestore，
+                // 每次畫路線重算），buildReplanSchedule 會把它加進該段交通時間，
+                // 左側時間軸與後續站的開始時刻才會反映真實情況。
+                if (Number.isFinite(walk.minutes) && walk.minutes > 0
+                    && typeof destination.stopIndex === 'number' && replanStops[destination.stopIndex]) {
+                  replanStops[destination.stopIndex].parkWalkMin = walk.minutes;
+                  scheduleParkWalkRefresh();
                 }
               });
             }
