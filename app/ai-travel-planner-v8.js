@@ -4047,6 +4047,11 @@
         // 下一站的開始時刻與行程總時長才會反映真實情況（暫態欄位，畫路線時寫入）。
         const nextParkWalk = Number(replanStops[index + 1] && replanStops[index + 1].parkWalkMin);
         if (Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
+        // 出發側也要算：本站當初開車抵達且停在停車場、這一段又是開車 →
+        // 離開前得先從景點走回停車場（與抵達步行同一條路，時間相同）。
+        const ownParkWalk = Number(stop.parkWalkMin);
+        if ((transitMode === 'car' || transitMode === 'scooter')
+            && Number.isFinite(ownParkWalk) && ownParkWalk > 0) transit += ownParkWalk;
       }
 
       cursor = end + transit;
@@ -5772,10 +5777,16 @@
         const nextStop = schedule[index + 1];
         const transitMode = normalizeTransitMode(stop.transitMode);
         const transitMin = stop.transit || 0;
-        // stop.transit 已含「停車後步行」；顯示時拆回「車程＋步行」兩段，避免把步行混進「汽車約 N 分鐘」
+        // stop.transit 已含「出發走回停車場＋停車後步行」；顯示時拆回各段，避免把步行混進「汽車約 N 分鐘」
         const parkWalkMin = Number(nextStop.parkWalkMin) || 0;
-        const driveMin = Math.max(0, transitMin - parkWalkMin);
-        let transitText = getTransitSummaryText(transitMode, driveMin);
+        const departWalkMin = ((transitMode === 'car' || transitMode === 'scooter') && Number(stop.parkWalkMin) > 0)
+          ? Number(stop.parkWalkMin) : 0;
+        const driveMin = Math.max(0, transitMin - parkWalkMin - departWalkMin);
+        let transitText = '';
+        if (departWalkMin > 0) {
+          transitText += `🚶 步行回停車場約 ${departWalkMin} 分鐘 ＋ `;
+        }
+        transitText += getTransitSummaryText(transitMode, driveMin);
         if (parkWalkMin > 0) {
           transitText += ` ＋ 🅿️ 停車後步行約 ${parkWalkMin} 分鐘`;
         }
@@ -11112,6 +11123,7 @@
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
+                <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
               </div>
@@ -11153,7 +11165,14 @@
             }
             if (originParking) {
               drawParkingMarker(i, originParking, renderToken);
-              drawWalkOverlay(i, originParking, origin, renderToken);
+              drawWalkOverlay(i, originParking, origin, renderToken).then((walk) => {
+                if (renderToken !== routeRenderToken || !walk || !walk.text) return;
+                const note = stageDiv.querySelector('.stage-walk-note-origin');
+                if (note) {
+                  note.textContent = `🚶 出發前步行約 ${walk.text} 回停車場`;
+                  note.style.display = 'block';
+                }
+              });
             }
 
             renderItineraryDisplay();
