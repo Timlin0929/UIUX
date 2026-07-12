@@ -1029,6 +1029,14 @@
     return meters < 1000 ? `${Math.round(meters)} 公尺` : `${(meters / 1000).toFixed(1)} 公里`;
   }
 
+  // 站名短版（嵌進提示句用）：先砍掉括號附註（餐廳名常帶「(最後點餐時間…)」整串），再截長度
+  function shortStopName(name, maxLen = 14) {
+    let s = String(name || '').trim();
+    const cut = s.search(/[(（]/);
+    if (cut > 0) s = s.slice(0, cut).trim();
+    return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+  }
+
   function scorePlaceCandidate(place, stop, region, title = '', biasCenter = null, candidatePosition = null) {
     const haystack = normalizeMapText(
       `${place?.name || ''} ${place?.formatted_address || ''} ${place?.vicinity || ''}`
@@ -5784,7 +5792,7 @@
         const driveMin = Math.max(0, transitMin - parkWalkMin - departWalkMin);
         let transitText = '';
         if (departWalkMin > 0) {
-          transitText += `🚶 步行回停車場約 ${departWalkMin} 分鐘 ＋ `;
+          transitText += `🚶 步行回停車場取車約 ${departWalkMin} 分鐘 ＋ `;
         }
         transitText += getTransitSummaryText(transitMode, driveMin);
         if (parkWalkMin > 0) {
@@ -11125,7 +11133,7 @@
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
-                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
+                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${shortStopName(destination.name || destination.title || '下一站')}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
               </div>
             `;
 
@@ -11169,7 +11177,8 @@
                 if (renderToken !== routeRenderToken || !walk || !walk.text) return;
                 const note = stageDiv.querySelector('.stage-walk-note-origin');
                 if (note) {
-                  note.textContent = `🚶 出發前步行約 ${walk.text} 回停車場`;
+                  // 標明是「出發端」的停車場（上一段抵達時停的），避免與目的地找不到停車場的警示讀起來矛盾
+                  note.textContent = `🚶 出發前先從${shortStopName(origin.name || origin.title || '景點')}步行約 ${walk.text} 回停車場取車`;
                   note.style.display = 'block';
                 }
               });
