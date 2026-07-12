@@ -4051,15 +4051,17 @@
       let transit = 0;
       if (index < replanStops.length - 1) {
         transit = Number.isFinite(normalizedTransitMin) ? normalizedTransitMin : getDefaultTransitMinutes(transitMode);
+        const isDriveSeg = (transitMode === 'car' || transitMode === 'scooter');
         // 開車段的目的地若停在鄰近停車場，「停車後步行」也算進段落交通，
         // 下一站的開始時刻與行程總時長才會反映真實情況（暫態欄位，畫路線時寫入）。
+        // 需 mode guard：parkWalkMin 綁在「站」上、由重畫路線清除有時差，若這段已改走路/計程車
+        // 就不該再加停車步行（清除完成前殘留值也不會誤計）。
         const nextParkWalk = Number(replanStops[index + 1] && replanStops[index + 1].parkWalkMin);
-        if (Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
+        if (isDriveSeg && Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
         // 出發側也要算：本站當初開車抵達且停在停車場、這一段又是開車 →
         // 離開前得先從景點走回停車場（與抵達步行同一條路，時間相同）。
         const ownParkWalk = Number(stop.parkWalkMin);
-        if ((transitMode === 'car' || transitMode === 'scooter')
-            && Number.isFinite(ownParkWalk) && ownParkWalk > 0) transit += ownParkWalk;
+        if (isDriveSeg && Number.isFinite(ownParkWalk) && ownParkWalk > 0) transit += ownParkWalk;
       }
 
       cursor = end + transit;
@@ -5786,9 +5788,10 @@
         const transitMode = normalizeTransitMode(stop.transitMode);
         const transitMin = stop.transit || 0;
         // stop.transit 已含「出發走回停車場＋停車後步行」；顯示時拆回各段，避免把步行混進「汽車約 N 分鐘」
-        const parkWalkMin = Number(nextStop.parkWalkMin) || 0;
-        const departWalkMin = ((transitMode === 'car' || transitMode === 'scooter') && Number(stop.parkWalkMin) > 0)
-          ? Number(stop.parkWalkMin) : 0;
+        // 兩側步行只在本段為開車/機車時顯示（與 buildReplanSchedule 的加法 guard 一致）
+        const isDriveSeg = (transitMode === 'car' || transitMode === 'scooter');
+        const parkWalkMin = (isDriveSeg && Number(nextStop.parkWalkMin) > 0) ? Number(nextStop.parkWalkMin) : 0;
+        const departWalkMin = (isDriveSeg && Number(stop.parkWalkMin) > 0) ? Number(stop.parkWalkMin) : 0;
         const driveMin = Math.max(0, transitMin - parkWalkMin - departWalkMin);
         let transitText = '';
         if (departWalkMin > 0) {
@@ -10510,8 +10513,10 @@
 
     try {
       const county = resolveTdxCounty(currentTripRegion);
-      // 1) 本地縣府資料（僅台東本島；目前資料集不含綠島／蘭嶼）→ 用步行時間挑
-      if (county === 'Taitung') {
+      // 1) 本地縣府資料（僅台東本島；目前資料集不含綠島／蘭嶼）→ 用步行時間挑。
+      // 明確排除離島：region 若是綠島／蘭嶼（有渡輪設定）就不查本島停車場，維持 TDX→Places。
+      const isIsland = typeof getIslandFerryConfig === 'function' && !!getIslandFerryConfig(currentTripRegion);
+      if (county === 'Taitung' && !isIsland) {
         const localList = getLocalParkingList();
         const chosenLocal = await pickWalkableParking(center, nearbyTdxParkings(center, localList, PARKING_WALKABLE_RADIUS_METERS, 3));
         if (chosenLocal) return finish(chosenLocal);
@@ -11125,15 +11130,16 @@
               stageDiv.style.transform = 'translateY(-2px)';
             }
 
+            // 站名可能來自 AI 生成或共編夥伴輸入，進 innerHTML 前一律 escapeHtml（防 XSS／破版）
             stageDiv.innerHTML = `
               <div style="font-weight: 800; font-size: 14px; color: var(--ink); margin-bottom: 4px;">
-                階段 ${i + 1}：${origin.name || origin.title} ➔ ${destination.name || destination.title}
+                階段 ${i + 1}：${escapeHtml(origin.name || origin.title || '')} ➔ ${escapeHtml(destination.name || destination.title || '')}
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
                 ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
-                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${shortStopName(destination.name || destination.title || '下一站')}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
+                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${escapeHtml(shortStopName(destination.name || destination.title || '下一站'))}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
               </div>
             `;
 
