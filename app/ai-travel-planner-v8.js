@@ -11157,7 +11157,7 @@
                 if (walk.text) {
                   const note = stageDiv.querySelector('.stage-walk-note');
                   if (note) {
-                    note.textContent = `🅿️ 停車後步行約 ${walk.text} 到${destination.name || destination.title || '景點'}`;
+                    note.textContent = `🅿️ 停車後步行約 ${walk.text} 到${shortStopName(destination.name || destination.title || '景點')}`;
                     note.style.display = 'block';
                   }
                 }
