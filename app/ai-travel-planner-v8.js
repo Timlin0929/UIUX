@@ -1029,6 +1029,74 @@
     return meters < 1000 ? `${Math.round(meters)} 公尺` : `${(meters / 1000).toFixed(1)} 公里`;
   }
 
+  // ── C3 GPS 即時定位：行程進行中在地圖顯示「你在這裡」藍點＋精度圈 ──
+  // 只在 status==='ongoing' 時開 watchPosition（省電、也避免規劃階段就跳權限框）；
+  // 拒絕權限→靜默停止（照舊手動打卡），其他暫時性定位錯誤不中斷監聽。
+  let userLocWatchId = null;
+  let userLocMarker = null;
+  let userLocCircle = null;
+  let userLocWarned = false;
+  function syncUserLocationWatch() {
+    const supported = navigator.geolocation && typeof navigator.geolocation.watchPosition === 'function';
+    const shouldWatch = currentTripStatus === 'ongoing' && !!map && supported;
+    if (shouldWatch && userLocWatchId === null) {
+      userLocWatchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          if (!map) return;
+          const p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          const acc = Math.max(0, Number(pos.coords.accuracy) || 0);
+          if (!userLocMarker) {
+            userLocMarker = new google.maps.Marker({
+              map, position: p, zIndex: 1500, clickable: false, title: '你在這裡',
+              icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#4285F4', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3 }
+            });
+            userLocCircle = new google.maps.Circle({
+              map, center: p, radius: acc, clickable: false, zIndex: 1400,
+              fillColor: '#4285F4', fillOpacity: 0.12, strokeColor: '#4285F4', strokeOpacity: 0.3, strokeWeight: 1
+            });
+          } else {
+            userLocMarker.setPosition(p);
+            if (!userLocMarker.getMap()) userLocMarker.setMap(map);
+            userLocCircle.setCenter(p);
+            userLocCircle.setRadius(acc);
+            if (!userLocCircle.getMap()) userLocCircle.setMap(map);
+          }
+        },
+        (err) => {
+          if (err && err.code === 1) { // PERMISSION_DENIED → 停止監聽，全程照舊手動
+            stopUserLocationWatch();
+            return;
+          }
+          if (!userLocWarned) { userLocWarned = true; console.warn('[user-location] 定位暫時不可用：', err && err.message); }
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
+      );
+    } else if (!shouldWatch && userLocWatchId !== null) {
+      stopUserLocationWatch();
+    }
+  }
+  function stopUserLocationWatch() {
+    if (userLocWatchId !== null && navigator.geolocation && typeof navigator.geolocation.clearWatch === 'function') {
+      try { navigator.geolocation.clearWatch(userLocWatchId); } catch (_e) {}
+    }
+    userLocWatchId = null;
+    if (userLocMarker) userLocMarker.setMap(null);
+    if (userLocCircle) userLocCircle.setMap(null);
+  }
+
+  // ── C4 導航按鈕：跳轉 Google Maps 外部導航（前往指定站）──
+  function openExternalNavigation(stopId) {
+    const stop = replanStops.find((s) => s.id === stopId);
+    const pos = stop && getStopLatLng(stop);
+    if (!pos) return feedbackToast('此站沒有座標，無法導航', 'orange');
+    // 導航模式取「前往此站那一段」的交通方式（前一站的 transitMode）
+    const idx = replanStops.indexOf(stop);
+    const prevMode = idx > 0 ? normalizeTransitMode(replanStops[idx - 1].transitMode) : 'car';
+    const travelmode = prevMode === 'walk' ? 'walking' : 'driving';
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${pos.lat},${pos.lng}&travelmode=${travelmode}`;
+    window.open(url, '_blank', 'noopener');
+  }
+
   // 站名短版（嵌進提示句用）：先砍掉括號附註（餐廳名常帶「(最後點餐時間…)」整串），再截長度
   function shortStopName(name, maxLen = 14) {
     let s = String(name || '').trim();
@@ -5539,6 +5607,7 @@
   };
 
   function updateItineraryStageUI() {
+    syncUserLocationWatch(); // 進行中→開「你在這裡」定位監聽；退出/完成→關（冪等）
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     const planningBlock = document.getElementById('itineraryPlanningBlock');
     const startBtn = document.getElementById('replanStartBtn');
@@ -5739,11 +5808,15 @@
           actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#e0f2fe;color:#0369a1;">✓ 已打卡</span>`;
         } else if (index === currentStopIndex) {
           itemClasses += ' ongoing-active';
+          // C4 導航：跳轉 Google Maps 外部導航前往目前站（唯讀成員也可用——導航不改資料）
+          const navBtnHtml = (index > 0)
+            ? `<button class="checkin-btn nav-ext-btn" onclick="event.stopPropagation(); openExternalNavigation('${stop.id}')">🧭 導航</button>`
+            : '';
           if (collabReadOnly) {
-            actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#fef3c7;color:#d97706;font-weight:700;">⚡ 目前站 (唯讀)</span>`;
+            actionButtonsHtml = stayTagHtml + navBtnHtml + `<span class="tag" style="background:#fef3c7;color:#d97706;font-weight:700;">⚡ 目前站 (唯讀)</span>`;
           } else {
             const checkinLabel = stop.type === 'start' ? '🚗 出發' : stop.type === 'end' ? '🏁 抵達終點' : '✅ 到達打卡';
-            actionButtonsHtml = stayTagHtml + `<button class="checkin-btn" onclick="event.stopPropagation(); checkInCurrentStop('${stop.id}', event)">${checkinLabel}</button>`;
+            actionButtonsHtml = stayTagHtml + navBtnHtml + `<button class="checkin-btn" onclick="event.stopPropagation(); checkInCurrentStop('${stop.id}', event)">${checkinLabel}</button>`;
           }
         } else {
           actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#f3f4f6;color:#6b7280;">⏳ 未到</span>`;
@@ -10373,6 +10446,7 @@
     renderMapMarkersFromCurrentLocations();
     calculateAndDisplayRoute(buildRouteLocationsFromStops());
     await renderToiletMarkersForActiveRouteStage();
+    syncUserLocationWatch(); // 地圖就緒後補掛「你在這裡」監聽（載入時 updateItineraryStageUI 可能早於 map 初始化）
   }
 
   function offsetLatLng(position, lngOffset, latOffset) {

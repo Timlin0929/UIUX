@@ -3334,6 +3334,16 @@ body.prototype-mode .prototype-id-chip {
   box-shadow: 0 6px 16px rgba(16, 185, 129, 0.3);
   background: linear-gradient(135deg, #34d399, #059669);
 }
+/* C4 外部導航按鈕：沿用 checkin-btn 版型，換藍色系 */
+.checkin-btn.nav-ext-btn {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+  margin-right: 6px;
+}
+.checkin-btn.nav-ext-btn:hover {
+  background: linear-gradient(135deg, #60a5fa, #2563eb);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.3);
+}
 .checkin-btn:active {
   transform: translateY(0);
 }
