@@ -11,6 +11,8 @@ REM 由 Windows 工作排程每天 03:00 執行；輸出寫到 crawler\weekly-cr
 REM ============================================================================
 set "FIREBASE_SERVICE_ACCOUNT_PATH=C:\Users\USER\Desktop\UIUX\crawler\serviceAccount.json"
 cd /d "C:\Users\USER\Desktop\UIUX\crawler"
+REM 金鑰：優先用 crawler-key.local.bat（爬蟲專用、gitignored）；weather.env.js 是瀏覽器限制鍵，伺服器端會 403。
+if exist "crawler-key.local.bat" call "crawler-key.local.bat"
 
 REM 每天的 API 呼叫上限。請依你的免費額度調整（見 README「每日分散爬蟲」）。
 if not defined CRAWL_MAX_CALLS set "CRAWL_MAX_CALLS=120"
