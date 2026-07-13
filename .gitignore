@@ -33,3 +33,9 @@ Thumbs.db
 
 # /codex-verify 產出的審查報告（本機參考用）
 /codex-review.md
+
+# Agent / Codex 本機設定與產出（非專案程式碼，不進版控）
+/.agents/
+/.codex/
+# UI/UX 修改建議（個人清單，本機參考用）
+/uiux-recommendations.md
