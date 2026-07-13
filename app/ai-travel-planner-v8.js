@@ -6480,6 +6480,17 @@
     if (feesPerPerson > 0) items.push({ emoji: '💳', name: '景點門票', val: feesPerPerson });
     if (foodPerPerson > 0) items.push({ emoji: '🍽', name: '餐飲（餐廳人均）', val: foodPerPerson });
     const spendTotalPerPerson = tr.totalPerPerson + feesPerPerson + foodPerPerson;
+    // 用餐站但查無均消資料者（不在餐廳快取、站上也沒帶 costPerPerson）→ 明白標示「未計入」，
+    // 避免使用者以為餐飲有扣其實漏了（如熱門度排不進 searchNearby 前 20 的小店）。
+    const foodCostMap = getLocalFoodCostMap(destination);
+    const unknownFoodStops = stops.filter((s) => s && s.type !== 'start' && s.type !== 'end'
+      && isFoodStop(s) && !lookupStopFoodCost(foodCostMap, s));
+    const unknownFoodNote = unknownFoodStops.length
+      ? `<div class="receipt-item" style="color:var(--ink3);">
+            <div class="receipt-item-name"><span>🍽</span> ${unknownFoodStops.length} 個用餐站查無均消資料</div>
+            <div>未計入</div>
+          </div>`
+      : '';
     const receiptRows = items.map(it => `
           <div class="receipt-item">
             <div class="receipt-item-name"><span>${it.emoji}</span> ${it.name}</div>
@@ -6506,6 +6517,7 @@
             <div class="receipt-total">${money(spendTotalPerPerson)}</div>
           </div>
           ${receiptRows}
+          ${unknownFoodNote}
           <div class="receipt-item">
             <div class="receipt-item-name"><span>💰</span> 每人預算</div>
             <div>${perPersonBudgetText}</div>
@@ -8324,11 +8336,26 @@
     return map;
   }
   // 以餐廳名稱查人均消費，回 { costPerPerson, costNote } 或 null。優先 stop 自帶的（生成時寫入），其次本地餐廳表。
+  // 比對順序：完整名 exact → 砍掉括號附註後 exact（AI 常把「(最後點餐時間…)…」整串塞進站名）
+  // → 前綴比對（餐廳表名稱是站名的開頭，取最長命中；至少 4 字避免誤配）。
   function lookupStopFoodCost(costMap, stop) {
     if (!stop) return null;
     if (Number.isFinite(Number(stop.costPerPerson))) return { costPerPerson: Number(stop.costPerPerson), costNote: stop.costNote || '' };
     if (!costMap || !costMap.size || !stop.name) return null;
-    return costMap.get(normalizeFeeName(stop.name)) || null;
+    const full = normalizeFeeName(stop.name);
+    const exact = costMap.get(full);
+    if (exact) return exact;
+    const cut = String(stop.name).search(/[(（]/);
+    if (cut > 0) {
+      const stripped = normalizeFeeName(String(stop.name).slice(0, cut));
+      const hit = costMap.get(stripped);
+      if (hit) return hit;
+    }
+    let best = null, bestLen = 0;
+    for (const [key, val] of costMap) {
+      if (key.length >= 4 && key.length > bestLen && full.startsWith(key)) { best = val; bestLen = key.length; }
+    }
+    return best;
   }
   // 判斷是否為用餐站：isFoodStop（店名/emoji）或「在餐廳資料庫查得到」皆算餐廳。
   // 後者可修正 poi-data/restaurant-data 重疊時，店名不含關鍵字（如「林家臭豆腐」）被誤判成景點的情況。
