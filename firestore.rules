@@ -18,12 +18,48 @@ service cloud.firestore {
     // read/update 開放給所有登入者：Android 的 join-by-pin 與網頁的共編加入，
     // 都需要「非成員」先查得到文件並把自己寫進 members。
     match /micro_trips/{tripId} {
-      allow create: if request.auth != null;
+      function signedIn() {
+        return request.auth != null;
+      }
+      function isOwner(data) {
+        return signedIn() && (
+          request.auth.uid == data.ownerUid
+          || request.auth.token.email == data.ownerEmail
+        );
+      }
+      function isEditor(data) {
+        return isOwner(data) || (
+          signedIn() && data.editorEmails != null && request.auth.token.email in data.editorEmails
+        );
+      }
+      // 一般行程只能由本人建立；共編行程的 owner 欄位與成員清單也必須指向本人。
+      allow create: if request.auth != null
+        && (
+          request.resource.data.ownerUid == request.auth.uid
+          || request.resource.data.ownerEmail == request.auth.token.email
+          || request.resource.data.userEmail == request.auth.token.email
+        )
+        && (!('memberEmails' in request.resource.data)
+          || request.auth.token.email in request.resource.data.memberEmails);
       // 讀取：登入者皆可（join-by-pin／共編加入），或 guestReadable 的行程開放「未登入訪客」
       // 唯讀（網頁分享連結 ?sharedId=..&token=..&guest=1 是未登入開啟的——少了 guestReadable
       // 分支，所有分享連結都會 permission-denied，2026-07-08 已踩過）。
       allow read: if request.auth != null || resource.data.guestReadable == true;
-      allow update: if request.auth != null;
+      // 擁有者可調整協作設定；editor 只能更新行程內容，不能碰成員、邀請或擁有者欄位。
+      allow update: if isOwner(resource.data)
+        || (isEditor(resource.data) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people', 'wizardData',
+          'stops', 'status', 'currentStopIndex', 'startedAt', 'updatedAt', 'lastEditedBy', 'lastEditedByName', 'titleVersion'
+        ]))
+        // 新成員只能透過仍有效的邀請碼加入，且只能增加自己的 email。
+        || (signedIn()
+          && request.resource.data.inviteCode == resource.data.inviteCode
+          && exists(/databases/$(database)/documents/invites/$(resource.data.inviteCode))
+          && get(/databases/$(database)/documents/invites/$(resource.data.inviteCode)).data.active == true
+          && request.resource.data.memberEmails.size() == resource.data.memberEmails.size() + 1
+          && request.resource.data.memberEmails.hasAll(resource.data.memberEmails)
+          && request.auth.token.email in request.resource.data.memberEmails
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberEmails', 'members']));
       // 刪除：uid 擁有者（共編行程有 ownerUid）或 email 擁有者（網頁一般行程只有 userEmail，
       // 若只看 ownerUid 會把網頁端一般行程卡住刪不掉）。
       allow delete: if request.auth != null && (
@@ -33,23 +69,54 @@ service cloud.firestore {
       );
       // 在線狀態子集合
       match /presence/{memberId} {
-        allow read, write: if request.auth != null;
+        allow read, write: if request.auth != null
+          && request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.memberEmails;
+      }
+
+      // 回饋獨立成子集合，避免 editor 為其他成員覆寫 feedback map。
+      match /member_prefs/{memberId} {
+        allow read: if signedIn()
+          && request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.memberEmails;
+        allow create: if signedIn()
+          && request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.memberEmails
+          && request.resource.data.email == request.auth.token.email;
+        allow update: if signedIn()
+          && request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.memberEmails
+          && resource.data.email == request.auth.token.email
+          && request.resource.data.email == request.auth.token.email;
+        allow delete: if signedIn() && resource.data.email == request.auth.token.email;
+      }
+
+      match /feedback/{feedbackId} {
+        allow read: if request.auth != null
+          && (
+            request.auth.token.email == resource.data.email
+            || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.ownerEmail
+            || request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.memberEmails
+          );
+        allow create, update: if request.auth != null
+          && request.resource.data.email == request.auth.token.email;
+        allow delete: if request.auth != null
+          && resource.data.email == request.auth.token.email;
       }
     }
 
-    // ── 景點資料（App 會查詢；回饋流程可能更新統計）──
+    // ── 景點資料（由 crawler / Admin SDK 維護，前端唯讀）──
     match /scenic_points/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if request.auth != null;
     }
 
-    // ── 營業時間快取（App 端讀寫）──
+    // ── 營業時間快取（由受控後端維護，前端唯讀）──
     match /hours_cache/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if request.auth != null;
     }
 
-    // ── 使用者回饋 ──
+    // ── 舊版獨立回饋文件：只能由文件內 email 對應的使用者建立/修改 ──
     match /feedback/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if request.auth != null && resource.data.email == request.auth.token.email;
+      allow create, update: if request.auth != null
+        && request.resource.data.email == request.auth.token.email;
+      allow delete: if request.auth != null && resource.data.email == request.auth.token.email;
     }
 
     // ── 由 seeding script (admin SDK) 維護，App 端唯讀 ──
@@ -63,8 +130,11 @@ service cloud.firestore {
     // ── 邀請碼 → 行程對應（網頁端共編「建立/加入」必需，缺這段會 permission-denied）──
     match /invites/{code} {
       allow read:   if request.auth != null;
-      allow create: if request.auth != null;
-      allow update: if request.auth != null;
+      allow create: if request.auth != null
+        && exists(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId))
+        && get(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId)).data.ownerEmail == request.auth.token.email;
+      allow update: if request.auth != null
+        && get(/databases/$(database)/documents/micro_trips/$(resource.data.tripId)).data.ownerEmail == request.auth.token.email;
       allow delete: if false;
     }
 

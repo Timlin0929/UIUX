@@ -4545,7 +4545,7 @@
   // ══════════════════════════════════════════════════
   // 行程回饋系統（B1：整體評分 + AI 準確度 + 選填意見）
   // 到訪標記沿用既有 toggleVisitedPlace / isPlaceVisited。
-  // 資料寫入 micro_trips/{tripId}.feedback.{emailKey}（見 docs/FEEDBACK_SCHEMA.md）。
+  // 資料寫入 micro_trips/{tripId}/feedback/{emailKey} 子集合（每位成員一份，避免共編互相覆寫）。
   // ══════════════════════════════════════════════════
   const TRIP_FEEDBACK_KEY = 'wai_trip_feedback';
   let tripFeedbackDraft = { tripRating: 0, aiAccuracy: 0, comment: '', stopRatings: {} };
@@ -4659,13 +4659,11 @@
       localStorage.setItem(TRIP_FEEDBACK_KEY, JSON.stringify(map));
     } catch (e) { console.warn('Save feedback to localStorage failed:', e); }
 
-    // 2) Firestore：micro_trips/{tripId}.feedback.{emailKey}（巢狀物件，避免 dot-key 陷阱）
+    // 2) Firestore：每位成員一份獨立回饋文件，避免共編 editor 互相覆寫 feedback map
     if (firebaseEnabled && firebaseDb && email && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY') {
       try {
-        const fbPatch = {};
-        fbPatch[feedbackEmailKey(email)] = entry;
         await firebaseDb.collection('micro_trips').doc(currentItineraryId)
-                        .set({ feedback: fbPatch }, { merge: true });
+          .collection('feedback').doc(feedbackEmailKey(email)).set(entry, { merge: true });
       } catch (e) {
         console.warn('Persist feedback to Firebase failed:', e);
       }
@@ -4743,7 +4741,7 @@
     loadOthersFeedback(); // 非同步載入「大家的回饋」（個人行程＝自己的；共編行程＝所有成員的）
   }
 
-  // 讀取此行程已收到的回饋（micro_trips/{id}.feedback map）並顯示在評分視窗內。
+  // 讀取此行程已收到的回饋（micro_trips/{id}/feedback 子集合）並顯示在評分視窗內。
   // 共編行程的成員都讀得到（安全規則的成員讀取權），所以旅伴互相看得到彼此的評分與留言。
   async function loadOthersFeedback() {
     const host = document.getElementById('tripfb-others');
@@ -4751,9 +4749,10 @@
     if (!(firebaseEnabled && firebaseDb && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY')) { host.innerHTML = ''; return; }
     host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">載入大家的回饋中…</div>';
     try {
-      const doc = await firebaseDb.collection('micro_trips').doc(currentItineraryId).get();
-      const fb = (doc.exists && doc.data().feedback) || {};
-      const entries = Object.values(fb).filter(Boolean).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+      const snap = await firebaseDb.collection('micro_trips').doc(currentItineraryId)
+        .collection('feedback').get();
+      const entries = snap.docs.map(d => d.data()).filter(Boolean)
+        .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
       if (!entries.length) {
         host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">🗣 這份行程還沒有任何回饋，送出第一則吧！</div>';
         return;
@@ -11611,10 +11610,15 @@
     }
   };
 
-  window.doLogout = function() {
-    if (firebaseAuth) firebaseAuth.signOut();
-    feedbackToast('已登出，重整頁面中…');
-    setTimeout(() => { window.location.reload(); }, 800);
+  window.doLogout = async function() {
+    try {
+      if (firebaseAuth) await firebaseAuth.signOut();
+      feedbackToast('已登出，重整頁面中…');
+      setTimeout(() => { window.location.reload(); }, 800);
+    } catch (e) {
+      console.error('登出失敗：', e);
+      feedbackToast('登出失敗，請稍後再試。', 'red');
+    }
   };
 
   window.doChangePassword = async function() {

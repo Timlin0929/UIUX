@@ -386,9 +386,14 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 
 /* ── 多人共作面板 ── */
 .collab-panel{max-width:460px;max-height:calc(100vh - 48px);overflow-y:auto;text-align:left;}
-.collab-trip-head{margin:6px 0 14px;}
-.collab-trip-title{font-size:19px;font-weight:800;color:var(--ink);}
+.collab-trip-head{margin:6px 0 14px;display:flex;align-items:flex-start;gap:10px;}
+.collab-trip-head-main{min-width:0;flex:1;}
+.collab-trip-title{font-size:19px;font-weight:800;color:var(--ink);text-wrap:pretty;}
 .collab-trip-sub{font-size:13px;color:var(--ink3);margin-top:2px;}
+.collab-sync{flex-shrink:0;white-space:nowrap;font-size:12px;font-weight:700;border-radius:999px;padding:4px 8px;background:#edf3fa;color:#607189;}
+.collab-sync.saving{background:#fff5db;color:#a66b00;}
+.collab-sync.error{background:#fff0ef;color:#ba3e35;cursor:pointer;border:0;}
+.collab-inline-notice{margin:0 0 12px;padding:9px 11px;border-radius:9px;background:#fff0ef;color:#9d392f;font-size:13px;line-height:1.5;text-wrap:pretty;}
 .collab-section{border-top:1px solid var(--line,#e1e8f2);padding:13px 0;}
 .collab-section-title{font-size:13px;font-weight:800;color:#8fa4b8;letter-spacing:.5px;margin-bottom:8px;}
 .collab-invite-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
@@ -398,8 +403,12 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .collab-mini-btn{font-size:13px;border:1px solid #cdd9ea;background:#fff;color:#37506e;border-radius:8px;padding:7px 11px;cursor:pointer;white-space:nowrap;}
 .collab-mini-btn:hover{background:#f0f5fc;}
 .collab-mini-btn.ghost{color:#c0392b;border-color:#f0c4bd;}
+.collab-danger-row{display:flex;justify-content:flex-end;margin-top:2px;}
+.collab-qr-row{display:flex;align-items:center;gap:10px;padding:4px 0 2px;}
+.collab-qr{width:72px;height:72px;object-fit:contain;border:1px solid #d8e2ef;border-radius:9px;background:#fff;flex-shrink:0;}
+.collab-qr-fallback{font-size:12px;line-height:1.45;color:var(--ink3);text-wrap:pretty;}
 .collab-member-row{display:flex;align-items:center;gap:9px;padding:6px 0;}
-.collab-member-name{flex:1;font-size:15px;color:var(--ink);}
+.collab-member-name{flex:1;min-width:0;font-size:15px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .collab-ready{color:#c7d0dc;font-size:13px;}
 .collab-ready.on{color:#1a8f5d;}
 .collab-role-badge{font-size:12px;font-weight:700;border-radius:6px;padding:2px 9px;}
@@ -417,6 +426,21 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   background:linear-gradient(135deg,#2f6fed,#6b54d3);}
 .collab-secondary{border:1px solid #cdd9ea;border-radius:11px;padding:11px;font-size:14px;font-weight:700;background:#fff;color:#37506e;cursor:pointer;}
 .collab-wait{text-align:center;font-size:13px;color:var(--ink3);padding:6px;}
+
+/* 共編改名／加入確認的共用彈窗 */
+.wai-action-modal{position:fixed;inset:0;z-index:520;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(21,38,59,.48);}
+.wai-action-card{width:min(100%,420px);background:#fff;border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(21,38,59,.28);}
+.wai-action-title{font-size:19px;font-weight:800;color:var(--ink);margin-bottom:7px;}
+.wai-action-sub{font-size:14px;color:var(--ink3);line-height:1.55;text-wrap:pretty;margin-bottom:16px;}
+.wai-action-input{width:100%;box-sizing:border-box;border:1px solid #cdd9ea;border-radius:10px;padding:11px 12px;color:var(--ink);font-size:16px;}
+.wai-action-meta{display:flex;justify-content:space-between;gap:10px;margin-top:6px;color:var(--ink3);font-size:12px;}
+.wai-action-error{min-height:19px;margin-top:7px;color:#ba3e35;font-size:13px;line-height:1.45;}
+.wai-action-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:16px;}
+.wai-action-btn{border:1px solid #cdd9ea;border-radius:9px;background:#fff;color:#37506e;padding:9px 13px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;}
+.wai-action-btn.primary{border:none;background:linear-gradient(135deg,#2f6fed,#6b54d3);color:#fff;}
+.wai-action-btn:disabled{opacity:.55;cursor:wait;}
+.wai-confirm-list{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#f5f8fc;color:#46566a;font-size:14px;line-height:1.75;}
+.wai-confirm-list b{color:var(--ink);}
 /* ── 建立行程：分段步驟進度條（取代舊 CLI 面板）── */
 .wiz-gen-progress{margin-top:14px;padding-top:14px;border-top:1px dashed #d9e2ee;animation:fadeNode .3s ease both;}
 .wgp-title{font-size:14px;font-weight:800;color:#1176c9;text-align:center;margin-bottom:14px;letter-spacing:.3px;}
@@ -872,6 +896,11 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 
   .copy-success-modal{padding:24px 20px;}
   .collab-panel{max-width:100%;}
+  .collab-invite-row{align-items:stretch;flex-wrap:wrap;}
+  .collab-link-input{min-width:100%;}
+  .collab-qr-row{align-items:flex-start;}
+  .collab-role-sel{min-width:82px;}
+  .wai-action-card{padding:20px;}
   .gen-container{width:calc(100vw - 24px);}
 
   /* 建立行程精靈：改單欄、步驟兩排、內距收斂 */

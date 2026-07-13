@@ -2,7 +2,7 @@
 
 > **任務**：B1 使用者回饋系統、B2 深度連結  
 > **狀態**：網頁端已實作（2026 Week 1）。Android 端請依此 schema 對齊。  
-> **原則**：沿用既有 `micro_trips` 文件，回饋以 **map 欄位** 掛在行程下（與 `members` map 相同慣例，避免額外 collection 與安全規則變更）。
+> **原則**：回饋放在 `micro_trips/{tripId}/feedback/{emailKey}` 子集合，每位成員只寫自己的文件，避免共編成員互相覆寫或藉由行程文件更新他人回饋。
 
 ---
 
@@ -11,9 +11,8 @@
 ```
 micro_trips/{tripId}
   ├─ ...（既有欄位：stops, wizardData, members, inviteCode ...）
-  └─ feedback: {                     // map，key = emailKey（見下方規則）
-        <emailKey>: <FeedbackEntry>
-     }
+  └─ feedback/{emailKey}              // 每位成員一份文件
+       └─ <FeedbackEntry>
 ```
 
 - **emailKey 規則**（與 `collab.js` 的 `emailKey()` 完全一致，兩端必須相同）：
@@ -44,40 +43,33 @@ micro_trips/{tripId}
 
 ```json
 {
-  "feedback": {
-    "tim_lin_gmail_com": {
-      "email": "tim.lin@gmail.com",
-      "name": "林泓廷",
-      "tripRating": 5,
-      "aiAccuracy": 4,
-      "comment": "路線很順，但第二站營業時間有誤差",
-      "visitedCount": 5,
-      "totalStops": 6,
-      "submittedAt": 1782000000000,
-      "appPlatform": "web"
-    }
-  }
+  "email": "tim.lin@gmail.com",
+  "name": "林泓廷",
+  "tripRating": 5,
+  "aiAccuracy": 4,
+  "comment": "路線很順，但第二站營業時間有誤差",
+  "visitedCount": 5,
+  "totalStops": 6,
+  "submittedAt": 1782000000000,
+  "appPlatform": "web"
 }
 ```
 
+文件路徑：`micro_trips/{tripId}/feedback/tim_lin_gmail_com`
+
 ---
 
-## 三、寫入方式（重要：map 的 dot-key 陷阱）
-
-`set(..., { merge: true })` **不支援** 用點號路徑當 key（會被當成字面欄位名），必須用**巢狀物件**寫進 map：
+## 三、寫入方式
 
 ```js
-// ✅ 正確（巢狀物件）
-const patch = {};
-patch[emailKey] = feedbackEntry;
 await db.collection('micro_trips').doc(tripId)
-        .set({ feedback: patch }, { merge: true });
-
-// ❌ 錯誤（dot-key 會建立名為 "feedback.xxx" 的字面欄位）
-await ref.set({ ['feedback.' + emailKey]: entry }, { merge: true });
+  .collection('feedback').doc(emailKey)
+  .set(feedbackEntry, { merge: true });
 ```
 
-此規則與 `collab.js` 寫 `members` map 的註解一致。
+每位使用者只能寫入自己的 email 文件；Firestore Rules 會再次驗證文件內的 `email`。
+
+> **歷史相容**：舊版曾將回饋寫成 `micro_trips/{tripId}` 文件上的 `feedback` map（key = emailKey）。新版本不再寫入該 map，讀取一律走上述子集合；歷史 map 資料如需保留請自行遷移。
 
 ---
 

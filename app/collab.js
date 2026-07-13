@@ -43,6 +43,11 @@ window.WAI_COLLAB = (function () {
   function normalizeCode(code) {
     return String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   }
+  // 顯示用：把正規化邀請碼補回連字號（AB3D7K9P → AB3D-7K9P），純美觀；輸入端一律再正規化。
+  function formatInviteCode(code) {
+    var n = normalizeCode(code);
+    return n.length > 4 ? n.slice(0, 4) + '-' + n.slice(4) : n;
+  }
   function emailKey(email) {
     return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
   }
@@ -210,11 +215,14 @@ window.WAI_COLLAB = (function () {
       ownerUid: owner.uid || null,
       ownerEmail: owner.email || null,
       ownerName: owner.name || null,
-      inviteCode: code,
+      // 存正規化（去連字號）邀請碼：安全規則的加入分支用 exists(invites/{inviteCode}) 檢查，
+      // 而 invite 文件是以 normalizeCode(code) 為 docId，兩者必須一致，否則所有加入都會 permission-denied。
+      inviteCode: normalizeCode(code),
       shareToken: shareToken,
       guestReadable: true,
       maxMembers: MAX_MEMBERS,
       memberEmails: [owner.email],
+      editorEmails: [],
       members: members,
       userEmail: owner.email || 'unknown',
       collabCreatedAt: serverTs()
@@ -256,6 +264,10 @@ window.WAI_COLLAB = (function () {
         prefs: normalizePrefs(user.prefs),
         joinedAt: Date.now()
       };
+      // 只寫 memberEmails / members，對齊安全規則「加入」分支的 hasOnly(['memberEmails','members'])。
+      // 不碰 editorEmails：剛加入者本來就不在 editor 名單；若在此對「無 editorEmails 欄位的舊行程」
+      // 下 arrayRemove，會把欄位從無建成 []，讓 affectedKeys 多一個 editorEmails → 規則擋下加入。
+      // 降級成員的 editor 移除，由 owner 的 setMemberRole 負責。
       await tripRef.set({
         memberEmails: firebase.firestore.FieldValue.arrayUnion(user.email),
         members: membersPatch
@@ -264,6 +276,27 @@ window.WAI_COLLAB = (function () {
     var fresh = await tripRef.get();
     // alreadyMember 為暫態旗標（不寫進 Firestore），供前端區分「重新加入」與「首次加入」
     return Object.assign({ id: inv.tripId, alreadyMember: already }, fresh.data());
+  }
+
+  // 加入前預覽：只讀取邀請碼對應的行程摘要，讓前端先請使用者確認。
+  async function previewByCode(code) {
+    var norm = normalizeCode(code);
+    if (!norm) throw new Error('請輸入邀請碼。');
+    var invSnap = await db().collection('invites').doc(norm).get();
+    if (!invSnap.exists) throw new Error('找不到這組邀請碼，請確認後重試。');
+    var inv = invSnap.data();
+    if (inv.active === false) throw new Error('這組邀請碼已被停用。');
+    var tripSnap = await db().collection('micro_trips').doc(inv.tripId).get();
+    if (!tripSnap.exists) throw new Error('行程不存在或已被刪除。');
+    var trip = tripSnap.data();
+    return {
+      id: inv.tripId,
+      title: trip.title || '共編行程',
+      ownerName: trip.ownerName || trip.ownerEmail || '行程擁有者',
+      memberCount: (trip.memberEmails || []).length,
+      maxMembers: trip.maxMembers || MAX_MEMBERS,
+      isMember: (trip.memberEmails || []).indexOf((firebase.auth().currentUser || {}).email || '') !== -1
+    };
   }
 
   // 更新共用行程的「行程參數」（title/region/days/budget/people/wizardData…）。
@@ -278,14 +311,22 @@ window.WAI_COLLAB = (function () {
     if (allowed.indexOf(role) === -1) throw new Error('未知角色：' + role);
     var membersPatch = {};
     membersPatch[emailKey(memberEmail)] = { role: role };
-    await db().collection('micro_trips').doc(tripId).set({ members: membersPatch }, { merge: true });
+    var rolePatch = { members: membersPatch };
+    if (role === 'editor') rolePatch.editorEmails = firebase.firestore.FieldValue.arrayUnion(memberEmail);
+    else rolePatch.editorEmails = firebase.firestore.FieldValue.arrayRemove(memberEmail);
+    await db().collection('micro_trips').doc(tripId).set(rolePatch, { merge: true });
   }
 
   // 成員更新自己的偏好（興趣/節奏/預算/希望景點；avoid 來自帳號設定）
   async function setMemberPrefs(tripId, memberEmail, prefs) {
-    var membersPatch = {};
-    membersPatch[emailKey(memberEmail)] = { prefs: normalizePrefs(prefs), ready: true };
-    await db().collection('micro_trips').doc(tripId).set({ members: membersPatch }, { merge: true });
+    var user = firebase.auth().currentUser;
+    if (!user || user.email !== memberEmail) throw new Error('只能儲存自己的偏好');
+    await db().collection('micro_trips').doc(tripId).collection('member_prefs').doc(emailKey(memberEmail)).set({
+      email: memberEmail,
+      prefs: normalizePrefs(prefs),
+      ready: true,
+      updatedAt: serverTs()
+    }, { merge: true });
   }
 
   // owner 撤銷整個行程的邀請碼（不再可加入新成員）
@@ -324,6 +365,14 @@ window.WAI_COLLAB = (function () {
     }, function (err) { if (onError) onError(err); });
   }
 
+  function subscribeMemberPrefs(tripId, onChange, onError) {
+    return db().collection('micro_trips').doc(tripId).collection('member_prefs').onSnapshot(function (snap) {
+      var prefsByKey = {};
+      snap.forEach(function (doc) { prefsByKey[doc.id] = doc.data(); });
+      onChange(prefsByKey);
+    }, function (err) { if (onError) onError(err); });
+  }
+
   // 重生成鎖：避免 owner 與可編輯成員同時重生成互相覆蓋（最後寫入者覆蓋）。
   var REGEN_LOCK_TTL_MS = 5 * 60 * 1000; // 鎖逾時自動失效，避免當機留死鎖
   // 用 transaction 原子地檢查+設定：別人鎖住且未逾時 → { ok:false, holder }；否則上鎖 → { ok:true }
@@ -355,7 +404,12 @@ window.WAI_COLLAB = (function () {
   async function getSharedTrip(tripId) {
     var snap = await db().collection('micro_trips').doc(tripId).get();
     if (!snap.exists) return null;
-    return Object.assign({ id: tripId }, snap.data());
+    var trip = Object.assign({ id: tripId }, snap.data());
+    var prefsSnap = await db().collection('micro_trips').doc(tripId).collection('member_prefs').get();
+    var members = Object.assign({}, trip.members || {});
+    prefsSnap.forEach(function (doc) { members[doc.id] = Object.assign({}, members[doc.id] || {}, doc.data()); });
+    trip.members = members;
+    return trip;
   }
 
   // 載入「我以成員身分加入」的共用行程（array-contains 我的 email）
@@ -413,16 +467,19 @@ window.WAI_COLLAB = (function () {
     canEdit: canEdit,
     isFull: isFull,
     buildShareLink: buildShareLink,
+    formatInviteCode: formatInviteCode,
     // Firestore
     createSharedTrip: createSharedTrip,
     updateSharedTripParams: updateSharedTripParams,
     joinByCode: joinByCode,
+    previewByCode: previewByCode,
     setMemberRole: setMemberRole,
     deleteSharedTrip: deleteSharedTrip,
     leaveSharedTrip: leaveSharedTrip,
     setMemberPrefs: setMemberPrefs,
     revokeInvite: revokeInvite,
     subscribeSharedTrip: subscribeSharedTrip,
+    subscribeMemberPrefs: subscribeMemberPrefs,
     getSharedTrip: getSharedTrip,
     acquireRegenLock: acquireRegenLock,
     releaseRegenLock: releaseRegenLock,

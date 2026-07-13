@@ -3417,10 +3417,15 @@ async function doSocialLogin(providerName) {
   }
 }
 
-function doLogout() {
-  if (firebaseAuth) firebaseAuth.signOut();
-  showToast('已登出，跳轉回首頁…');
-  setTimeout(() => { window.location.href = 'ai-travel-explore-final.html'; }, 800);
+async function doLogout() {
+  try {
+    if (firebaseAuth) await firebaseAuth.signOut();
+    showToast('已登出，跳轉回首頁…');
+    setTimeout(() => { window.location.href = 'ai-travel-explore-final.html'; }, 800);
+  } catch (err) {
+    console.error('登出失敗：', err);
+    showToast('登出失敗，請稍後再試。', 'red');
+  }
 }
 
 // === Preferences Wizard ===
@@ -3858,9 +3863,9 @@ function renderMyTrips() {
         </div>
         <div class="mt-actions">
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
-          ${t.__saving? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`}
+          ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&guest=1'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
           ${t.collab ? '' : `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>`}
-          <button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>
+          ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
           <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
         </div>
@@ -3868,22 +3873,137 @@ function renderMyTrips() {
     </div>`).join('');
   grid.innerHTML = cards + newCard;
 }
-// 重新命名行程：本機立即生效，登入時同步遠端（自己的行程與共編行程皆可；共編改名會即時推送給成員）
+function closeWaiActionModal() {
+  const modal = document.getElementById('waiActionModal');
+  if (modal) modal.remove();
+}
+
+function openWaiActionModal({ title, subtitle = '', body, onMount }) {
+  closeWaiActionModal();
+  const modal = document.createElement('div');
+  modal.id = 'waiActionModal';
+  modal.className = 'wai-action-modal';
+  modal.innerHTML = `<div class="wai-action-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+    <div class="wai-action-title">${escapeHtml(title)}</div>
+    ${subtitle ? `<div class="wai-action-sub">${escapeHtml(subtitle)}</div>` : ''}
+    <div class="wai-action-content"></div>
+  </div>`;
+  modal.addEventListener('click', (event) => { if (event.target === modal) closeWaiActionModal(); });
+  document.body.appendChild(modal);
+  const content = modal.querySelector('.wai-action-content');
+  if (typeof body === 'function') body(content);
+  if (typeof onMount === 'function') onMount(modal);
+  return modal;
+}
+
+function canRenameCollabTrip(t) {
+  const isOwner = t && t.ownerEmail && currentUser && currentUser.email
+    && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase();
+  return !t || !t.collab || ['owner', 'editor'].includes(t.role) || isOwner;
+}
+
+async function persistTripRename(t, name, expectedTitleVersion, forceOverwrite = false) {
+  if (firebaseEnabled && firebaseDb && typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
+    const ref = firebaseDb.collection('micro_trips').doc(t.id);
+    let writtenVersion = Number(expectedTitleVersion || 0) + 1;
+    try {
+      await firebaseDb.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const remote = snap.exists ? snap.data() : {};
+        const remoteVersion = Number(remote.titleVersion || 0);
+        if (t.collab && !forceOverwrite && remoteVersion !== Number(expectedTitleVersion || 0)) {
+          const conflict = new Error('title-conflict');
+          conflict.code = 'title-conflict';
+          conflict.remote = remote;
+          throw conflict;
+        }
+        writtenVersion = remoteVersion + 1; // 以交易內實際版本為準（強制覆寫時避免回傳過期版本號）
+        tx.set(ref, {
+          title: name,
+          customTitle: true,
+          titleVersion: writtenVersion,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastEditedBy: firebaseAuth.currentUser.email || '',
+          lastEditedByName: (currentUser && currentUser.name) || firebaseAuth.currentUser.email || ''
+        }, { merge: true });
+      });
+      return { ok: true, titleVersion: writtenVersion };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+  return { ok: true, titleVersion: Number(expectedTitleVersion || 0) + 1 };
+}
+
+function openRenameConflictModal(t, name, result) {
+  const remote = (result.error && result.error.remote) || {};
+  const remoteTitle = remote.title || '未命名行程';
+  const remoteVersion = Number(remote.titleVersion || 0);
+  openWaiActionModal({
+    title: '行程名稱已更新',
+    subtitle: `${remote.lastEditedByName || remote.lastEditedBy || '其他成員'} 剛剛修改了名稱。`,
+    body(content) {
+      content.innerHTML = `<div class="wai-confirm-list"><div>目前版本：<b>${escapeHtml(remoteTitle)}</b></div><div>你的名稱：<b>${escapeHtml(name)}</b></div></div>
+        <div class="wai-action-actions"><button class="wai-action-btn" data-action="latest">使用最新版本</button><button class="wai-action-btn primary" data-action="overwrite">保留我的修改</button></div>`;
+      content.querySelector('[data-action="latest"]').onclick = () => {
+        t.title = remoteTitle; t.customTitle = !!remote.customTitle; t.titleVersion = remoteVersion;
+        saveState(); renderMyTrips(); renderSideMyTrips(); closeWaiActionModal();
+        showToast('已使用其他成員的最新名稱', 'blue');
+      };
+      content.querySelector('[data-action="overwrite"]').onclick = async (event) => {
+        event.currentTarget.disabled = true;
+        const retry = await persistTripRename(t, name, remoteVersion, true);
+        if (!retry.ok) { event.currentTarget.disabled = false; showToast('名稱同步失敗，請稍後重試', 'red'); return; }
+        t.title = name; t.customTitle = true; t.titleVersion = retry.titleVersion;
+        saveState(); renderMyTrips(); renderSideMyTrips(); closeWaiActionModal();
+        showToast('已保留你的名稱修改', 'green');
+      };
+    }
+  });
+}
+
+// 自製改名彈窗：避免原生 prompt 在手機與自動化環境不一致。
 async function renameMyTrip(id) {
   const t = myTrips.find(x => x.id === id);
   if (!t) return;
-  const input = window.prompt('輸入新的行程名稱（40 字內）：', t.title || '');
-  if (input === null) return; // 使用者取消
-  const name = String(input).trim().slice(0, 40);
-  if (!name) { showToast('名稱不可為空白', 'orange'); return; }
-  t.title = name;
-  t.customTitle = true; // 之後 AI 標題不覆蓋
-  saveState(); renderMyTrips(); renderSideMyTrips();
-  if (firebaseEnabled && firebaseDb && typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
-    try { await firebaseDb.collection('micro_trips').doc(id).set({ title: name, customTitle: true }, { merge: true }); }
-    catch (e) { console.warn('同步行程名稱失敗（本機已保留）：', e); }
+  if (!canRenameCollabTrip(t)) {
+    showToast('你目前只有唯讀權限，無法修改行程名稱', 'orange');
+    return;
   }
-  showToast('📝 已更新行程名稱', 'green');
+  openWaiActionModal({
+    title: '修改行程名稱',
+    subtitle: '名稱最多 40 個字，儲存後會同步給共編成員。',
+    body(content) {
+      content.innerHTML = `<input class="wai-action-input" maxlength="40" aria-label="新的行程名稱">
+        <div class="wai-action-meta"><span>請使用容易辨識的名稱</span><span data-count>0 / 40</span></div>
+        <div class="wai-action-error" role="alert"></div>
+        <div class="wai-action-actions"><button class="wai-action-btn" data-action="cancel">取消</button><button class="wai-action-btn primary" data-action="save">儲存</button></div>`;
+      const input = content.querySelector('input');
+      const count = content.querySelector('[data-count]');
+      const error = content.querySelector('.wai-action-error');
+      const save = content.querySelector('[data-action="save"]');
+      input.value = t.title || '';
+      const updateCount = () => { count.textContent = `${input.value.length} / 40`; };
+      input.oninput = updateCount; updateCount();
+      content.querySelector('[data-action="cancel"]').onclick = closeWaiActionModal;
+      save.onclick = async () => {
+        const name = String(input.value || '').trim();
+        if (!name) { error.textContent = '請輸入行程名稱。'; input.focus(); return; }
+        save.disabled = true; error.textContent = '';
+        const result = await persistTripRename(t, name, t.titleVersion || 0);
+        if (!result.ok) {
+          save.disabled = false;
+          if (result.error && result.error.code === 'title-conflict') { openRenameConflictModal(t, name, result); return; }
+          error.textContent = '同步失敗，請檢查網路後再試。';
+          return;
+        }
+        t.title = name; t.customTitle = true; t.titleVersion = result.titleVersion;
+        saveState(); renderMyTrips(); renderSideMyTrips(); closeWaiActionModal();
+        showToast('📝 已更新行程名稱', 'green');
+      };
+    },
+    onMount(modal) { setTimeout(() => modal.querySelector('.wai-action-input').focus(), 0); }
+  });
 }
 
 async function deleteMyTrip(id) {
@@ -5180,8 +5300,29 @@ async function submitInviteCode() {
   await joinSharedTripByCode(code, closeInvite);
 }
 
+function openInviteConfirmation(code, preview, closeFn) {
+  openWaiActionModal({
+    title: preview.isMember ? '你已加入此共編行程' : '確認加入共編行程',
+    subtitle: preview.isMember ? '你可以直接開啟行程檢視最新內容。' : '加入後預設為唯讀成員；擁有者可再調整你的權限。',
+    body(content) {
+      content.innerHTML = `<div class="wai-confirm-list">
+        <div>行程：<b>${escapeHtml(preview.title)}</b></div>
+        <div>擁有者：<b>${escapeHtml(preview.ownerName)}</b></div>
+        <div>成員：<b>${preview.memberCount} / ${preview.maxMembers} 人</b></div>
+        <div>加入權限：<b>${preview.isMember ? '依目前設定' : '唯讀'}</b></div>
+      </div><div class="wai-action-actions"><button class="wai-action-btn" data-action="cancel">取消</button><button class="wai-action-btn primary" data-action="confirm">${preview.isMember ? '開啟行程' : '確認加入'}</button></div>`;
+      content.querySelector('[data-action="cancel"]').onclick = closeWaiActionModal;
+      content.querySelector('[data-action="confirm"]').onclick = async (event) => {
+        event.currentTarget.disabled = true;
+        closeWaiActionModal();
+        await joinSharedTripByCode(code, closeFn, true);
+      };
+    }
+  });
+}
+
 // 共用：以邀請碼／流程碼「真實加入」共編行程（「🔑 輸入邀請碼」與「📱 流程碼進入」共用）
-async function joinSharedTripByCode(rawCode, closeFn) {
+async function joinSharedTripByCode(rawCode, closeFn, confirmed = false) {
   const code = String(rawCode || '').trim();
   if (!code) { showToast('請輸入邀請碼', 'orange'); return; }
   if (!isLoggedIn) { if (closeFn) closeFn(); openLogin(); return; }
@@ -5189,6 +5330,11 @@ async function joinSharedTripByCode(rawCode, closeFn) {
     showToast('加入共編需要連線 Firebase，請稍後再試。', 'orange'); return;
   }
   try {
+    if (!confirmed) {
+      const preview = await WAI_COLLAB.previewByCode(code);
+      openInviteConfirmation(code, preview, closeFn);
+      return;
+    }
     const user = {
       uid: (firebaseAuth && firebaseAuth.currentUser) ? firebaseAuth.currentUser.uid : null,
       email: currentUser && currentUser.email ? currentUser.email : null,
@@ -5229,6 +5375,8 @@ function upsertCollabTripLocal(trip, fallbackRole) {
     tripMode: 'collab',
     collab: true,
     role: role,
+    ownerEmail: trip.ownerEmail || '',
+    titleVersion: Number(trip.titleVersion || 0),
     inviteCode: trip.inviteCode || '',
     shareToken: trip.shareToken || '',
     wizardData: trip.wizardData || {},
@@ -5250,22 +5398,39 @@ const COLLAB_INTERESTS = [
 function openCollabPanel(tripId) {
   if (!window.WAI_COLLAB || !firebaseDb) { showToast('多人協作需連線 Firebase', 'orange'); return; }
   if (collabState && collabState.unsub) collabState.unsub();
-  collabState = { tripId, data: null, unsub: null, myEmail: (currentUser && currentUser.email) || '', myPrefsDraft: null };
+  if (collabState && collabState.prefsUnsub) collabState.prefsUnsub();
+  collabState = { tripId, data: null, baseData: null, memberPrefs: {}, unsub: null, prefsUnsub: null, myEmail: (currentUser && currentUser.email) || '', myPrefsDraft: null, syncStatus: 'synced', notice: '' };
   const ov = document.getElementById('collabPanelOverlay');
   if (ov) ov.classList.add('open');
   const body = document.getElementById('collabPanelBody');
   if (body) body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--ink3)">載入中…</div>';
   collabState.unsub = WAI_COLLAB.subscribeSharedTrip(tripId, (data) => {
-    collabState.data = data;
-    upsertCollabTripLocal(data);
+    collabState.baseData = data;
+    collabApplyMemberPrefs();
+    if (collabState.syncStatus !== 'error') collabState.syncStatus = 'synced';
+    upsertCollabTripLocal(collabState.data);
     saveState(); renderSideMyTrips();
     renderCollabPanel();
   }, (err) => {
     showToast('讀取共編行程失敗：' + (err && err.message || err), 'red');
   });
+  collabState.prefsUnsub = WAI_COLLAB.subscribeMemberPrefs(tripId, (prefs) => {
+    collabState.memberPrefs = prefs;
+    collabApplyMemberPrefs();
+    if (collabState.data) renderCollabPanel();
+  }, () => collabSetSyncStatus('error', '成員偏好同步失敗，請點右上角重試重新讀取。'));
+}
+function collabApplyMemberPrefs() {
+  if (!collabState || !collabState.baseData) return;
+  const members = { ...(collabState.baseData.members || {}) };
+  Object.entries(collabState.memberPrefs || {}).forEach(([key, pref]) => {
+    members[key] = { ...(members[key] || {}), ...pref };
+  });
+  collabState.data = { ...collabState.baseData, members };
 }
 function closeCollabPanel() {
   if (collabState && collabState.unsub) collabState.unsub();
+  if (collabState && collabState.prefsUnsub) collabState.prefsUnsub();
   collabState = null;
   const ov = document.getElementById('collabPanelOverlay');
   if (ov) ov.classList.remove('open');
@@ -5274,6 +5439,17 @@ function collabMyRole() {
   if (!collabState || !collabState.data) return 'viewer';
   const m = collabState.data.members && collabState.data.members[WAI_COLLAB.emailKey(collabState.myEmail)];
   return (m && m.role) || 'viewer';
+}
+function collabSetSyncStatus(status, notice = '') {
+  if (!collabState) return;
+  collabState.syncStatus = status;
+  collabState.notice = notice;
+  renderCollabPanel();
+}
+function collabRetrySync() {
+  if (!collabState) return;
+  const tripId = collabState.tripId;
+  openCollabPanel(tripId);
 }
 function collabSetBudget(v) { if (collabState && collabState.myPrefsDraft) collabState.myPrefsDraft.budget = v; }
 function collabPickBudget(token) { if (collabState && collabState.myPrefsDraft) { collabState.myPrefsDraft.budget = token; renderCollabPanel(); } }
@@ -5301,6 +5477,7 @@ function renderCollabPanel() {
   const members = d.members || {};
   const memberList = Object.keys(members).map(k => members[k]);
   const link = WAI_COLLAB.buildShareLink(d.id, d.shareToken);
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=144x144&data=${encodeURIComponent(link)}`;
   const profile = WAI_COLLAB.aggregateGroupProfile(members);
   const myKey = WAI_COLLAB.emailKey(collabState.myEmail);
   if (!collabState.myPrefsDraft) {
@@ -5313,20 +5490,23 @@ function renderCollabPanel() {
 
   body.innerHTML = `
     <div class="collab-trip-head">
-      <div class="collab-trip-title">${d.emoji || '👥'} ${escapeHtml(d.title || '共編行程')}</div>
-      <div class="collab-trip-sub">${escapeHtml(d.region || '')} · ${escapeHtml(d.days || '')} · ${memberList.length}/${d.maxMembers || 10} 人</div>
+      <div class="collab-trip-head-main"><div class="collab-trip-title">${d.emoji || '👥'} ${escapeHtml(d.title || '共編行程')}</div>
+      <div class="collab-trip-sub">${escapeHtml(d.region || '')} · ${escapeHtml(d.days || '')} · ${memberList.length}/${d.maxMembers || 10} 人</div></div>
+      <button class="collab-sync ${collabState.syncStatus}" ${collabState.syncStatus === 'error' ? 'onclick="collabRetrySync()"' : ''}>${collabState.syncStatus === 'saving' ? '同步中…' : collabState.syncStatus === 'error' ? '同步失敗・重試' : '已同步'}</button>
     </div>
+    ${collabState.notice ? `<div class="collab-inline-notice">${escapeHtml(collabState.notice)}</div>` : ''}
     <div class="collab-section">
       <div class="collab-section-title">邀請朋友（上限 ${d.maxMembers || 10} 人）</div>
       <div class="collab-invite-row">
-        <span class="collab-code">${d.inviteCode || '—'}</span>
-        <button class="collab-mini-btn" onclick="collabCopy('${d.inviteCode || ''}','邀請碼')">📋 複製碼</button>
+        <span class="collab-code">${d.inviteCode ? WAI_COLLAB.formatInviteCode(d.inviteCode) : '—'}</span>
+        <button class="collab-mini-btn" onclick="collabCopy('${d.inviteCode ? WAI_COLLAB.formatInviteCode(d.inviteCode) : ''}','邀請碼')">📋 複製碼</button>
       </div>
       <div class="collab-invite-row">
         <input class="collab-link-input" id="collabShareLink" readonly value="${link}">
         <button class="collab-mini-btn" onclick="collabCopy(document.getElementById('collabShareLink').value,'唯讀分享連結')">🔗 複製唯讀連結</button>
       </div>
-      ${isOwner ? `<button class="collab-mini-btn ghost" onclick="collabRevoke()">停用邀請碼</button>` : ''}
+      <div class="collab-qr-row"><img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div class="collab-qr-fallback" style="display:none">QR Code 暫時無法載入，請改用邀請碼或複製連結加入。</div><div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
+      ${isOwner ? `<div class="collab-danger-row"><button class="collab-mini-btn ghost" onclick="collabRevoke()">停用邀請碼</button></div>` : ''}
     </div>
     <div class="collab-section">
       <div class="collab-section-title">成員（${memberList.length}）${isOwner ? '<span style="font-weight:normal;color:#8fa4b8;"> · 擁有者可調整每位成員的權限</span>' : ''}</div>
@@ -5406,19 +5586,24 @@ function collabToggleInterest(v) {
 function collabSetPace(p) { if (collabState && collabState.myPrefsDraft) { collabState.myPrefsDraft.pace = p; renderCollabPanel(); } }
 async function collabSaveMyPrefs() {
   if (!collabState || !collabState.data) return;
+  collabSetSyncStatus('saving');
   try {
     await WAI_COLLAB.setMemberPrefs(collabState.tripId, collabState.myEmail, collabState.myPrefsDraft);
+    collabSetSyncStatus('synced');
     showToast('已儲存你的偏好', 'green');
-  } catch (e) { showToast('儲存失敗：' + (e && e.message || e), 'red'); }
+  } catch (e) { collabSetSyncStatus('error', '偏好同步失敗，請點右上角重試重新讀取。'); showToast('儲存失敗：' + (e && e.message || e), 'red'); }
 }
 async function collabSetRole(email, role) {
-  try { await WAI_COLLAB.setMemberRole(collabState.tripId, email, role); showToast('已更新角色', 'green'); }
-  catch (e) { showToast('更新角色失敗：' + (e && e.message || e), 'red'); }
+  collabSetSyncStatus('saving');
+  try { await WAI_COLLAB.setMemberRole(collabState.tripId, email, role); collabSetSyncStatus('synced'); showToast('已更新角色', 'green'); }
+  catch (e) { collabSetSyncStatus('error', '角色更新失敗，請重新讀取後再試。'); showToast('更新角色失敗：' + (e && e.message || e), 'red'); }
 }
 async function collabRevoke() {
   if (!collabState || !collabState.data) return;
-  try { await WAI_COLLAB.revokeInvite(collabState.tripId, collabState.data.inviteCode); showToast('邀請碼已停用', 'green'); }
-  catch (e) { showToast('停用失敗', 'red'); }
+  if (!window.confirm('停用後，新的朋友將無法再用此邀請碼加入。要繼續嗎？')) return;
+  collabSetSyncStatus('saving');
+  try { await WAI_COLLAB.revokeInvite(collabState.tripId, collabState.data.inviteCode); collabSetSyncStatus('synced'); showToast('邀請碼已停用', 'green'); }
+  catch (e) { collabSetSyncStatus('error', '邀請碼停用失敗，請重新讀取後再試。'); showToast('停用失敗', 'red'); }
 }
 function collabOpenInEditor() {
   if (!collabState) return;
