@@ -16,6 +16,8 @@
   let currentTripDepartureDate = '';
   const isPrototypeMode = true;
   let isReplanning = false;
+  // 多個外部查詢會在一次重新規劃中累加；整輪也必須有上限，避免介面長時間被鎖定。
+  let activeReplanDeadlineAt = 0;
   let draggingStopId = null;
   let activeStopMenuId = null;
   let isModifyWindowOpen = false;
@@ -81,6 +83,11 @@
   let replanStops = [];
   let persistTripDebounceTimer = null;
   let persistTripMaxWaitTimer = null;
+  let persistTripWriteActive = false;
+  let persistTripWriteQueued = false;
+  let collabBaseStops = [];
+  let collabBaseVehicle = ''; // 交易內判斷「本地是否真的改了車輛」的基準（比照 collabBaseStops，避免車輛被別人的 stop 存檔覆寫）
+  let collabInitialLoadComplete = false;
   // 本次工作階段內使用者是否實際改過行程。載入路徑一律「只讀不寫」——
   // 開頁自動流程（超時壓縮、enrichment、路線繪製回填 transitMin）只改記憶體，
   // 不寫回 Firestore，否則會用重算值覆寫 App 端剛寫入的共編資料。
@@ -1796,7 +1803,8 @@
     'lat', 'lng', 'scenicCoordinates', '_lockedCoordinates', 'nearbyToiletLocations',
     'mapPinId', 'manualStartMin', 'manualEndMin', 'placeId', 'businessHours',
     'coordVerified', 'desc', 'isMergedAttraction', 'mergedSubSpots',
-    'mergedRadiusMeters', 'mergedMemberCoords', 'checkedInAt', 'isOutdoor', 'altNearby'
+    'mergedRadiusMeters', 'mergedMemberCoords', 'checkedInAt', 'isOutdoor', 'altNearby', 'dayIndex',
+    'collabStopId', 'durationLocked'
   ]);
   function extractAppStopExtras(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -1808,6 +1816,23 @@
       extras[k] = raw[k];
     });
     return extras;
+  }
+
+  // Firestore 的 stops 是陣列，元素本身沒有文件 id。若每次載入都用 Date.now() 產生 id，
+  // 兩位共編者就無法判斷「修改的是同一站」，也無法安全合併不同站的同時修改。
+  function getStableCollabStopId(raw, index) {
+    const existing = raw && (raw.collabStopId || raw.stopId);
+    if (existing) return String(existing);
+    const seed = [
+      raw && raw.type || '', raw && raw.name || '',
+      Number(index) || 0
+    ].join('|').toLowerCase();
+    let hash = 2166136261;
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `cstop-${(hash >>> 0).toString(36)}`;
   }
 
   // 港口/端點站描述清理：去掉完整「（含 …）」，再移除尾端未閉合的破碎括號片段
@@ -1835,26 +1860,27 @@
       if (tripId) {
         let trip = myTrips.find(t => t.id === tripId);
 
+        // 訪客連結只走後端：後端核對 shareToken 並回傳去敏資料，絕不直接讀 micro_trips。
+        if (isGuestView) {
+          try {
+            if (!window.WAI_COLLAB) throw new Error('分享服務尚未載入。');
+            trip = await WAI_COLLAB.loadGuestTrip(tripId, params.get('token') || '');
+          } catch (err) {
+            document.body.innerHTML = '<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#37506e;">'
+              + '<div style="font-size:40px;margin-bottom:12px;">🔒</div>'
+              + '<h2 style="margin:0 0 8px;">分享連結無效</h2>'
+              + '<p style="color:#8fa4b8;">' + escapeHtml((err && err.message) || '這個分享連結已失效，請向擁有者索取新的連結。') + '</p></div>';
+            return;
+          }
+        }
+
         // 共編行程：本機快取可能是 join 當下的空殼（stops/members 都舊）→ 一律抓最新 Firebase 為準
-        if ((!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
+        if (!isGuestView && (!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
              if (doc.exists) {
                const fresh = doc.data();
                if (!fresh.id) fresh.id = doc.id;
-               // 訪客唯讀連結：必須帶對 shareToken 且行程開放分享，否則不得載入
-               // （tripId 可被推測；token 是不可猜的門檻，前端亦需驗證，不能只依賴 Firestore 規則）
-               if (isGuestView && fresh.collab) {
-                 const paramToken = params.get('token') || '';
-                 const tokenOk = fresh.shareToken && paramToken === fresh.shareToken;
-                 if (!fresh.guestReadable || !tokenOk) {
-                   document.body.innerHTML = '<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#37506e;">'
-                     + '<div style="font-size:40px;margin-bottom:12px;">🔒</div>'
-                     + '<h2 style="margin:0 0 8px;">分享連結無效</h2>'
-                     + '<p style="color:#8fa4b8;">這個分享連結已失效或無權限查看，請向擁有者索取新的連結。</p></div>';
-                   return;
-                 }
-               }
                trip = trip ? { ...trip, ...fresh } : fresh;
              }
            } catch (err) {
@@ -1880,7 +1906,7 @@
           currentTripShareToken = trip.shareToken || '';
           currentTripDepartureDate = (trip.wizardData && trip.wizardData.departureDate) || trip.departureDate || '';
           // 多人即時同步：訂閱這份共編行程，任一成員（owner/editor）改動後所有人立即重繪
-          startCollabTripLiveSync(trip.id || tripId);
+          if (!isGuestView) startCollabTripLiveSync(trip.id || tripId);
         }
 
         if (trip) {
@@ -1960,6 +1986,7 @@
 
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
+              const stableStopId = getStableCollabStopId(s, idx);
 
               // 座標鎖定的站點（如離島港口）：直接使用指定座標，跳過 Firebase 查詢
               if (s._lockedCoordinates) {
@@ -1976,7 +2003,8 @@
                     };
                   }
                   return {
-                    id: `stop-${Date.now()}-${idx}`,
+                    id: stableStopId,
+                    collabStopId: stableStopId,
                     emoji: s.emoji || '📍', name: s.name || '景點',
                     type: s.type || null,
                     stayMin: resolveStopStayMin(s, 20),
@@ -1994,8 +2022,10 @@
                     mergedMemberCoords: s.mergedMemberCoords || null,
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
                     manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
+                    durationLocked: s.durationLocked === true,
                     checkedInAt: s.checkedInAt || null,
                     isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                    dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
                     __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
                   };
                 }
@@ -2058,7 +2088,8 @@
               }
 
               return {
-                id: `stop-${Date.now()}-${idx}`,
+                id: stableStopId,
+                collabStopId: stableStopId,
                 emoji: s.emoji || scenicRecord?.emoji || '📍',
                 name: s.name || scenicRecord?.name || s.desc || '景點',
                 type: s.type || null,
@@ -2079,8 +2110,10 @@
                 lng: _pos.lng,
                 nearbyToiletLocations: s.nearbyToiletLocations || [],
                 manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
+                durationLocked: s.durationLocked === true,
                 checkedInAt: s.checkedInAt || null,
                 isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
                 __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
               };
             }));
@@ -2166,6 +2199,16 @@
             try {
               fitScheduleToTimeLimit();
             } catch (_e) { console.warn('[load] 超時壓縮略過：', _e); }
+            // 以「完成載入與顯示正規化後」的內容作為三方合併基準；之後只把使用者真的改動的欄位
+            // 套到交易內最新遠端資料，避免兩位成員修改不同站時整包互相覆蓋。
+            collabBaseStops = replanStops.map(serializeStopForPersistence);
+            collabBaseVehicle = String(currentTripPreferences && currentTripPreferences.transportMode || '').toLowerCase();
+            collabInitialLoadComplete = true;
+            if (collabLivePendingData) {
+              const pendingInitialSnapshot = collabLivePendingData;
+              collabLivePendingData = null;
+              setTimeout(() => applyCollabRemoteUpdate(pendingInitialSnapshot), 0);
+            }
 
             const durationSum = replanStops.reduce((sum, s, idx) => {
               const stay = s.stayMin || 0;
@@ -3711,10 +3754,12 @@
   function fitScheduleToTimeLimit() {
     const prefs = currentTripPreferences || {};
     if (!prefs.days) return { changed: false, fits: true, limitEndMin: null };
+    const startMin = getReplanStartMinutes();
     const limitMin = parseDurationMinutes(prefs.days);
     if (!Number.isFinite(limitMin) || limitMin <= 0) return { changed: false, fits: true, limitEndMin: null };
-    const startMin = getReplanStartMinutes();
-    const limitEndMin = startMin + limitMin;
+    const limitEndMin = isMultiDayTrip(prefs.days)
+      ? getMultiDayWindow(prefs).day2EndMin
+      : startMin + limitMin;
 
     const scheduleEnd = () => {
       const sch = buildReplanSchedule();
@@ -3729,7 +3774,8 @@
     // 端點（起點/終點）與餐廳/用餐站皆為例外，不參與扣時。
     const MIN_RATIO = 0.65;
     const info = replanStops.map((s, i) => {
-      const eligible = !(s.type === 'start' || s.type === 'end') && !isFoodStop(s);
+      // 使用者手動調整過的停留時間是明確決策，背景壓縮不可再改寫。
+      const eligible = !(s.type === 'start' || s.type === 'end') && !isFoodStop(s) && s.durationLocked !== true;
       const orig = Math.max(0, curStayOf(sch, i, s));
       return { stop: s, i, eligible, orig, floor: Math.ceil(orig * MIN_RATIO) };
     });
@@ -4103,13 +4149,24 @@
   }
 
   function buildReplanSchedule() {
+    ensureStopDayIndexes(replanStops, currentTripPreferences || {});
     let cursor = getReplanStartMinutes();
+    const multiDay = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days);
+    const multiWindow = multiDay ? getMultiDayWindow(currentTripPreferences || {}) : null;
+    let activeDay = 1;
     return replanStops.map((stop, index) => {
+      const stopDay = multiDay ? (Number(stop.dayIndex) === 2 ? 2 : 1) : 1;
+      if (multiDay && stopDay === 2 && activeDay !== 2) {
+        cursor = Math.max(cursor, multiWindow.day2StartMin);
+        activeDay = 2;
+      }
       const transitMode = normalizeTransitMode(stop.transitMode);
       stop.transitMode = transitMode;
       const defaultDuration = Math.max(5, stop.stayMin || 0);
-      const preferredStart = Number.isFinite(stop.manualStartMin) ? stop.manualStartMin : cursor;
-      const preferredEnd = Number.isFinite(stop.manualEndMin) ? stop.manualEndMin : (preferredStart + defaultDuration);
+      let preferredStart = Number.isFinite(stop.manualStartMin) ? stop.manualStartMin : cursor;
+      if (multiDay && stopDay === 2 && preferredStart < 24 * 60) preferredStart += 24 * 60;
+      let preferredEnd = Number.isFinite(stop.manualEndMin) ? stop.manualEndMin : (preferredStart + defaultDuration);
+      if (multiDay && stopDay === 2 && preferredEnd < 24 * 60) preferredEnd += 24 * 60;
       const preferredDuration = Math.max(5, preferredEnd - preferredStart);
       const start = Math.max(preferredStart, cursor);
       const end = start + preferredDuration;
@@ -4119,17 +4176,19 @@
       let transit = 0;
       if (index < replanStops.length - 1) {
         transit = Number.isFinite(normalizedTransitMin) ? normalizedTransitMin : getDefaultTransitMinutes(transitMode);
+        const nextDay = multiDay ? (Number(replanStops[index + 1].dayIndex) === 2 ? 2 : 1) : stopDay;
+        if (multiDay && nextDay !== stopDay) transit = 0; // 過夜不是站間交通時間
         const isDriveSeg = (transitMode === 'car' || transitMode === 'scooter');
         // 開車段的目的地若停在鄰近停車場，「停車後步行」也算進段落交通，
         // 下一站的開始時刻與行程總時長才會反映真實情況（暫態欄位，畫路線時寫入）。
         // 需 mode guard：parkWalkMin 綁在「站」上、由重畫路線清除有時差，若這段已改走路/計程車
         // 就不該再加停車步行（清除完成前殘留值也不會誤計）。
         const nextParkWalk = Number(replanStops[index + 1] && replanStops[index + 1].parkWalkMin);
-        if (isDriveSeg && Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
+        if (nextDay === stopDay && isDriveSeg && Number.isFinite(nextParkWalk) && nextParkWalk > 0) transit += nextParkWalk;
         // 出發側也要算：本站當初開車抵達且停在停車場、這一段又是開車 →
         // 離開前得先從景點走回停車場（與抵達步行同一條路，時間相同）。
         const ownParkWalk = Number(stop.parkWalkMin);
-        if (isDriveSeg && Number.isFinite(ownParkWalk) && ownParkWalk > 0) transit += ownParkWalk;
+        if (nextDay === stopDay && isDriveSeg && Number.isFinite(ownParkWalk) && ownParkWalk > 0) transit += ownParkWalk;
       }
 
       cursor = end + transit;
@@ -4139,6 +4198,7 @@
         end,
         transit,
         transitMode,
+        dayIndex: stopDay,
         computedStayMin: end - start
       };
     });
@@ -4161,6 +4221,16 @@
     refreshRouteDirections();
     schedulePersistTrip();
   }
+
+  // 原生拖曳在部分觸控／輔助操作環境不會產生 drop；提供相同資料路徑的明確移動按鈕。
+  window.moveReplanStop = function(stopId, direction) {
+    if (collabReadOnly) return;
+    const sourceIndex = replanStops.findIndex((item) => item.id === stopId);
+    const targetIndex = sourceIndex + Number(direction);
+    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= replanStops.length) return;
+    reorderReplanStops(stopId, replanStops[targetIndex].id);
+    renderReplanBoard();
+  };
 
   function createStopFromTemplate(template) {
     replanStopSerial += 1;
@@ -4219,6 +4289,8 @@
       transitMode: normalizedMode,
       mapPinId: assignedPinId,
       scenicCoordinates,
+      businessHours: template.businessHours || null,
+      dayIndex: Math.max(1, Math.min(2, Number(template.dayIndex) || 1)),
       lat: stopCoordinates ? stopCoordinates.lat : null,
       lng: stopCoordinates ? stopCoordinates.lng : null,
       nearbyToiletLocations: template.toiletLocations || []
@@ -4445,6 +4517,7 @@
     stop.manualStartMin = startMin;
     stop.manualEndMin = endMin;
     stop.stayMin = endMin - startMin;
+    stop.durationLocked = true;
     
     // 檢查並自動調整重疊的後續行程
     adjustOverlappingStops(stop.id);
@@ -4480,7 +4553,7 @@
     const stop = replanStops.find(s => s.id === stopId);
     if (!stop) return;
     const nowVisited = toggleVisitedPlace(stop);
-    const label = nowVisited ? '✓ 已去過' : '📌 去過了';
+    const label = nowVisited ? '✓ 我已去過' : '📌 我去過了';
     // 同步更新所有 view 中同一景點的「去過了」按鈕（replan 卡片、planned timeline、pin info）
     document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stopId}"]`).forEach(b => {
       b.textContent = label;
@@ -4514,7 +4587,7 @@
           addedCount++;
           // 更新畫面按鈕
           document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stop.id}"]`).forEach(b => {
-            b.textContent = '✓ 已去過';
+            b.textContent = '✓ 我已去過';
             b.classList.add('visited');
           });
         }
@@ -4798,7 +4871,7 @@
       const stop = replanStops.find(s => s.id === stopId);
       if (!stop) return;
       const v = isPlaceVisited(stop.name);
-      btn.textContent = v ? '✓ 已去過' : '📌 去過了';
+      btn.textContent = v ? '✓ 我已去過' : '📌 我去過了';
       btn.classList.toggle('visited', v);
     });
   }
@@ -4973,27 +5046,34 @@
   let collabLiveUnsub = null;
   let collabLivePendingData = null;
   let collabLiveRetryTimer = null;
+  window.addEventListener('pagehide', () => {
+    if (collabLiveUnsub) { collabLiveUnsub(); collabLiveUnsub = null; }
+    clearTimeout(collabLiveRetryTimer);
+    collabLiveRetryTimer = null;
+    collabLivePendingData = null;
+  });
 
   // 行程內容簽名：涵蓋順序/站名/停留/交通/手動時間/打卡時間，用來判斷遠端資料是否與本地相同（＝自己的回音）
   function collabStopsSignature(stops) {
     return JSON.stringify((stops || []).map((s) => [
-      s.name || '', s.type || '',
+      s.collabStopId || s.stopId || '', s.name || '', s.type || '',
       Math.round(Number(s.stayMin) || 0),
       s.transitMode || '', Math.round(Number(s.transitMin) || 0),
       s.manualStartMin ?? null, s.manualEndMin ?? null,
-      s.checkedInAt ?? null
+      s.checkedInAt ?? null, Number(s.dayIndex) || 1, s.durationLocked === true
     ]));
   }
 
   // 由 Firestore 存檔的 stops 輕量重建本地 stop 物件（座標一律用存檔值，不再查 Places）
   function buildStopsFromCollabSnapshot(stops) {
-    const now = Date.now();
     return (stops || []).map((s, idx) => {
+      const stableStopId = getStableCollabStopId(s, idx);
       const pos = readCoordinateObject(s._lockedCoordinates)
         || readCoordinateObject(s.scenicCoordinates)
         || readCoordinateObject(s);
       return {
-        id: `stop-live-${now}-${idx}`,
+        id: stableStopId,
+        collabStopId: stableStopId,
         emoji: s.emoji || '📍',
         name: s.name || '景點',
         type: s.type || null,
@@ -5009,6 +5089,7 @@
         desc: s.desc || '',
         manualStartMin: s.manualStartMin ?? null,
         manualEndMin: s.manualEndMin ?? null,
+        durationLocked: s.durationLocked === true,
         isMergedAttraction: s.isMergedAttraction || false,
         mergedSubSpots: s.mergedSubSpots || null,
         mergedRadiusMeters: s.mergedRadiusMeters || null,
@@ -5019,6 +5100,7 @@
         checkedInAt: s.checkedInAt || null,
         isOutdoor: s.isOutdoor || false,
         altNearby: s.altNearby || null,
+        dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
         __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
       };
     });
@@ -5026,7 +5108,7 @@
 
   function applyCollabRemoteUpdate(data) {
     // 使用者正在拖曳/修改視窗開著/本地變更還沒存回 → 先擱置，稍後再套用（避免蓋掉手上的操作）
-    if (draggingStopId || isModifyWindowOpen || persistTripDebounceTimer) {
+    if (draggingStopId || isModifyWindowOpen || persistTripDebounceTimer || persistTripWriteActive) {
       collabLivePendingData = data;
       clearTimeout(collabLiveRetryTimer);
       collabLiveRetryTimer = setTimeout(() => {
@@ -5057,6 +5139,21 @@
 
     if (data.title && data.title !== currentTripTitle) {
       currentTripTitle = data.title;
+      updateLocalTripField(currentItineraryId, 'title', data.title);
+      if (data.customTitle !== undefined) updateLocalTripField(currentItineraryId, 'customTitle', !!data.customTitle);
+      if (data.titleVersion !== undefined) updateLocalTripField(currentItineraryId, 'titleVersion', Number(data.titleVersion || 0));
+    }
+
+    const remoteVehicle = String(data.wizardData && data.wizardData.transportMode || '').toLowerCase();
+    if (['taxi', 'scooter', 'car'].includes(remoteVehicle)) {
+      if (remoteVehicle !== String(currentTripPreferences && currentTripPreferences.transportMode || '').toLowerCase()) {
+        currentTripPreferences = { ...(currentTripPreferences || {}), transportMode: remoteVehicle };
+        updateLocalTripField(currentItineraryId, 'wizardData', currentTripPreferences);
+        syncTripPrimaryVehicleSelect();
+        hasStatusOrIndexChange = true;
+      }
+      // 合併基準跟上最新遠端車輛：下次本地存 stop 時才不會把別人剛改的車輛當成「本地舊值」寫回去
+      collabBaseVehicle = remoteVehicle;
     }
 
     // Always update hero title status badge if title or status changed
@@ -5104,6 +5201,7 @@
     }
 
     replanStops = buildStopsFromCollabSnapshot(data.stops);
+    collabBaseStops = replanStops.map(serializeStopForPersistence);
     activeStopMenuId = null;
     renderItineraryDisplay();
     if (isReplanning) renderReplanBoard();
@@ -5117,37 +5215,35 @@
   function startCollabTripLiveSync(tripId) {
     if (!tripId || !firebaseEnabled || !firebaseDb) return;
     if (collabLiveUnsub) { collabLiveUnsub(); collabLiveUnsub = null; }
-    let isFirstSnapshot = true;
+    collabInitialLoadComplete = false;
     collabLiveUnsub = firebaseDb.collection('micro_trips').doc(tripId).onSnapshot((snap) => {
-      // 第一個快照＝訂閱當下的初始狀態，initFromUrl 正在（或已經）用它跑完整載入管線；
-      // 這裡若套用會用「未後處理的原始 stops」蓋掉合併/校正後的結果，故跳過。
-      if (isFirstSnapshot) { isFirstSnapshot = false; return; }
       if (snap.metadata && snap.metadata.hasPendingWrites) return; // 自己的本地寫入，等 commit
       if (!snap.exists) {
         showVisitedToast('⚠️ 這份共編行程已被擁有者刪除');
         return;
       }
-      applyCollabRemoteUpdate(snap.data() || {});
+      const data = snap.data() || {};
+      // 首次 get() 可能先命中 Firestore 本機快取；監聽的第一個伺服器快照才是最新資料。
+      // 初始化尚未建完 stop 物件時先暫存，完成後再比對套用，不能直接略過第一個快照。
+      if (!collabInitialLoadComplete) {
+        collabLivePendingData = data;
+        return;
+      }
+      applyCollabRemoteUpdate(data);
     }, (err) => console.warn('共編即時同步中斷：', err));
   }
 
-  async function persistCurrentTripStops() {
-    if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
-
-    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
-    tripUserDirty = true; // 走到這裡＝有互動觸發的存檔，之後的自動回填（如路線 transitMin）才允許跟著存
-
-    const stopsSnapshot = replanStops.map((stop) => ({
-      // App 端（Android）的欄位（time/order/stopId…）先鋪回，整包覆寫 stops 才不會剝掉他端資料；
-      // 網頁 schema 欄位在後面覆寫，以網頁當前狀態為準。
+  function serializeStopForPersistence(stop, index) {
+    const stableStopId = getStableCollabStopId(stop, index);
+    return {
       ...(stop.__appExtras || {}),
+      collabStopId: stableStopId,
       name: stop.name,
       emoji: stop.emoji || '📍',
       type: stop.type || null,
       stayMin: stop.stayMin,
-      // App 端停留欄位與 stayMin 同步寫（App 寫入時也是 duration＋stayMin 一起），
-      // 兩端讀取（duration 優先）才會一致；否則網頁改停留後重載會被舊 duration 蓋回。
       duration: stop.stayMin ?? null,
+      durationLocked: stop.durationLocked === true,
       transitMin: stop.transitMin,
       transitMode: stop.transitMode,
       lat: stop.lat,
@@ -5160,18 +5256,91 @@
       manualEndMin: stop.manualEndMin ?? null,
       placeId: stop.placeId || null,
       businessHours: stop.businessHours || null,
-      coordVerified: stop.coordVerified || false, // 已驗證座標的旗標，存檔後下次載入跳過重驗
-      // 景點介紹（乾淨 prose，不含「（含 …）」）一併保存，避免存檔重載後描述消失、只剩括號
+      coordVerified: stop.coordVerified || false,
       desc: stop.desc || '',
-      // 合併大景點欄位一併保存，避免切換交通工具等觸發存檔後，重新載入時「🧩 含…」子景點資訊消失
       isMergedAttraction: stop.isMergedAttraction || false,
       mergedSubSpots: stop.mergedSubSpots || null,
       mergedRadiusMeters: stop.mergedRadiusMeters || null,
       mergedMemberCoords: stop.mergedMemberCoords || null,
       checkedInAt: stop.checkedInAt || null,
-      isOutdoor: stop.isOutdoor || false,          // Plan B：室內/戶外標記
-      altNearby: stop.altNearby || null            // Plan B：附近替代景點（查看替換用）
-    }));
+      isOutdoor: stop.isOutdoor || false,
+      altNearby: stop.altNearby || null,
+      dayIndex: Math.max(1, Math.min(2, Number(stop.dayIndex) || 1))
+    };
+  }
+
+  function collabValueEqual(a, b) {
+    return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+  }
+
+  // 三方合併：base＝本頁上次看見的版本、local＝本次使用者修改、remote＝交易內最新版本。
+  // 只把 local 相對 base 真正變動的欄位套到 remote，因此不同站、甚至同站不同欄位可並存。
+  function mergeCollabStops(remoteStops, baseStops, localStops) {
+    const normalizedRemote = (remoteStops || []).map((s, i) => ({ ...s, collabStopId: getStableCollabStopId(s, i) }));
+    const normalizedBase = (baseStops || []).map((s, i) => ({ ...s, collabStopId: getStableCollabStopId(s, i) }));
+    const normalizedLocal = (localStops || []).map((s, i) => ({ ...s, collabStopId: getStableCollabStopId(s, i) }));
+    const baseById = new Map(normalizedBase.map((s) => [s.collabStopId, s]));
+    const localById = new Map(normalizedLocal.map((s) => [s.collabStopId, s]));
+    const remoteById = new Map(normalizedRemote.map((s) => [s.collabStopId, s]));
+
+    baseById.forEach((_base, id) => {
+      if (!localById.has(id)) remoteById.delete(id);
+    });
+
+    normalizedLocal.forEach((local) => {
+      const id = local.collabStopId;
+      const base = baseById.get(id);
+      if (!base) {
+        remoteById.set(id, { ...local });
+        return;
+      }
+      const remote = { ...(remoteById.get(id) || base) };
+      new Set([...Object.keys(base), ...Object.keys(local)]).forEach((key) => {
+        if (key === 'collabStopId') return;
+        if (!collabValueEqual(local[key], base[key])) {
+          if (local[key] === undefined) delete remote[key];
+          else remote[key] = local[key];
+        }
+      });
+      remote.collabStopId = id;
+      remoteById.set(id, remote);
+    });
+
+    const baseOrder = normalizedBase.map((s) => s.collabStopId).join('|');
+    const localOrder = normalizedLocal.map((s) => s.collabStopId).join('|');
+    if (baseOrder !== localOrder) {
+      const ordered = [];
+      normalizedLocal.forEach((s) => {
+        const merged = remoteById.get(s.collabStopId);
+        if (merged) { ordered.push(merged); remoteById.delete(s.collabStopId); }
+      });
+      normalizedRemote.forEach((s) => {
+        const merged = remoteById.get(s.collabStopId);
+        if (merged) { ordered.push(merged); remoteById.delete(s.collabStopId); }
+      });
+      return ordered.concat(Array.from(remoteById.values()));
+    }
+    const merged = [];
+    normalizedRemote.forEach((s) => {
+      const value = remoteById.get(s.collabStopId);
+      if (value) { merged.push(value); remoteById.delete(s.collabStopId); }
+    });
+    return merged.concat(Array.from(remoteById.values()));
+  }
+
+  async function persistCurrentTripStops() {
+    if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
+
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+    if (persistTripWriteActive) {
+      persistTripWriteQueued = true;
+      return;
+    }
+    persistTripWriteActive = true;
+    try {
+    tripUserDirty = true; // 走到這裡＝有互動觸發的存檔，之後的自動回填（如路線 transitMin）才允許跟著存
+
+    const stopsSnapshot = replanStops.map(serializeStopForPersistence);
 
     // 全程主要交通工具偏好（計程車/機車/汽車）一併保存，重新載入後仍生效
     const vehiclePref = String(currentTripPreferences?.transportMode || '').toLowerCase();
@@ -5221,21 +5390,31 @@
         const { __saving, members: _m, memberEmails: _me, ownerEmail: _oe, ownerUid: _ou, ownerName: _on,
           role: _role, guestReadable: _gr, shareToken: _stk, inviteCode: _ivc, maxMembers: _mmx,
           collabCreatedAt: _ccat, userEmail: _ue, ...cleanLocal } = localTrip || {};
-        const fbPatch = localTrip
-          ? { 
-              ...cleanLocal, 
+        // 共編文件必須使用明確白名單。不能展開 localTrip：本機卡片含 createdAt、tripMode、cc，
+        // 也可能仍保留舊 title/titleVersion；整包 merge 不只會被 editor Rules 拒絕，還會把別人
+        // 剛完成的改名覆蓋回舊值。名稱只能走專用的 transaction 改名流程。
+        const fbPatch = currentTripIsCollab
+          ? {
               stops: stopsSnapshot,
               status: currentTripStatus,
               currentStopIndex: currentStopIndex,
               startedAt: currentTripStartedAt
             }
-          : { 
-              id: currentItineraryId, 
-              stops: stopsSnapshot,
-              status: currentTripStatus,
-              currentStopIndex: currentStopIndex,
-              startedAt: currentTripStartedAt
-            };
+          : (localTrip
+            ? {
+                ...cleanLocal,
+                stops: stopsSnapshot,
+                status: currentTripStatus,
+                currentStopIndex: currentStopIndex,
+                startedAt: currentTripStartedAt
+              }
+            : {
+                id: currentItineraryId,
+                stops: stopsSnapshot,
+                status: currentTripStatus,
+                currentStopIndex: currentStopIndex,
+                startedAt: currentTripStartedAt
+              });
         // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail。
         // 共編行程不由 persist 改 userEmail：否則 editor 存檔會把擁有者 email 換成自己（連帶影響刪除權限）。
         if (userEmail && !currentTripIsCollab) fbPatch.userEmail = userEmail;
@@ -5248,13 +5427,65 @@
             fbPatch.lastEditedByName = (u2 && u2.currentUser && u2.currentUser.name) || userEmail;
           } catch (_e) { fbPatch.lastEditedByName = userEmail; }
         }
-        // set+merge 會把含 "." 的 key 當字面欄位名，故改用巢狀物件寫 wizardData.transportMode
-        if (hasVehiclePref) {
+        // set+merge 會把含 "." 的 key 當字面欄位名，故改用巢狀物件寫 wizardData.transportMode。
+        // 共編行程的車輛欄位改在交易內以 base 判斷（見下），這裡只在非共編時直接寫。
+        if (hasVehiclePref && !currentTripIsCollab) {
           fbPatch.wizardData = { ...(fbPatch.wizardData || {}), transportMode: vehiclePref };
         }
-        await firebaseDb.collection('micro_trips').doc(currentItineraryId).set(fbPatch, { merge: true });
+        const tripRef = firebaseDb.collection('micro_trips').doc(currentItineraryId);
+        if (currentTripIsCollab) {
+          let committedStops = stopsSnapshot;
+          let committedVehicle = '';
+          await firebaseDb.runTransaction(async (tx) => {
+            const remoteSnap = await tx.get(tripRef);
+            const remoteData = remoteSnap.exists ? (remoteSnap.data() || {}) : {};
+            committedStops = mergeCollabStops(remoteData.stops || [], collabBaseStops, stopsSnapshot);
+            const patch = { ...fbPatch, stops: committedStops };
+            // 車輛欄位比照 stops 做三方判斷：只有「本地相對 base 真的改了」才覆寫，否則保留遠端，
+            // 避免另一位成員剛改的車輛被本次 stop 存檔（帶著本地舊車輛）靜默蓋掉。
+            const remoteVehicle = String(remoteData.wizardData && remoteData.wizardData.transportMode || '').toLowerCase();
+            const localVehicle = String(vehiclePref || '').toLowerCase();
+            const baseVehicle = String(collabBaseVehicle || '').toLowerCase();
+            const localChanged = hasVehiclePref && localVehicle && localVehicle !== baseVehicle;
+            committedVehicle = localChanged ? localVehicle : remoteVehicle;
+            if (['taxi', 'scooter', 'car'].includes(committedVehicle)) {
+              patch.wizardData = { ...(patch.wizardData || {}), transportMode: committedVehicle };
+            } else if (patch.wizardData) {
+              delete patch.wizardData.transportMode; // 遠端與本地皆無有效車輛：不要覆寫
+            }
+            tx.set(tripRef, patch, { merge: true });
+          });
+          collabBaseStops = committedStops.map((s, i) => ({ ...s, collabStopId: getStableCollabStopId(s, i) }));
+          // 車輛以實際 committed 值校正基準與本地 UI（遠端值勝出＝本地沒改時，需同步顯示對方的車輛）
+          if (['taxi', 'scooter', 'car'].includes(committedVehicle)) {
+            collabBaseVehicle = committedVehicle;
+            if (committedVehicle !== String(currentTripPreferences && currentTripPreferences.transportMode || '').toLowerCase()) {
+              currentTripPreferences = { ...(currentTripPreferences || {}), transportMode: committedVehicle };
+              updateLocalTripField(currentItineraryId, 'wizardData', currentTripPreferences);
+              syncTripPrimaryVehicleSelect();
+            }
+          }
+          // 交易內可能同時合併了另一位成員剛寫入的欄位。本地若仍保留交易前的舊陣列，
+          // 下一個延遲存檔會把那些遠端欄位誤判為「本地新修改」而覆寫回去。
+          // 因此成功提交後立刻以實際 committed 結果校正本地與合併基準。
+          if (collabStopsSignature(replanStops) !== collabStopsSignature(committedStops)) {
+            replanStops = buildStopsFromCollabSnapshot(committedStops);
+            renderItineraryDisplay();
+            if (isReplanning) renderReplanBoard();
+            refreshRouteDirections();
+          }
+        } else {
+          await tripRef.set(fbPatch, { merge: true });
+        }
       } catch (e) {
         console.warn('Failed to persist trip stops to Firebase:', e);
+      }
+    }
+    } finally {
+      persistTripWriteActive = false;
+      if (persistTripWriteQueued) {
+        persistTripWriteQueued = false;
+        schedulePersistTrip();
       }
     }
   }
@@ -5334,13 +5565,22 @@
     schedulePersistTrip();
   }
 
+  function getStopServiceDate(stop) {
+    const departureDate = currentTripPreferences?.departureDate;
+    if (!departureDate || Number(stop && stop.dayIndex) !== 2) return departureDate;
+    const date = new Date(departureDate + 'T00:00:00');
+    date.setDate(date.getDate() + 1);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
   function getBusinessHoursWarning(stop) {
     const hours = String(stop.businessHours || '').trim();
     if (!hours || hours === '24小時') return '';
-    const departureDate = currentTripPreferences?.departureDate;
+    const departureDate = getStopServiceDate(stop);
     let checkLine = hours.split('\n')[0] || hours;
     if (departureDate) {
-      const jsDay = new Date(departureDate + 'T00:00:00').getDay();
+      const serviceDate = new Date(departureDate + 'T00:00:00');
+      const jsDay = serviceDate.getDay();
       const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
       const lines = hours.split('\n');
       if (lines[apiIndex]) checkLine = lines[apiIndex];
@@ -5349,8 +5589,9 @@
     const window = parseBusinessHoursWindow(checkLine);
     if (!window) return '';
     const { open, close } = window;
-    const startMin = stop.start ?? 0;
-    const endMin = stop.end ?? startMin + (stop.stayMin || 0);
+    const rawStart = stop.start ?? 0;
+    const startMin = rawStart % (24 * 60);
+    const endMin = startMin + Math.max(0, (stop.end ?? (rawStart + (stop.stayMin || 0))) - rawStart);
     if (startMin >= close || endMin <= open) {
       return `⚠️ 可能在非營業時間（${minutesToClock(open)}–${minutesToClock(close)}）`;
     }
@@ -5363,9 +5604,12 @@
     if (!listEl) return;
 
     const schedule = buildReplanSchedule();
+    const multiDaySchedule = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days);
     if (totalEl) {
       totalEl.textContent = schedule.length
-        ? `${minutesToClock(schedule[0].start)} - ${minutesToClock(schedule[schedule.length - 1].end)}`
+        ? (multiDaySchedule
+          ? `兩天一夜 · 第 2 天 ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
+          : `${minutesToClock(schedule[0].start)} - ${minutesToClock(schedule[schedule.length - 1].end)}`)
         : '--';
     }
     updateMapTimeBanner(
@@ -5375,7 +5619,9 @@
     );
     if (schedule.length) {
       const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
-      if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(schedule[0].start)} – ${minutesToClock(schedule[schedule.length - 1].end)}`;
+      if (heroTimeTag) heroTimeTag.textContent = multiDaySchedule
+        ? `⏱️ 兩天一夜 · 第 2 天 ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
+        : `⏱️ ${minutesToClock(schedule[0].start)} – ${minutesToClock(schedule[schedule.length - 1].end)}`;
     }
 
     if (!schedule.length) {
@@ -5395,11 +5641,10 @@
       return;
     }
 
-    if (schedule.length && totalEl) {
-      totalEl.textContent = `${minutesToClock(schedule[0].start)} - ${minutesToClock(schedule[schedule.length - 1].end)}`;
-    }
-
-    listEl.innerHTML = schedule.map((stop) => `
+    listEl.innerHTML = schedule.map((stop, index) => `
+      ${multiDaySchedule && (index === 0 || schedule[index - 1].dayIndex !== stop.dayIndex)
+        ? `<div class="replan-day-divider">第 ${stop.dayIndex} 天</div>`
+        : ''}
       <div class="replan-card ${activeStopMenuId === stop.id ? 'selected' : ''}" draggable="${(collabReadOnly || stop.type === 'start' || stop.type === 'end' || (isModifyWindowOpen && modifyTargetStopId === stop.id)) ? 'false' : 'true'}" data-stop-id="${stop.id}">
         <div class="replan-handle">⋮⋮</div>
         <div class="replan-time">${minutesToClock(stop.start)} - ${minutesToClock(stop.end)}</div>
@@ -5413,9 +5658,12 @@
           <div class="replan-emoji">${stop.emoji}</div>
         </div>
         <div class="replan-inline-actions ${activeStopMenuId === stop.id ? 'active' : ''}">
+          ${collabReadOnly || stop.type === 'start' || stop.type === 'end' ? '' : `
+          <button class="replan-inline-btn replan-move-btn" onclick="event.stopPropagation(); moveReplanStop('${stop.id}', -1)" ${index <= 1 ? 'disabled' : ''}>↑ 上移</button>
+          <button class="replan-inline-btn replan-move-btn" onclick="event.stopPropagation(); moveReplanStop('${stop.id}', 1)" ${index >= schedule.length - 2 ? 'disabled' : ''}>↓ 下移</button>`}
           ${collabReadOnly ? '' : `<button class="replan-inline-btn" onclick="event.stopPropagation(); modifyStopById('${stop.id}')">✎ 修改</button>
           <button class="replan-inline-btn delete" onclick="event.stopPropagation(); removeStopById('${stop.id}')">－ 刪除</button>`}
-          <button class="replan-inline-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
+          <button class="replan-inline-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" title="只會記錄在你的帳號" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 我已去過' : '📌 我去過了'}</button>
         </div>
       </div>
     `).join('');
@@ -5683,6 +5931,7 @@
     const stop = replanStops.find(item => item.id === stopId);
     if (!stop || !Number.isFinite(minutes) || minutes < 5) return;
     stop.stayMin = minutes;
+    stop.durationLocked = true;
     if (Number.isFinite(stop.manualStartMin)) {
       stop.manualEndMin = stop.manualStartMin + minutes;
     } else if (Number.isFinite(stop.manualEndMin)) {
@@ -5731,9 +5980,12 @@
     const durationMin = endTime - startTime;
     const durationHours = Math.floor(durationMin / 60);
     const durationMins = durationMin % 60;
+    const multiDaySchedule = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days);
     updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime), endTime);
     const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
-    if (heroTimeTag) heroTimeTag.textContent = `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
+    if (heroTimeTag) heroTimeTag.textContent = multiDaySchedule
+      ? `⏱️ 兩天一夜 · 第 2 天 ${minutesToClock(endTime)} 結束`
+      : `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
 
     // 本地門票對照表（依目前行程目的地），供卡片顯示真實票價。
     const feeDestination = currentTripRegion || (currentTripPreferences && (currentTripPreferences.dest || currentTripPreferences.destCustom)) || '';
@@ -5759,7 +6011,7 @@
           <button class="voice-btn stop" onclick="stopVoiceGuide()">停止</button>
         </div>
       </div>
-      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}</div>
+      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `兩天一夜・第 2 天 ${minutesToClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
       <div class="stay-suggestion-note">可直接調整每個景點的建議停留時間，系統會即時重新計算後續行程。</div>
     `;
 
@@ -5825,12 +6077,16 @@
         actionButtonsHtml = isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
           <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
           <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
-          <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 已去過' : '📌 去過了'}</button>
+          <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" title="只會記錄在你的帳號" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 我已去過' : '📌 我去過了'}</button>
           ${(!collabReadOnly && stop.altNearby && stop.altNearby.length) ? `<button class="stay-edit-btn swap-btn" onclick="event.stopPropagation(); openSwapPanel('${stop.id}')">🔄 替換</button>` : ''}
         ` : '');
       }
 
       const endpointTagHtml = (isEndpointStop && currentTripStatus === 'ongoing') ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);margin-right:6px;">${endpointLabel}</span>` : '';
+
+      if (multiDaySchedule && (index === 0 || schedule[index - 1].dayIndex !== stop.dayIndex)) {
+        html += `<div class="itinerary-day-divider">第 ${stop.dayIndex} 天</div>`;
+      }
 
       html += `
         <div id="itinerary-stop-${stop.id}" class="${itemClasses}" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
@@ -5843,7 +6099,7 @@
                 <div class="spot-name">${stop.name}</div>
                 ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:12px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
                 <div class="spot-tags">${endpointTagHtml}${actionButtonsHtml}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
-                ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, currentTripPreferences?.departureDate) : ''}</div>` : ''}
+                ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, getStopServiceDate(stop)) : ''}</div>` : ''}
                 ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
@@ -5855,7 +6111,8 @@
       `;
 
       // 添加过渡块（除了最后一个）
-      if (index < schedule.length - 1) {
+      if (index < schedule.length - 1
+        && (!multiDaySchedule || schedule[index + 1].dayIndex === stop.dayIndex)) {
         const nextStop = schedule[index + 1];
         const transitMode = normalizeTransitMode(stop.transitMode);
         const transitMin = stop.transit || 0;
@@ -7009,6 +7266,7 @@
         target.manualStartMin = startMin;
         target.manualEndMin = endMin;
         target.stayMin = endMin - startMin;
+        target.durationLocked = true;
         // 檢查並自動調整重疊的後續行程
         adjustOverlappingStops(target.id);
         changed = true;
@@ -7459,6 +7717,62 @@
     return 480;
   }
 
+  function isMultiDayTrip(days) {
+    const value = String(days || '').trim();
+    return value === '2天' || value === '兩天一夜';
+  }
+
+  function getMultiDayWindow(prefs = {}) {
+    const start = prefs.startTime || currentTripWindow.start || '09:00';
+    const startMin = clockToMinutes(start) || (9 * 60);
+    const day1Hours = Math.min(12, Math.max(1, Math.round(Number(prefs.day1Hours) || 8)));
+    const day2EndClock = prefs.day2EndTime || '12:00';
+    let day2EndMin = clockToMinutes(day2EndClock);
+    if (!Number.isFinite(day2EndMin)) day2EndMin = 12 * 60;
+    if (day2EndMin <= startMin) day2EndMin = startMin + 60;
+    return {
+      startMin,
+      day1EndMin: startMin + day1Hours * 60,
+      day2StartMin: startMin + 24 * 60,
+      day2EndMin: day2EndMin + 24 * 60,
+      activeMinutes: day1Hours * 60 + Math.max(60, day2EndMin - startMin)
+    };
+  }
+
+  // 舊資料沒有 dayIndex 時，依兩天各自的活動時數切分；新資料則保留 AI／使用者的分日結果。
+  function ensureStopDayIndexes(stops, prefs = {}) {
+    if (!Array.isArray(stops) || !stops.length) return stops;
+    if (!isMultiDayTrip(prefs.days)) {
+      stops.forEach((stop) => { stop.dayIndex = 1; });
+      return stops;
+    }
+    const middle = stops.filter((stop) => stop && stop.type !== 'start' && stop.type !== 'end');
+    const hasDay2 = middle.some((stop) => Number(stop.dayIndex) === 2);
+    if (!hasDay2 && middle.length) {
+      const win = getMultiDayWindow(prefs);
+      const ratio = win.day1EndMin - win.startMin;
+      const cut = Math.max(1, Math.min(middle.length - 1, Math.round(middle.length * ratio / win.activeMinutes)));
+      middle.forEach((stop, index) => { stop.dayIndex = index < cut ? 1 : 2; });
+    } else {
+      middle.forEach((stop) => { stop.dayIndex = Number(stop.dayIndex) === 2 ? 2 : 1; });
+    }
+    stops.forEach((stop) => {
+      if (stop.type === 'start') stop.dayIndex = 1;
+      if (stop.type === 'end') stop.dayIndex = 2;
+    });
+    // 路線排序只能調整同一天內的先後；分日欄位必須維持連續，避免第 2 天後又跳回第 1 天。
+    stops.sort((a, b) => {
+      const dayDiff = (Number(a.dayIndex) || 1) - (Number(b.dayIndex) || 1);
+      if (dayDiff) return dayDiff;
+      if (a.type === 'start') return -1;
+      if (b.type === 'start') return 1;
+      if (a.type === 'end') return 1;
+      if (b.type === 'end') return -1;
+      return 0;
+    });
+    return stops;
+  }
+
   // 人數 → 整數（容錯舊字串：「6人」→6、「3-4人」→3、「5-8人」→5、「1人」→1）
   function getPeopleCount(people) {
     const n = parseInt(String(people || ''), 10);
@@ -7610,6 +7924,9 @@
   }
 
   function calcReplanEndTime(startTime, days) {
+    if (isMultiDayTrip(days)) {
+      return (currentTripPreferences && currentTripPreferences.day2EndTime) || '12:00';
+    }
     const duration = parseDurationMinutes(days);
     const parts = String(startTime || '09:00').split(':').map(Number);
     const total = (parts[0] * 60 + (parts[1] || 0)) + duration;
@@ -7779,7 +8096,9 @@
     const dest = wizardData.dest || wizardData.destCustom || currentTripRegion || '台東';
     const days = wizardData.days || '1天';
     const startTime = wizardData.startTime || currentTripWindow.start || '09:00';
-    const endTime = calcReplanEndTime(startTime, days);
+    const multiDay = isMultiDayTrip(days);
+    const multiWindow = multiDay ? getMultiDayWindow(wizardData) : null;
+    const endTime = multiDay ? (wizardData.day2EndTime || '12:00') : calcReplanEndTime(startTime, days);
     const people = wizardData.people || '2人';
     const isSolo = people === '1人';
     const pace = wizardData.pace || '平衡';
@@ -7815,7 +8134,9 @@
       '',
       '【行程條件】',
       `目的地：${dest}`,
-      `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
+      multiDay
+        ? `行程長度：兩天一夜（第一天 ${startTime}～${minutesToClock(multiWindow.day1EndMin)}；第二天 ${startTime}～${endTime}）`
+        : `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
       isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `同行人數：${people}，節奏：${pace}，風格：${theme}`,
       `興趣：${interests}`,
       budget ? `預算：${describeBudgetForPrompt(budget, people)}` : null,
@@ -7838,7 +8159,9 @@
       '',
       '【規劃規則】',
       `1. 必須包含 ${min}–${max} 個主要景點`,
-      `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
+      multiDay
+        ? `2. 每個景點都必須提供 dayIndex（1 或 2），第一天在 ${minutesToClock(multiWindow.day1EndMin)} 前結束；第二天從 ${startTime} 重新開始，最後一站在 ${endTime} 前後 15 分鐘內結束`
+        : `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
       `3. 每個景點必須是台灣 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
       (() => {
@@ -7860,8 +8183,37 @@
       visitedHint,
       '',
       '【JSON 回傳格式（只回傳 JSON，不加任何說明文字）】',
-      '{"title":"行程標題","stops":[{"name":"景點正式名稱","emoji":"📍","time":"HH:MM","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
+      '{"title":"行程標題","stops":[{"name":"景點正式名稱","emoji":"📍","dayIndex":1,"time":"HH:MM","duration":45,"desc":"推薦理由","lat":22.123456,"lng":121.123456,"businessHours":"週一至週日 09:00-17:00"}]}'
     ].filter(l => l !== null).join('\n');
+  }
+
+  async function fetchReplanWithTimeout(url, options, timeoutMs = 45000) {
+    if (activeReplanDeadlineAt) {
+      timeoutMs = Math.min(timeoutMs, Math.max(1, activeReplanDeadlineAt - Date.now()));
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...(options || {}), signal: controller.signal });
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw new Error('重新規劃等待逾時，請稍後再試。');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function withReplanStepTimeout(task, label, timeoutMs = 15000) {
+    if (activeReplanDeadlineAt) {
+      timeoutMs = Math.min(timeoutMs, Math.max(1, activeReplanDeadlineAt - Date.now()));
+    }
+    let timer;
+    return Promise.race([
+      Promise.resolve(task),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label || '重新規劃步驟'}逾時`)), timeoutMs);
+      })
+    ]).finally(() => clearTimeout(timer));
   }
 
   async function replanWithAI() {
@@ -7877,14 +8229,28 @@
 
     // 共編：取重生成鎖，避免與 owner / 其他可編輯成員同時重生成互相覆蓋
     let _regenLocked = false;
+    activeReplanDeadlineAt = Date.now() + 60000;
     if (currentTripIsCollab && window.WAI_COLLAB && firebaseEnabled && firebaseDb) {
       try {
         let myEmail = '', myName = '';
         try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; myName = (u && u.currentUser && u.currentUser.name) || ''; } catch (_e) {}
-        const lock = await WAI_COLLAB.acquireRegenLock(currentItineraryId, { email: myEmail, name: myName });
-        if (!lock.ok) { window.alert(`${lock.holder} 正在重新生成，請稍候再試。`); return; }
+        const lock = await withReplanStepTimeout(
+          WAI_COLLAB.acquireRegenLock(currentItineraryId, { email: myEmail, name: myName }),
+          '取得重新規劃鎖',
+          8000
+        );
+        if (!lock.ok) {
+          activeReplanDeadlineAt = 0;
+          window.alert(`${lock.holder} 正在重新生成，請稍候再試。`);
+          return;
+        }
         _regenLocked = true;
-      } catch (e) { console.warn('取重生成鎖失敗（略過鎖）：', e); }
+      } catch (e) {
+        console.warn('取重生成鎖失敗：', e);
+        activeReplanDeadlineAt = 0;
+        window.alert('目前無法鎖定共編行程，為避免覆蓋其他成員的修改，本次不會重新規劃。請稍後再試。');
+        return;
+      }
     }
 
     enterReplanMode();
@@ -7913,9 +8279,17 @@
       // 本地優先：有本地景點資料就用它，缺該目的地時才回退 live Google Maps
       const _localHint = buildLocalPoiHintBlock(dest);
       if (_localHint) _addRgLine('> 已從本地景點資料庫取得清單，交由 AI 重新排序…', 'info');
-      let livePoiHint = _localHint || await fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []);
+      let livePoiHint = _localHint || await withReplanStepTimeout(
+        fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []),
+        '景點資料載入',
+        12000
+      ).catch(() => '');
       // 餐廳一律即時抓（本地 poi-data 不含餐廳），每次重新規劃都從 Google Maps 撈最新餐廳候選
-      const _foodHint = await fetchLiveFoodHintBlock(dest).catch(() => '');
+      const _foodHint = await withReplanStepTimeout(
+        fetchLiveFoodHintBlock(dest),
+        '餐廳資料載入',
+        12000
+      ).catch(() => '');
       if (_foodHint) { livePoiHint = (livePoiHint || '') + '\n' + _foodHint; _addRgLine('> 已即時取得餐廳候選…', 'info'); }
       // 在 DevTools Console 標明景點清單來源：本地 / live Maps / 無
       console.info(`[POI來源] ${_localHint ? '本地 poi-data.js' : (livePoiHint ? 'live Google Maps' : '無清單（AI 自行生成）')}｜目的地：${dest}｜（重新規劃）`);
@@ -7929,7 +8303,7 @@
       }
       const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
 
-      const response = await fetch(endpoint, {
+      const response = await fetchReplanWithTimeout(endpoint, {
         method: 'POST',
         headers: await vertexAuthHeaders(),
         body: JSON.stringify({
@@ -7955,17 +8329,23 @@
           name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
           stayMin: Math.max(10, Math.min(180, s.duration || 30)),
           transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
-          businessHours: s.businessHours || null, toiletLocations: []
+          businessHours: s.businessHours || null,
+          dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+          toiletLocations: []
         };
         const aiHint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
           ? normalizeCoordinatePair(s.lat, s.lng)
           : null;
-        let validated = await validateAiStopTemplate(template, region, currentTripTitle, aiHint);
+        let validated = await withReplanStepTimeout(
+          validateAiStopTemplate(template, region, currentTripTitle, aiHint),
+          `驗證景點「${s.name || '未命名'}」`,
+          12000
+        ).catch(() => null);
         if (!validated && aiHint && !isCoordinatesOutsideRegion(aiHint, region, s.name)) {
           validated = { ...template, scenicCoordinates: aiHint };
         }
         if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); rejectedNames.push(s.name); continue; }
-        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null });
+        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, dayIndex: template.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null });
         newStops.push(stop);
       }
 
@@ -7977,7 +8357,7 @@
         const allUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
         if (_rgPhase) _rgPhase.textContent = '補充替代景點中…';
         _addRgLine(`> ⚠️ 已排除 ${rejectedNames.length} 個無法驗證景點，補充新景點…`, 'warn');
-        const replenishRes = await fetch(endpoint, {
+        const replenishRes = await fetchReplanWithTimeout(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -7996,16 +8376,22 @@
                 name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
                 stayMin: Math.max(10, Math.min(180, s.duration || 30)),
                 transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
-                businessHours: s.businessHours || null, toiletLocations: []
+                businessHours: s.businessHours || null,
+                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                toiletLocations: []
               };
               const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
                 ? normalizeCoordinatePair(s.lat, s.lng) : null;
-              let val = await validateAiStopTemplate(tmpl, region, currentTripTitle, hint);
+              let val = await withReplanStepTimeout(
+                validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
+                `驗證補充景點「${s.name || '未命名'}」`,
+                12000
+              ).catch(() => null);
               if (!val && hint && !isCoordinatesOutsideRegion(hint, region, s.name)) {
                 val = { ...tmpl, scenicCoordinates: hint };
               }
               if (!val) { saveBlockedSpotNames([s.name], region); continue; }
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
               allUsedNorm.add(normalizeText(s.name));
             }
           }
@@ -8018,7 +8404,7 @@
         const nearbyUsedNorm = new Set([...rejectedNames, ...newStops.map(s => s.name)].map(n => normalizeText(n)));
         if (_rgPhase) _rgPhase.textContent = `搜尋 ${dest} 周邊替代景點…`;
         _addRgLine(`> 🗺️ 搜尋 ${dest} 周邊替代景點…`, 'warn');
-        const nearbyRes = await fetch(endpoint, {
+        const nearbyRes = await fetchReplanWithTimeout(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -8037,17 +8423,23 @@
                 name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
                 stayMin: Math.max(10, Math.min(180, s.duration || 30)),
                 transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
-                businessHours: s.businessHours || null, toiletLocations: []
+                businessHours: s.businessHours || null,
+                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                toiletLocations: []
               };
               const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
                 ? normalizeCoordinatePair(s.lat, s.lng) : null;
-              let val = await validateAiStopTemplate(tmpl, region, currentTripTitle, hint);
+              let val = await withReplanStepTimeout(
+                validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
+                `驗證鄰近景點「${s.name || '未命名'}」`,
+                12000
+              ).catch(() => null);
               // 附近景點放寬地區限制：AI 座標在台灣範圍內即接受
               if (!val && hint && isInTaiwanBounds(hint)) {
                 val = { ...tmpl, scenicCoordinates: hint };
               }
               if (!val) continue;
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
+              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
               nearbyUsedNorm.add(normalizeText(s.name));
               if (newStops.length >= MIN_REPLAN_STOPS) break;
             }
@@ -8079,7 +8471,9 @@
 
       // === 合併後時間回填：行程縮水超過 45 分時，沿路線補景點填回目標時段（含回終點交通、不超時）===
       try {
-        const targetMin = parseDurationMinutes(wizardData.days || '1天');
+        const targetMin = isMultiDayTrip(wizardData.days)
+          ? getMultiDayWindow(wizardData).activeMinutes
+          : parseDurationMinutes(wizardData.days || '1天');
         const usedNorm = new Set(replanStops.map(s => normalizeText(s.name)).concat(rejectedNames.map(n => normalizeText(n))));
         for (let iter = 0; iter < 3; iter++) {
           const shortfall = targetMin - estimateTripMinutes(replanStops);
@@ -8089,7 +8483,7 @@
           _addRgLine(`> ⏳ 行程偏短約 ${shortfall} 分，沿路線補景點…`, 'warn');
           let res;
           try {
-            res = await fetch(endpoint, {
+            res = await fetchReplanWithTimeout(endpoint, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 contents: [{ role: 'user', parts: [{ text: buildTimeFillPrompt(dest, need, shortfall, replanStops.map(s => s.name).concat(rejectedNames), wizardData) }] }],
@@ -8109,13 +8503,19 @@
               name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
               stayMin: Math.max(15, Math.min(90, s.duration || 45)),
               transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-fill',
-              businessHours: s.businessHours || null, toiletLocations: []
+              businessHours: s.businessHours || null,
+              dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 2)),
+              toiletLocations: []
             };
             const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) ? normalizeCoordinatePair(s.lat, s.lng) : null;
-            let val = await validateAiStopTemplate(tmpl, region, currentTripTitle, hint);
+            let val = await withReplanStepTimeout(
+              validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
+              `驗證補時景點「${s.name || '未命名'}」`,
+              12000
+            ).catch(() => null);
             if (!val && hint && !isCoordinatesOutsideRegion(hint, region, s.name)) val = { ...tmpl, scenicCoordinates: hint };
             if (!val) { saveBlockedSpotNames([s.name], region); continue; }
-            const stop = createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, baseId: 'replan-fill', transitMode: getPreferredVehicleMode(), transitMin: null });
+            const stop = createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-fill', transitMode: getPreferredVehicleMode(), transitMin: null });
             const endIdx = replanStops.findIndex(x => x.type === 'end');
             replanStops.splice(endIdx >= 0 ? endIdx : replanStops.length, 0, stop); // 插在終點站之前
             usedNorm.add(nrm);
@@ -8136,14 +8536,15 @@
 
       // 先重驗座標：AI 回的座標可能錯位（如成功漁港→富岡），必須在 enrich/排序之前校正，
       // 否則 reorderStopsAlongRoute 會用錯誤座標排序而出現來回跑、不順路。
-      try { replanStops = await verifyStopCoordinatesWithPlaces(replanStops, region, currentTripTitle); }
+      try { replanStops = await withReplanStepTimeout(verifyStopCoordinatesWithPlaces(replanStops, region, currentTripTitle), '景點座標驗證', 18000); }
       catch (verifyErr) { console.warn('[replanWithAI] 座標重驗略過：', verifyErr); }
       // 大景區以單站進來、合併不到鄰近站時，用 Places 附近搜尋補出子景點並標記合併（只貼標籤，不加站）
-      try { replanStops = await enrichBigAttractionSubSpots(replanStops, region); }
+      try { replanStops = await withReplanStepTimeout(enrichBigAttractionSubSpots(replanStops, region), '大型景區補充', 18000); }
       catch (enrichErr) { console.warn('[replanWithAI] 補子景點略過：', enrichErr); }
       // 最後輸出前重排一次，避免合併/補景點後路線南北來回跑
       try { replanStops = reorderStopsAlongRoute(replanStops, region); }
       catch (orderErr) { console.warn('[replanWithAI] 路線重排略過：', orderErr); }
+      ensureStopDayIndexes(replanStops, wizardData);
       // 對齊描述「（含 …）」與 mergedSubSpots，並清掉累加的重複括號
       reconcileMergedSubSpots(replanStops);
 
@@ -8170,7 +8571,11 @@
       cancelReplan();
       window.alert(`AI 重新規劃失敗：${e.message}\n\n請確認 API Key 正確，並再試一次。`);
     } finally {
-      if (_regenLocked) { try { await WAI_COLLAB.releaseRegenLock(currentItineraryId); } catch (_e) {} }
+      if (_regenLocked) {
+        try { await withReplanStepTimeout(WAI_COLLAB.releaseRegenLock(currentItineraryId), '解除重新規劃鎖', 8000); }
+        catch (_e) {}
+      }
+      activeReplanDeadlineAt = 0;
     }
   }
 
@@ -11378,7 +11783,7 @@
         const v = isPlaceVisited(matchedStop.name);
         visitedRow.style.display = '';
         visitedBtn.dataset.stopId = matchedStop.id;
-        visitedBtn.textContent = v ? '✓ 已去過' : '📌 去過了';
+        visitedBtn.textContent = v ? '✓ 我已去過' : '📌 我去過了';
         visitedBtn.classList.toggle('visited', v);
         visitedBtn.onclick = (e) => { e.stopPropagation(); handleToggleVisited(matchedStop.id, visitedBtn); };
       } else {
@@ -11521,6 +11926,12 @@
     return '帳號或密碼錯誤，請確認後再試。';
   }
 
+  let emailRegistrationInProgress = false;
+  function needsEmailVerification(user) {
+    return !!user && !user.emailVerified
+      && (user.providerData || []).some(p => p && p.providerId === 'password');
+  }
+
   window.doLogin = async function() {
     if (!firebaseEnabled || !firebaseAuth) return feedbackToast('Firebase 尚未初始化', 'orange');
     const emailEl = document.getElementById('loginEmail');
@@ -11530,7 +11941,13 @@
     if (!email || !pwd) return feedbackToast('請填寫帳號和密碼', 'orange');
     if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
     try {
-      await firebaseAuth.signInWithEmailAndPassword(email, pwd);
+      const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
+      if (needsEmailVerification(userCredential.user)) {
+        try { await userCredential.user.sendEmailVerification(); } catch (_e) {}
+        await firebaseAuth.signOut();
+        feedbackToast('請先到信箱完成驗證；驗證信已重新寄出。', 'orange');
+        return;
+      }
       feedbackToast('👋 歡迎回來！', 'green');
       window.closeLogin();
     } catch (e) {
@@ -11549,6 +11966,7 @@
     if (!name || !email || !pwd) return feedbackToast('請填寫所有欄位', 'orange');
     if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
     if (pwd.length < 8) return feedbackToast('密碼至少需要 8 個字元', 'orange');
+    emailRegistrationInProgress = true;
     try {
       const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
       const user = userCredential.user;
@@ -11564,11 +11982,14 @@
           updatedAt: firebase.firestore.FieldValue.serverTimestamp()
         });
       }
-      feedbackToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+      await user.sendEmailVerification();
+      await firebaseAuth.signOut();
+      feedbackToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
       window.closeLogin();
-      feedbackToast('您可至「我的微旅行」首頁設定個人偏好。', 'blue');
     } catch (e) {
       feedbackToast(authErrorMessage(e, 'register'), 'red');
+    } finally {
+      emailRegistrationInProgress = false;
     }
   };
 
@@ -11682,6 +12103,11 @@
     if (!firebaseEnabled || !firebaseAuth) return;
     firebaseAuth.onAuthStateChanged(async (user) => {
       if (user) {
+        if (needsEmailVerification(user) && !emailRegistrationInProgress) {
+          await firebaseAuth.signOut();
+          feedbackToast('請先完成電子信箱驗證後再登入。', 'orange');
+          return;
+        }
         let name = user.displayName || user.email?.split('@')[0] || '使用者';
         let emoji = '😊';
         let preferences = { interests: [], pace: '平衡', avoid: '', avoidTags: [] };

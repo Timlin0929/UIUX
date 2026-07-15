@@ -21,11 +21,13 @@ require('dotenv').config();
 // 不設這行會被 Google 以 API_KEY_IP_ADDRESS_BLOCKED 擋下（403）。
 require('dns').setDefaultResultOrder('ipv4first');
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 // firebase-admin v14 起僅支援模組化 API（admin.credential.* 已移除）
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
+const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 
 const PORT = Number(process.env.PORT) || 3001;
 const VERTEX_API_KEY = (process.env.VERTEX_API_KEY || '').trim();
@@ -48,8 +50,10 @@ if (typeof fetch !== 'function') {
 const SA_PATH = process.env.FIREBASE_SERVICE_ACCOUNT_PATH
   || path.join(__dirname, '..', 'crawler', 'serviceAccount.json');
 let adminReady = false;
+let adminDb = null;
 try {
   initializeApp({ credential: cert(require(SA_PATH)) });
+  adminDb = getFirestore();
   adminReady = true;
   console.log('[proxy] firebase-admin 已初始化（' + SA_PATH + '）');
 } catch (e) {
@@ -63,6 +67,45 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '5mb' })); // 行程 prompt 可能較大
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'wanderai-proxy' }));
+
+const collabLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited', message: '邀請驗證次數過多，請稍後再試。' }
+});
+
+const publicTripLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 90,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+
+function normalizeInviteCode(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function sameSecret(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  return left.length === right.length && left.length >= 16 && crypto.timingSafeEqual(left, right);
+}
+
+function publicTripData(tripId, data) {
+  const allowed = [
+    'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people',
+    'wizardData', 'stops', 'status', 'currentStopIndex', 'startedAt', 'updatedAt',
+    'createdAt', 'collab', 'ownerName', 'organizer', 'departureDate', 'tripMode'
+  ];
+  const result = { id: tripId, guestView: true };
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) result[key] = data[key];
+  }
+  return result;
+}
 
 // ══════════════ Vertex AI（需登入 + 限流 + model 白名單）══════════════
 
@@ -94,6 +137,93 @@ async function requireFirebaseUser(req, res, next) {
     return res.status(401).json({ error: 'invalid token', message: '登入狀態已失效，請重新登入。' });
   }
 }
+
+async function requireVerifiedFirebaseUser(req, res, next) {
+  return requireFirebaseUser(req, res, () => {
+    if (!req.user.email || req.user.email_verified !== true) {
+      return res.status(403).json({ error: 'verified email required', message: '請先完成電子信箱驗證。' });
+    }
+    return next();
+  });
+}
+
+// 邀請碼只能送到後端驗證。驗證成功後建立短效 join proof，Firestore Rules
+// 才允許該登入者讀取行程並把自己加入 memberEmails。
+app.post('/api/collab/invites/verify', collabLimiter, requireVerifiedFirebaseUser, async (req, res) => {
+  const code = normalizeInviteCode(req.body && req.body.code);
+  if (code.length < 6 || code.length > 16) {
+    return res.status(400).json({ error: 'invalid invite', message: '邀請碼格式不正確。' });
+  }
+
+  try {
+    const inviteSnap = await adminDb.collection('invites').doc(code).get();
+    if (!inviteSnap.exists || inviteSnap.get('active') !== true) {
+      return res.status(404).json({ error: 'invalid invite', message: '找不到邀請碼，或邀請碼已失效。' });
+    }
+    const tripId = inviteSnap.get('tripId');
+    if (typeof tripId !== 'string' || !tripId) {
+      return res.status(404).json({ error: 'invalid invite', message: '找不到邀請碼，或邀請碼已失效。' });
+    }
+    const tripRef = adminDb.collection('micro_trips').doc(tripId);
+    const tripSnap = await tripRef.get();
+    if (!tripSnap.exists) {
+      return res.status(404).json({ error: 'trip not found', message: '行程不存在或已被刪除。' });
+    }
+    const trip = tripSnap.data();
+    const members = Array.isArray(trip.memberEmails) ? trip.memberEmails : [];
+    const alreadyMember = members.includes(req.user.email);
+    const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
+    if (!alreadyMember && members.length >= maxMembers) {
+      return res.status(409).json({ error: 'trip full', message: `這個行程人數已滿（上限 ${maxMembers} 人）。` });
+    }
+
+    const now = Date.now();
+    await tripRef.collection('join_proofs').doc(req.user.uid).set({
+      email: req.user.email,
+      createdAt: Timestamp.fromMillis(now),
+      expiresAt: Timestamp.fromMillis(now + 2 * 60 * 1000)
+    });
+
+    return res.json({
+      ok: true,
+      tripId,
+      alreadyMember,
+      preview: {
+        id: tripId,
+        title: trip.title || '共編行程',
+        ownerName: trip.ownerName || '行程擁有者',
+        memberCount: members.length,
+        maxMembers
+      }
+    });
+  } catch (err) {
+    console.error('[proxy] invite verify failed:', err && err.message);
+    return res.status(500).json({ error: 'invite verify failed', message: '目前無法驗證邀請碼，請稍後再試。' });
+  }
+});
+
+// 訪客分享不直接讀 micro_trips。後端核對不可猜的 token 後，只回傳畫面需要的
+// 行程欄位，排除 email、members、inviteCode 等協作與個資欄位。
+app.get('/api/collab/public-trip', publicTripLimiter, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'service unavailable' });
+  const tripId = String(req.query.tripId || '');
+  const token = String(req.query.token || '');
+  if (!/^[A-Za-z0-9_-]{3,150}$/.test(tripId) || token.length > 200) {
+    return res.status(400).json({ error: 'invalid share link', message: '分享連結無效。' });
+  }
+  try {
+    const snap = await adminDb.collection('micro_trips').doc(tripId).get();
+    const data = snap.exists ? snap.data() : null;
+    if (!data || !sameSecret(token, data.shareToken)) {
+      return res.status(404).json({ error: 'invalid share link', message: '分享連結已失效或不存在。' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    return res.json({ ok: true, trip: publicTripData(tripId, data) });
+  } catch (err) {
+    console.error('[proxy] public trip failed:', err && err.message);
+    return res.status(500).json({ error: 'public trip failed', message: '目前無法讀取分享行程，請稍後再試。' });
+  }
+});
 
 app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, async (req, res) => {
   const upstreamPath = '/' + (req.params[0] || '');

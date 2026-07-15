@@ -659,6 +659,15 @@ body.prototype-mode .prototype-id-chip {
   cursor: pointer;
 }
 
+.replan-move-btn {
+  white-space: nowrap;
+}
+
+.replan-move-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .replan-inline-btn.delete {
   background: var(--accent2-light);
   color: #ad4e1f;
@@ -3410,3 +3419,33 @@ body.prototype-mode .prototype-id-chip {
 .wc-rain-swap-title { font-size: 14px; font-weight: 700; color: #2b4c6b; margin-bottom: 8px; }
 .wc-rain-swap-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; font-size: 13px; }
 .wc-rain-swap-btn { flex-shrink: 0; white-space: nowrap; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+
+/* ── 多日行程分日標示 ── */
+.replan-day-divider,
+.itinerary-day-divider {
+  margin: 16px 0 10px;
+  color: var(--ink);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.visited-toggle-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.replan-day-divider {
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--accent2-light);
+  color: var(--accent2-dark);
+}
+.itinerary-day-divider {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--accent2-light);
+  color: var(--accent2-dark);
+}

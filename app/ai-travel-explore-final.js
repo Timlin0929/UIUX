@@ -67,6 +67,7 @@ let pendingJourneyEntry = null;
 let wizStep = 0;
 let wizData = {};
 let collabState = null; // 多人協作面板的即時狀態：{ tripId, data, unsub, myEmail, myPrefsDraft }
+let myCollabTripsUnsub = null;
 
 // 將任意字串跳脫成可安全放進 innerHTML 的文字（避免成員顯示名稱等使用者輸入被當 HTML 執行）
 function escapeHtml(text) {
@@ -3070,47 +3071,6 @@ function normalizePoiName(name, destination) {
   return normalized;
 }
 
-async function savePoiBusinessHoursToFirebase(stops, destination) {
-  if (!firebaseEnabled || !firebaseDb || !Array.isArray(stops) || !stops.length) return false;
-  try {
-    const batch = firebaseDb.batch();
-    stops.forEach(stop => {
-      if (!stop || !stop.name) return;
-      const normalizedName = normalizePoiName(stop.name, destination);
-      const docId = sanitizeFirebaseDocId(`${destination || 'unknown'}_${normalizedName}`);
-      if (!docId) return;
-      const docRef = firebaseDb.collection('poi_cache').doc(docId);
-      const coord = getStopCoordinate(stop);
-      // Only persist coordinates verified by Google Places API.
-      // firebase_cache is excluded: existing records may already contain bad AI-generated coords.
-      const isTrustedCoord = coord && stop.coordinateSource === 'google_places';
-      const payload = {
-        name: normalizedName || stop.name,
-        emoji: stop.emoji || '📍',
-        destination: destination || '',
-        businessHours: stop.businessHours || '',
-        duration: Number(stop.duration) || 30,
-        address: stop.address || stop.location || '',
-        desc: stop.desc || stop.description || '',
-        nearbyToiletLocations: Array.isArray(stop.nearbyToiletLocations)
-          ? stop.nearbyToiletLocations
-          : [],
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-      };
-      if (isTrustedCoord) {
-        payload.lat = coord.lat;
-        payload.lng = coord.lng;
-      }
-      batch.set(docRef, payload, { merge: true });
-    });
-    await batch.commit();
-    return true;
-  } catch (error) {
-    console.warn('Firebase POI 保存失敗：', error);
-    return false;
-  }
-}
-
 // ══════════════════════════════════════════════════
 // PERSIST STATE
 // ══════════════════════════════════════════════════
@@ -3182,8 +3142,9 @@ async function loadState() {
       // 載入「我以成員身分加入」的共編行程（owner 的查詢以 userEmail 為準，抓不到別人的行程）
       try {
         if (window.WAI_COLLAB) {
-          const collabTrips = await WAI_COLLAB.fetchMyCollabTrips(currentUser.email);
-          collabTrips.forEach(t => upsertCollabTripLocal(t));
+           const collabTrips = await WAI_COLLAB.fetchMyCollabTrips(currentUser.email);
+           collabTrips.forEach(t => upsertCollabTripLocal(t));
+           startMyCollabTripsLiveSync(currentUser.email);
           localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
           renderSideMyTrips();
           const mtv = document.getElementById('myTripsView');
@@ -3296,6 +3257,12 @@ function authErrorMessage(e, kind) {
   return '帳號或密碼錯誤，請確認後再試。';
 }
 
+let emailRegistrationInProgress = false;
+function needsEmailVerification(user) {
+  return !!user && !user.emailVerified
+    && (user.providerData || []).some(p => p && p.providerId === 'password');
+}
+
 async function doLogin() {
   if (!firebaseEnabled || !firebaseAuth) return showToast('Firebase 尚未初始化', 'orange');
   const email = document.getElementById('loginEmail').value.trim();
@@ -3304,6 +3271,12 @@ async function doLogin() {
   if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
   try {
     const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
+    if (needsEmailVerification(userCredential.user)) {
+      try { await userCredential.user.sendEmailVerification(); } catch (_e) {}
+      await firebaseAuth.signOut();
+      showToast('請先到信箱完成驗證；驗證信已重新寄出。', 'orange');
+      return;
+    }
     showToast(`👋 歡迎回來！`, 'green');
     closeLogin();
   } catch(e) {
@@ -3319,6 +3292,7 @@ async function doRegister() {
   if (!name || !email || !pwd) { showToast('請填寫所有欄位', 'orange'); return; }
   if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
   if (pwd.length < 8) { showToast('密碼至少需要 8 個字元', 'orange'); return; }
+  emailRegistrationInProgress = true;
   try {
     const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
     const user = userCredential.user;
@@ -3334,11 +3308,14 @@ async function doRegister() {
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     }
-    showToast(`🎉 歡迎加入 WanderAI，${name}！`, 'green');
+    await user.sendEmailVerification();
+    await firebaseAuth.signOut();
+    showToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
     closeLogin();
-    openPrefWizard(); // 引導設定偏好
   } catch(e) {
     showToast(authErrorMessage(e, 'register'), 'red');
+  } finally {
+    emailRegistrationInProgress = false;
   }
 }
 
@@ -3522,6 +3499,11 @@ async function saveUserPreferences() {
 if (typeof firebase !== 'undefined') {
   firebase.auth().onAuthStateChanged(async (user) => {
     if (user) {
+      if (needsEmailVerification(user) && !emailRegistrationInProgress) {
+        await firebase.auth().signOut();
+        showToast('請先完成電子信箱驗證後再登入。', 'orange');
+        return;
+      }
       isLoggedIn = true;
       let userData = {
         name: user.displayName || user.email?.split('@')[0] || '使用者',
@@ -3554,6 +3536,7 @@ if (typeof firebase !== 'undefined') {
         setTimeout(openPrefWizard, 500); // 稍微延遲一下，等畫面渲染好
       }
     } else {
+      if (myCollabTripsUnsub) { myCollabTripsUnsub(); myCollabTripsUnsub = null; }
       isLoggedIn = false;
       currentUser = null;
       localStorage.removeItem('wai_user');
@@ -4925,10 +4908,8 @@ function persistMicroTripInBackground(trip) {
         saveState(); renderSideMyTrips(); renderMyTrips();
       }
 
-      const poiSaved = await savePoiBusinessHoursToFirebase(trip.stops, trip.region);
-      if (!poiSaved) {
-        console.warn('Firebase POI 營業時間保存失敗');
-      }
+      // POI／營業時間是全站共用資料，只能由受控後端或 crawler 維護。
+      // 行程內的 businessHours 已包含在 trip.stops，不再由瀏覽器寫入 poi_cache。
     } catch (error) {
       console.warn('Firebase background save failed:', error);
       showToast('Firebase 背景同步失敗，已存到本地', 'orange');
@@ -5435,6 +5416,25 @@ function closeCollabPanel() {
   const ov = document.getElementById('collabPanelOverlay');
   if (ov) ov.classList.remove('open');
 }
+
+function startMyCollabTripsLiveSync(email) {
+  if (myCollabTripsUnsub) { myCollabTripsUnsub(); myCollabTripsUnsub = null; }
+  if (!email || !window.WAI_COLLAB || typeof WAI_COLLAB.subscribeMyCollabTrips !== 'function') return;
+  myCollabTripsUnsub = WAI_COLLAB.subscribeMyCollabTrips(email, (trips) => {
+    const liveIds = new Set(trips.map((t) => t.id));
+    myTrips = myTrips.filter((t) => !t.collab || liveIds.has(t.id));
+    trips.forEach((t) => upsertCollabTripLocal(t));
+    saveState();
+    renderSideMyTrips();
+    const mtv = document.getElementById('myTripsView');
+    if (mtv && mtv.style.display !== 'none') renderMyTrips();
+  }, (err) => console.warn('共編行程列表即時同步中斷：', err));
+}
+window.addEventListener('pagehide', () => {
+  if (collabState && collabState.unsub) collabState.unsub();
+  if (collabState && collabState.prefsUnsub) collabState.prefsUnsub();
+  collabState = null;
+});
 function collabMyRole() {
   if (!collabState || !collabState.data) return 'viewer';
   const m = collabState.data.members && collabState.data.members[WAI_COLLAB.emailKey(collabState.myEmail)];

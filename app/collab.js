@@ -11,7 +11,7 @@
  * 資料模型（沿用既有 micro_trips，加上協作欄位）：
  *   micro_trips/{tripId}
  *     collab:true, ownerUid, ownerEmail, ownerName,
- *     inviteCode, shareToken, guestReadable:true, maxMembers:10,
+   *     inviteCode, shareToken, maxMembers:10,
  *     memberEmails:[...]            // 供 array-contains 查「我加入的」
  *     members:{ <ekey>:{ email,name,role,ready,prefs{interests,pace,avoid,avoidTags,budget,desiredSpots},joinedAt } }
  *     userEmail: ownerEmail         // 保留既有欄位，owner 既有查詢仍找得到
@@ -176,6 +176,24 @@ window.WAI_COLLAB = (function () {
   }
   function serverTs() { return firebase.firestore.FieldValue.serverTimestamp(); }
 
+  async function collabApi(path, options) {
+    var current = firebase.auth().currentUser;
+    var headers = Object.assign({ 'Content-Type': 'application/json' }, (options && options.headers) || {});
+    if (current) headers.Authorization = 'Bearer ' + await current.getIdToken();
+    var response = await fetch('/api/collab/' + path, Object.assign({}, options || {}, { headers: headers }));
+    var body = {};
+    try { body = await response.json(); } catch (_e) {}
+    if (!response.ok) throw new Error(body.message || '多人協作服務暫時無法使用。');
+    return body;
+  }
+
+  async function verifyInviteCode(code) {
+    return collabApi('invites/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code: normalizeCode(code) })
+    });
+  }
+
   // 產生不重複的邀請碼（最多重試數次）
   async function reserveUniqueCode() {
     for (var attempt = 0; attempt < 6; attempt++) {
@@ -219,7 +237,6 @@ window.WAI_COLLAB = (function () {
       // 而 invite 文件是以 normalizeCode(code) 為 docId，兩者必須一致，否則所有加入都會 permission-denied。
       inviteCode: normalizeCode(code),
       shareToken: shareToken,
-      guestReadable: true,
       maxMembers: MAX_MEMBERS,
       memberEmails: [owner.email],
       editorEmails: [],
@@ -236,16 +253,13 @@ window.WAI_COLLAB = (function () {
     return { code: code, shareToken: shareToken };
   }
 
-  // 以邀請碼加入：讀 invites → 驗證 → 加 member（預設 viewer）。
+  // 以邀請碼加入：後端驗證邀請碼並簽發短效 proof，再加 member（預設 viewer）。
   // user：{ uid,email,name,prefs }；回傳該共用行程 doc data（含 id）。
   async function joinByCode(code, user) {
     var norm = normalizeCode(code);
     if (!norm) throw new Error('請輸入邀請碼。');
-    var invSnap = await db().collection('invites').doc(norm).get();
-    if (!invSnap.exists) throw new Error('找不到這組邀請碼，請確認後重試。');
-    var inv = invSnap.data();
-    if (inv.active === false) throw new Error('這組邀請碼已被停用。');
-    var tripRef = db().collection('micro_trips').doc(inv.tripId);
+    var verified = await verifyInviteCode(norm);
+    var tripRef = db().collection('micro_trips').doc(verified.tripId);
     var tripSnap = await tripRef.get();
     if (!tripSnap.exists) throw new Error('行程不存在或已被刪除。');
     var data = tripSnap.data();
@@ -275,28 +289,15 @@ window.WAI_COLLAB = (function () {
     }
     var fresh = await tripRef.get();
     // alreadyMember 為暫態旗標（不寫進 Firestore），供前端區分「重新加入」與「首次加入」
-    return Object.assign({ id: inv.tripId, alreadyMember: already }, fresh.data());
+    return Object.assign({ id: verified.tripId, alreadyMember: already }, fresh.data());
   }
 
   // 加入前預覽：只讀取邀請碼對應的行程摘要，讓前端先請使用者確認。
   async function previewByCode(code) {
     var norm = normalizeCode(code);
     if (!norm) throw new Error('請輸入邀請碼。');
-    var invSnap = await db().collection('invites').doc(norm).get();
-    if (!invSnap.exists) throw new Error('找不到這組邀請碼，請確認後重試。');
-    var inv = invSnap.data();
-    if (inv.active === false) throw new Error('這組邀請碼已被停用。');
-    var tripSnap = await db().collection('micro_trips').doc(inv.tripId).get();
-    if (!tripSnap.exists) throw new Error('行程不存在或已被刪除。');
-    var trip = tripSnap.data();
-    return {
-      id: inv.tripId,
-      title: trip.title || '共編行程',
-      ownerName: trip.ownerName || trip.ownerEmail || '行程擁有者',
-      memberCount: (trip.memberEmails || []).length,
-      maxMembers: trip.maxMembers || MAX_MEMBERS,
-      isMember: (trip.memberEmails || []).indexOf((firebase.auth().currentUser || {}).email || '') !== -1
-    };
+    var verified = await verifyInviteCode(norm);
+    return Object.assign({}, verified.preview, { isMember: !!verified.alreadyMember });
   }
 
   // 更新共用行程的「行程參數」（title/region/days/budget/people/wizardData…）。
@@ -343,6 +344,7 @@ window.WAI_COLLAB = (function () {
     patch[emailKey(email)] = firebase.firestore.FieldValue.delete();
     await db().collection('micro_trips').doc(tripId).set({
       memberEmails: firebase.firestore.FieldValue.arrayRemove(email),
+      editorEmails: firebase.firestore.FieldValue.arrayRemove(email),
       members: patch
     }, { merge: true });
   }
@@ -385,10 +387,17 @@ window.WAI_COLLAB = (function () {
         if (!snap.exists) throw new Error('行程不存在');
         var lock = snap.data().regenLock;
         var now = Date.now();
-        if (lock && lock.at && (now - lock.at) < REGEN_LOCK_TTL_MS && lock.by !== myEmail) {
+        var lockAt = lock && lock.at && typeof lock.at.toMillis === 'function'
+          ? lock.at.toMillis()
+          : Number(lock && lock.at);
+        if (lock && Number.isFinite(lockAt) && (now - lockAt) < REGEN_LOCK_TTL_MS && lock.by !== myEmail) {
           return { ok: false, holder: lock.byName || lock.by || '其他成員' };
         }
-        tx.set(ref, { regenLock: { by: myEmail, byName: (user && user.name) || myEmail || '成員', at: now } }, { merge: true });
+        tx.set(ref, { regenLock: {
+          by: myEmail,
+          byName: (user && user.name) || myEmail || '成員',
+          at: firebase.firestore.FieldValue.serverTimestamp()
+        } }, { merge: true });
         return { ok: true };
       });
     });
@@ -419,22 +428,35 @@ window.WAI_COLLAB = (function () {
     return snap.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
   }
 
-  // 訪客唯讀：用 tripId（不可猜的 share 連結帶 token）讀整份行程。
-  // 需搭配安全規則：guestReadable==true 才允許讀。
+  // 「我的行程」即時來源：名稱、角色、狀態或內容變更後，不必重新整理列表。
+  function subscribeMyCollabTrips(email, onChange, onError) {
+    if (!email) return function () {};
+    return db().collection('micro_trips').where('memberEmails', 'array-contains', email)
+      .onSnapshot(function (snap) {
+        onChange(snap.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); }));
+      }, function (err) { if (onError) onError(err); });
+  }
+
+  // 訪客唯讀：由後端核對 shareToken 並只回傳去敏後的行程欄位。
   async function loadGuestTrip(tripId, token) {
-    var snap = await db().collection('micro_trips').doc(tripId).get();
-    if (!snap.exists) throw new Error('分享的行程不存在或已被刪除。');
-    var data = snap.data();
-    if (!data.guestReadable) throw new Error('這個行程未開放分享。');
-    if (token && data.shareToken && normalizeCode(token) !== normalizeCode(data.shareToken)) {
-      throw new Error('分享連結無效。');
-    }
-    return Object.assign({ id: tripId }, data);
+    if (!tripId || !token) throw new Error('分享連結無效。');
+    var query = '?tripId=' + encodeURIComponent(tripId) + '&token=' + encodeURIComponent(token);
+    var response = await fetch('/api/collab/public-trip' + query, { headers: { Accept: 'application/json' } });
+    var body = {};
+    try { body = await response.json(); } catch (_e) {}
+    if (!response.ok || !body.trip) throw new Error(body.message || '分享的行程不存在或已失效。');
+    return body.trip;
   }
 
   function buildShareLink(tripId, shareToken, baseHref) {
     var base = baseHref || 'ai-travel-planner-v8.html';
-    return base + '?sharedId=' + encodeURIComponent(tripId) + '&token=' + encodeURIComponent(shareToken || '') + '&guest=1';
+    var relative = base + '?sharedId=' + encodeURIComponent(tripId) + '&token=' + encodeURIComponent(shareToken || '') + '&guest=1';
+    try {
+      // QR 掃描發生在另一台裝置，內容必須是完整 HTTPS URL，不能依賴目前頁面的相對路徑。
+      return new URL(relative, window.location.href).href;
+    } catch (_e) {
+      return relative;
+    }
   }
 
   // 把任意偏好物件正規化成固定形狀（避免 undefined 寫進 Firestore）
@@ -484,6 +506,7 @@ window.WAI_COLLAB = (function () {
     acquireRegenLock: acquireRegenLock,
     releaseRegenLock: releaseRegenLock,
     fetchMyCollabTrips: fetchMyCollabTrips,
+    subscribeMyCollabTrips: subscribeMyCollabTrips,
     loadGuestTrip: loadGuestTrip
   };
 })();
