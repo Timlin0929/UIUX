@@ -2657,17 +2657,28 @@
   async function enrichBigAttractionSubSpots(stops, region) {
     if (!Array.isArray(stops) || !stops.length || !hasGooglePlacesService()) return stops;
     const otherNorms = new Set(stops.map(s => normalizeText(s && s.name)).filter(Boolean));
-    for (const stop of stops) {
+    // 閘門條件抽成共用：預抓與決策迴圈用同一組，避免多抓被跳過站的 nearby 浪費呼叫
+    const _passesGate = (stop) => {
       // 跳過端點與「座標已鎖定」的站（如本島港/離島返程港）：不再用 Places 補子景點或 snap，避免被搬位
-      if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) continue;
-      if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
-      if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) continue; // 交通樞紐閘門：車站/機場等樞紐不補子景點、不搬座標
+      if (!stop || stop.type === 'start' || stop.type === 'end' || stop._lockedCoordinates) return false;
+      if (isFoodStop(stop)) return false; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
+      if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) return false; // 交通樞紐閘門
+      return !!readStopCoordinates(stop);
+    };
+    // 平行預抓所有站的附近 POI（原本迴圈內逐站 await 串行）；決策迴圈讀寫共享的
+    // otherNorms／跨站查重，必須維持串行——只平行化網路段。
+    const _nearbyByStop = new Map();
+    await Promise.allSettled(stops.filter(_passesGate).map(async (stop) => {
       const coord = readStopCoordinates(stop);
-      if (!coord) continue;
+      try { _nearbyByStop.set(stop, await fetchNearbySubSpots(coord, SUB_SPOT_MERGE_RADIUS_M)); }
+      catch (_e) { /* 失敗＝該站沒有 nearby，決策迴圈自然跳過 */ }
+    }));
+    for (const stop of stops) {
+      if (!_passesGate(stop)) continue;
+      const coord = readStopCoordinates(stop);
       const parentName = String(stop.name || '');
       const parentNorm = normalizeText(parentName);
-      let nearby = [];
-      try { nearby = await fetchNearbySubSpots(coord, SUB_SPOT_MERGE_RADIUS_M); } catch (e) { continue; }
+      const nearby = _nearbyByStop.get(stop) || [];
       if (!nearby.length) continue;
       const nearbyNames = nearby.map(n => n.name);
       const nearbyNormSet = new Set(nearby.map(n => normalizeText(n.name)).filter(Boolean));
@@ -4856,7 +4867,7 @@
     if (!el) {
       el = document.createElement('div');
       el.id = 'visited-toast';
-      el.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:9999;pointer-events:none;transition:opacity 0.3s;white-space:nowrap;';
+      el.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:9999;pointer-events:none;transition:opacity 0.3s;max-width:min(90vw,560px);white-space:normal;text-align:center;text-wrap:pretty;';
       document.body.appendChild(el);
     }
     el.textContent = msg;
@@ -7075,10 +7086,13 @@
     if (!firebaseEnabled || !firebaseDb) return;
     // 安全規則要求登入才能寫事件：未登入直接略過，避免每個操作都噴 permission-denied
     if (typeof firebaseAuth === 'undefined' || !firebaseAuth || !firebaseAuth.currentUser) return;
+    // 新規則的事件寫入會驗 isTripMemberOrOwner(tripId)：行程無效或尚未存進 Firestore 時必被拒，
+    // 直接略過以免每個操作都噴 permission-denied 警告。
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
     try {
       await firebaseDb
         .collection('travel_sessions')
-        .doc(currentItineraryId)
+        .doc(tripSessionId)
         .collection('events')
         .add({
           eventType,
@@ -7688,8 +7702,11 @@
   function safeParseJson(text) {
     if (!text) return null;
     const direct = String(text).trim();
+    // thinking 關閉時模型偶爾把 {title,stops} 包成單元素陣列 [{...}] → 解包取第一個物件
+    // （本函式所有呼叫端都期待物件：4 處讀 .stops、1 處讀聊天回覆欄位）
+    const unwrap = (v) => (Array.isArray(v) ? v[0] : v);
     try {
-      return JSON.parse(direct);
+      return unwrap(JSON.parse(direct));
     } catch (error) {
       const fenced = direct
         .replace(/^```json\s*/i, '')
@@ -7697,7 +7714,7 @@
         .replace(/```$/i, '')
         .trim();
       try {
-        return JSON.parse(fenced);
+        return unwrap(JSON.parse(fenced));
       } catch (e2) {
         return null;
       }
@@ -8047,7 +8064,7 @@
     const endLoc = (wizardData.endLocation || '').trim();
     const excluded = excludedNames.slice(0, 40).join('、');
     return [
-      `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 1} 個景點（多補 1 個備用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
+      `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 3} 個景點（多補 3 個備用，供座標驗證淘汰後仍夠用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
       '【重要限制】',
       `以下景點已使用，絕對禁止重複：${excluded || '（無）'}`,
       isSolo ? `旅行方式：獨旅，風格：${theme}，興趣：${interests}` : `同行人數：${people}，風格：${theme}，興趣：${interests}`,
@@ -8187,6 +8204,137 @@
     ].filter(l => l !== null).join('\n');
   }
 
+  // ── [gen-perf] 重新規劃效能打點：純 console 量測（正式站 F12 可讀），不影響流程 ──
+  const _genPerf = {
+    _t0: 0, _last: 0, _marks: [],
+    start() { this._t0 = this._last = performance.now(); this._marks = []; },
+    mark(label) {
+      const now = performance.now();
+      this._marks.push({ 階段: label, 耗時ms: Math.round(now - this._last) });
+      this._last = now;
+    },
+    table(tag) {
+      try {
+        if (!this._marks.length) return;
+        console.info(`[gen-perf] ${tag || ''} 總耗時 ${Math.round(performance.now() - this._t0)}ms`);
+        console.table(this._marks);
+      } catch (_e) {}
+    }
+  };
+
+  // [gen-perf] 印出 Gemini 回應的 token 用量（thoughtsTokenCount = thinking 開銷的直接證據）
+  function logGeminiUsage(tag, usage) {
+    if (!usage) return;
+    try {
+      console.info(`[gen-perf][tokens] ${tag}`, {
+        prompt: usage.promptTokenCount ?? null,
+        thoughts: usage.thoughtsTokenCount ?? null,
+        output: usage.candidatesTokenCount ?? null,
+        total: usage.totalTokenCount ?? null
+      });
+    } catch (_e) {}
+  }
+
+  // 統一組文字生成的 generationConfig（圖片生成不適用——responseModalities IMAGE 不能帶這組）。
+  // 正式站實測（2026-07-15）：預設 thinking 1224 tokens/9.6s、'low' 1037/8.9s、budget 0 → 0/3.5s；
+  // 大 prompt 用 'low' 時 thinking 仍破數千 tokens（TTFT>30s、token 上限被吃爆→JSON 截斷）。
+  // 因此行程 JSON 呼叫一律 thinking:0——品質防線在前端：景點只能從已驗證清單挑選、
+  // validateAiStopTemplate 逐站驗證、路線由 reorderStopsAlongRoute 客戶端重排。
+  // 注意 maxOutputTokens 涵蓋 thinking＋輸出總量，設太緊會把輸出吃光（實測 256 會回空字串）。
+  function buildGenConfig({ temperature, maxOutputTokens, thinking }) {
+    return {
+      responseMimeType: 'application/json',
+      temperature,
+      maxOutputTokens: maxOutputTokens || 8192,
+      thinkingConfig: thinking === 'low' ? { thinkingLevel: 'low' } : { thinkingBudget: 0 }
+    };
+  }
+
+  // 逐站 AI 景點驗證的平行版：validateAiStopTemplate 的 IO（Places/TDX/Firestore upsert）各站互不
+  // 相依，平行發出後依原順序回傳；名單增減與 createStopFromTemplate（序號有狀態）由呼叫端串行收斂。
+  // items: [{ raw, template, hint }]；hintAcceptable(hint, name)＝驗證失敗時是否接受 AI 座標當退路。
+  async function validateAiStopBatch(items, region, hintAcceptable) {
+    await Promise.allSettled(items.map(async (item) => {
+      let validated = await withReplanStepTimeout(
+        validateAiStopTemplate(item.template, region, currentTripTitle, item.hint),
+        `驗證景點「${(item.raw && item.raw.name) || '未命名'}」`,
+        12000
+      ).catch(() => null);
+      if (!validated && item.hint && typeof hintAcceptable === 'function'
+          && hintAcceptable(item.hint, item.raw && item.raw.name)) {
+        validated = { ...item.template, scenicCoordinates: item.hint };
+      }
+      item.validated = validated || null;
+    }));
+    return items;
+  }
+
+  // 重新規劃主呼叫的串流版（與 explore 頁 fetchGeminiStream 同精神；兩檔各自持有 helper 是專案慣例）。
+  // 總時長不變，但把「45 秒黑箱」變成即時滾動輸出；連線 60s 逾時——實測 SSE 的 headers 會等到
+  // 「第一個 token」才送出，大 prompt＋thinking 的 TTFT 可超過 30s；收流後 90s 無 chunk 才 abort。
+  async function fetchReplanGeminiStream(endpoint, payload, onChunk) {
+    const ctrl = new AbortController();
+    let idleTimer = setTimeout(() => ctrl.abort(), 60000);
+    const resetIdle = (ms) => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ctrl.abort(), ms); };
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: await vertexAuthHeaders(),
+        body: JSON.stringify(payload),
+        signal: ctrl.signal
+      });
+    } catch (error) {
+      clearTimeout(idleTimer);
+      if (error && error.name === 'AbortError') throw new Error('AI 連線逾時（60s），請再試一次。');
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      clearTimeout(idleTimer);
+      throw vertexHttpError(response.status, 'Vertex stream 失敗');
+    }
+    resetIdle(90000);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let sseBuffer = '';
+    let lastUsage = null;
+    try {
+      while (true) {
+        let value, done;
+        try { ({ value, done } = await reader.read()); }
+        catch (error) {
+          if (error && error.name === 'AbortError') throw new Error('AI 串流閒置逾時（90s 無資料），請再試一次。');
+          throw error;
+        }
+        if (done) break;
+        resetIdle(90000);
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const payloadText = trimmed.slice(5).trim();
+          if (!payloadText || payloadText === '[DONE]') continue;
+          try {
+            const eventJson = JSON.parse(payloadText);
+            if (eventJson && eventJson.usageMetadata) lastUsage = eventJson.usageMetadata;
+            const part = eventJson?.candidates?.[0]?.content?.parts?.[0];
+            const chunkText = part ? String(part.text || '') : '';
+            if (!chunkText) continue;
+            fullText += chunkText;
+            if (typeof onChunk === 'function') onChunk(chunkText, fullText);
+          } catch (_e) { /* 忽略非 JSON chunk */ }
+        }
+      }
+    } finally {
+      clearTimeout(idleTimer);
+    }
+    logGeminiUsage('replan 主生成(stream)', lastUsage);
+    return fullText;
+  }
+
   async function fetchReplanWithTimeout(url, options, timeoutMs = 45000) {
     if (activeReplanDeadlineAt) {
       timeoutMs = Math.min(timeoutMs, Math.max(1, activeReplanDeadlineAt - Date.now()));
@@ -8276,23 +8424,30 @@
     _addRgLine('$ WanderAI --replan --dest ' + dest, 'info');
 
     try {
+      _genPerf.start();
       // 本地優先：有本地景點資料就用它，缺該目的地時才回退 live Google Maps
       const _localHint = buildLocalPoiHintBlock(dest);
       if (_localHint) _addRgLine('> 已從本地景點資料庫取得清單，交由 AI 重新排序…', 'info');
-      let livePoiHint = _localHint || await withReplanStepTimeout(
-        fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []),
-        '景點資料載入',
-        12000
-      ).catch(() => '');
+      // 景點與餐廳互不相依：兩個 promise 先發再各自 await（原本串行，兩段 RTT 疊加）
+      const _poiHintPromise = _localHint
+        ? Promise.resolve(_localHint)
+        : withReplanStepTimeout(
+            fetchLiveMapsPoiHintBlock(dest, wizardData.interests || []),
+            '景點資料載入',
+            12000
+          ).catch(() => '');
       // 餐廳一律即時抓（本地 poi-data 不含餐廳），每次重新規劃都從 Google Maps 撈最新餐廳候選
-      const _foodHint = await withReplanStepTimeout(
+      const _foodHintPromise = withReplanStepTimeout(
         fetchLiveFoodHintBlock(dest),
         '餐廳資料載入',
         12000
       ).catch(() => '');
+      let livePoiHint = await _poiHintPromise;
+      const _foodHint = await _foodHintPromise;
       if (_foodHint) { livePoiHint = (livePoiHint || '') + '\n' + _foodHint; _addRgLine('> 已即時取得餐廳候選…', 'info'); }
       // 在 DevTools Console 標明景點清單來源：本地 / live Maps / 無
       console.info(`[POI來源] ${_localHint ? '本地 poi-data.js' : (livePoiHint ? 'live Google Maps' : '無清單（AI 自行生成）')}｜目的地：${dest}｜（重新規劃）`);
+      _genPerf.mark('景點/餐廳清單');
       if (_rgPhase) _rgPhase.textContent = 'AI 生成行程中…';
       _addRgLine('> AI 正在生成新行程，請稍候…', 'info');
 
@@ -8303,18 +8458,23 @@
       }
       const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
 
-      const response = await fetchReplanWithTimeout(endpoint, {
-        method: 'POST',
-        headers: await vertexAuthHeaders(),
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData, livePoiHint) }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.8 }
-        })
+      // 主生成改串流：使用者即時看到「已生成第 N 站：站名」滾動，不再等 45 秒黑箱。
+      // endpoint（generateContent）保留給下方補站/鄰近/補時 fallback 使用。
+      const streamEndpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`;
+      let _lastNameCount = 0;
+      const text = await fetchReplanGeminiStream(streamEndpoint, {
+        contents: [{ role: 'user', parts: [{ text: buildAiReplanPrompt(wizardData, livePoiHint) }] }],
+        generationConfig: buildGenConfig({ temperature: 0.8, maxOutputTokens: 8192, thinking: 0 })
+      }, (_chunk, fullText) => {
+        const m = fullText.match(/"name"\s*:\s*"([^"]+)"/g);
+        const n = m ? m.length : 0;
+        if (n > _lastNameCount) {
+          _lastNameCount = n;
+          const nameMatch = m[m.length - 1].match(/"name"\s*:\s*"([^"]+)"/);
+          _addRgLine(`> 已生成第 ${n} 站：${nameMatch ? nameMatch[1] : ''}`, 'info');
+        }
       });
-      if (!response.ok) throw vertexHttpError(response.status, 'Vertex API 錯誤');
-
-      const data = await response.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      _genPerf.mark('Gemini 主生成');
       const parsed = safeParseJson(text);
       if (!parsed?.stops?.length) throw new Error('AI 未回傳有效景點清單');
 
@@ -8324,32 +8484,30 @@
       const region = currentTripRegion || dest;
       let newStops = [];
       const rejectedNames = [];
-      for (const s of parsed.stops) {
-        const template = {
+      // 逐站驗證改平行（原本 8 站各 12s 上限串行疊加 → 取最慢一站）；收斂維持原順序串行
+      const _mainItems = parsed.stops.map((s) => ({
+        raw: s,
+        template: {
           name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
           stayMin: Math.max(10, Math.min(180, s.duration || 30)),
           transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
           businessHours: s.businessHours || null,
           dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
           toiletLocations: []
-        };
-        const aiHint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+        },
+        hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
           ? normalizeCoordinatePair(s.lat, s.lng)
-          : null;
-        let validated = await withReplanStepTimeout(
-          validateAiStopTemplate(template, region, currentTripTitle, aiHint),
-          `驗證景點「${s.name || '未命名'}」`,
-          12000
-        ).catch(() => null);
-        if (!validated && aiHint && !isCoordinatesOutsideRegion(aiHint, region, s.name)) {
-          validated = { ...template, scenicCoordinates: aiHint };
-        }
-        if (!validated) { console.warn(`[replanWithAI] 排除未驗證景點：${s.name}`); rejectedNames.push(s.name); continue; }
-        const stop = createStopFromTemplate({ ...validated, stayMin: template.stayMin, dayIndex: template.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null });
+          : null
+      }));
+      await validateAiStopBatch(_mainItems, region, (hint, name) => !isCoordinatesOutsideRegion(hint, region, name));
+      for (const item of _mainItems) {
+        if (!item.validated) { console.warn(`[replanWithAI] 排除未驗證景點：${item.raw.name}`); rejectedNames.push(item.raw.name); continue; }
+        const stop = createStopFromTemplate({ ...item.validated, stayMin: item.template.stayMin, dayIndex: item.template.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null });
         newStops.push(stop);
       }
 
       saveBlockedSpotNames(rejectedNames, region);
+      _genPerf.mark('逐站驗證(validateAiStopTemplate)');
 
       const MIN_REPLAN_STOPS = 3;
       if (newStops.length < MIN_REPLAN_STOPS && rejectedNames.length > 0) {
@@ -8362,7 +8520,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: buildReplenishPrompt(dest, needed, [...rejectedNames, ...newStops.map(s => s.name)], wizardData) }] }],
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.9 }
+            generationConfig: buildGenConfig({ temperature: 0.9, maxOutputTokens: 2048, thinking: 0 })
           })
         });
         if (replenishRes.ok) {
@@ -8370,29 +8528,28 @@
           const repText = repData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
           const repParsed = safeParseJson(repText);
           if (repParsed?.stops?.length) {
-            for (const s of repParsed.stops) {
-              if (allUsedNorm.has(normalizeText(s.name))) continue;
-              const tmpl = {
-                name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
-                stayMin: Math.max(10, Math.min(180, s.duration || 30)),
-                transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
-                businessHours: s.businessHours || null,
-                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
-                toiletLocations: []
-              };
-              const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
-                ? normalizeCoordinatePair(s.lat, s.lng) : null;
-              let val = await withReplanStepTimeout(
-                validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
-                `驗證補充景點「${s.name || '未命名'}」`,
-                12000
-              ).catch(() => null);
-              if (!val && hint && !isCoordinatesOutsideRegion(hint, region, s.name)) {
-                val = { ...tmpl, scenicCoordinates: hint };
-              }
-              if (!val) { saveBlockedSpotNames([s.name], region); continue; }
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
-              allUsedNorm.add(normalizeText(s.name));
+            // 平行驗證（先過濾已用名單），收斂串行處理批內重名
+            const _repItems = repParsed.stops
+              .filter(s => s && s.name && !allUsedNorm.has(normalizeText(s.name)))
+              .map((s) => ({
+                raw: s,
+                template: {
+                  name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+                  stayMin: Math.max(10, Math.min(180, s.duration || 30)),
+                  transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
+                  businessHours: s.businessHours || null,
+                  dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                  toiletLocations: []
+                },
+                hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+                  ? normalizeCoordinatePair(s.lat, s.lng) : null
+              }));
+            await validateAiStopBatch(_repItems, region, (hint, name) => !isCoordinatesOutsideRegion(hint, region, name));
+            for (const item of _repItems) {
+              if (allUsedNorm.has(normalizeText(item.raw.name))) continue; // 批內重名
+              if (!item.validated) { saveBlockedSpotNames([item.raw.name], region); continue; }
+              newStops.push(createStopFromTemplate({ ...item.validated, stayMin: item.template.stayMin, dayIndex: item.template.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
+              allUsedNorm.add(normalizeText(item.raw.name));
             }
           }
         }
@@ -8409,7 +8566,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: buildNearbyFallbackPrompt(dest, nearbyNeeded, [...rejectedNames, ...newStops.map(s => s.name)], wizardData) }] }],
-            generationConfig: { responseMimeType: 'application/json', temperature: 1.0 }
+            generationConfig: buildGenConfig({ temperature: 1.0, maxOutputTokens: 2048, thinking: 0 })
           })
         });
         if (nearbyRes.ok) {
@@ -8417,30 +8574,28 @@
           const nearbyText = nearbyData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
           const nearbyParsed = safeParseJson(nearbyText);
           if (nearbyParsed?.stops?.length) {
-            for (const s of nearbyParsed.stops) {
-              if (nearbyUsedNorm.has(normalizeText(s.name))) continue;
-              const tmpl = {
-                name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
-                stayMin: Math.max(10, Math.min(180, s.duration || 30)),
-                transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
-                businessHours: s.businessHours || null,
-                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
-                toiletLocations: []
-              };
-              const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
-                ? normalizeCoordinatePair(s.lat, s.lng) : null;
-              let val = await withReplanStepTimeout(
-                validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
-                `驗證鄰近景點「${s.name || '未命名'}」`,
-                12000
-              ).catch(() => null);
-              // 附近景點放寬地區限制：AI 座標在台灣範圍內即接受
-              if (!val && hint && isInTaiwanBounds(hint)) {
-                val = { ...tmpl, scenicCoordinates: hint };
-              }
-              if (!val) continue;
-              newStops.push(createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
-              nearbyUsedNorm.add(normalizeText(s.name));
+            // 平行驗證（先過濾已用名單）；「放寬地區限制：台灣範圍內即接受」維持原判斷
+            const _nearItems = nearbyParsed.stops
+              .filter(s => s && s.name && !nearbyUsedNorm.has(normalizeText(s.name)))
+              .map((s) => ({
+                raw: s,
+                template: {
+                  name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+                  stayMin: Math.max(10, Math.min(180, s.duration || 30)),
+                  transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
+                  businessHours: s.businessHours || null,
+                  dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                  toiletLocations: []
+                },
+                hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
+                  ? normalizeCoordinatePair(s.lat, s.lng) : null
+              }));
+            await validateAiStopBatch(_nearItems, region, (hint) => isInTaiwanBounds(hint));
+            for (const item of _nearItems) {
+              if (nearbyUsedNorm.has(normalizeText(item.raw.name))) continue; // 批內重名
+              if (!item.validated) continue;
+              newStops.push(createStopFromTemplate({ ...item.validated, stayMin: item.template.stayMin, dayIndex: item.template.dayIndex, baseId: 'replan-ai', transitMode: getPreferredVehicleMode(), transitMin: null }));
+              nearbyUsedNorm.add(normalizeText(item.raw.name));
               if (newStops.length >= MIN_REPLAN_STOPS) break;
             }
           }
@@ -8475,7 +8630,9 @@
           ? getMultiDayWindow(wizardData).activeMinutes
           : parseDurationMinutes(wizardData.days || '1天');
         const usedNorm = new Set(replanStops.map(s => normalizeText(s.name)).concat(rejectedNames.map(n => normalizeText(n))));
-        for (let iter = 0; iter < 3; iter++) {
+        // 由 3 輪縮為 1 輪：每輪＝1 次 Gemini＋逐站驗證，3 輪串行是重新規劃尾端最大延遲；
+        // 單輪以 buildTimeFillPrompt 的 needed+3 多要備用候選補足命中率。
+        for (let iter = 0; iter < 1; iter++) {
           const shortfall = targetMin - estimateTripMinutes(replanStops);
           if (shortfall <= 45) break;
           const need = Math.max(1, Math.min(4, Math.ceil(shortfall / 50)));
@@ -8487,7 +8644,7 @@
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 contents: [{ role: 'user', parts: [{ text: buildTimeFillPrompt(dest, need, shortfall, replanStops.map(s => s.name).concat(rejectedNames), wizardData) }] }],
-                generationConfig: { responseMimeType: 'application/json', temperature: 0.9 }
+                generationConfig: buildGenConfig({ temperature: 0.9, maxOutputTokens: 2048, thinking: 0 })
               })
             });
           } catch (_e) { break; }
@@ -8496,26 +8653,27 @@
           const parsed = safeParseJson(data?.candidates?.[0]?.content?.parts?.[0]?.text || '');
           if (!parsed?.stops?.length) break;
           let addedAny = false;
-          for (const s of parsed.stops) {
-            const nrm = normalizeText(s.name);
-            if (!nrm || usedNorm.has(nrm)) continue;
-            const tmpl = {
-              name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
-              stayMin: Math.max(15, Math.min(90, s.duration || 45)),
-              transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-fill',
-              businessHours: s.businessHours || null,
-              dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 2)),
-              toiletLocations: []
-            };
-            const hint = (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) ? normalizeCoordinatePair(s.lat, s.lng) : null;
-            let val = await withReplanStepTimeout(
-              validateAiStopTemplate(tmpl, region, currentTripTitle, hint),
-              `驗證補時景點「${s.name || '未命名'}」`,
-              12000
-            ).catch(() => null);
-            if (!val && hint && !isCoordinatesOutsideRegion(hint, region, s.name)) val = { ...tmpl, scenicCoordinates: hint };
-            if (!val) { saveBlockedSpotNames([s.name], region); continue; }
-            const stop = createStopFromTemplate({ ...val, stayMin: tmpl.stayMin, dayIndex: tmpl.dayIndex, baseId: 'replan-fill', transitMode: getPreferredVehicleMode(), transitMin: null });
+          // 平行驗證候選（先過濾已用名單），插站/縮時/移除的收斂邏輯維持串行
+          const _fillItems = parsed.stops
+            .filter(s => { const nrm = normalizeText(s && s.name); return nrm && !usedNorm.has(nrm); })
+            .map((s) => ({
+              raw: s,
+              template: {
+                name: s.name, emoji: s.emoji || '📍', desc: s.desc || '',
+                stayMin: Math.max(15, Math.min(90, s.duration || 45)),
+                transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-fill',
+                businessHours: s.businessHours || null,
+                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 2)),
+                toiletLocations: []
+              },
+              hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) ? normalizeCoordinatePair(s.lat, s.lng) : null
+            }));
+          await validateAiStopBatch(_fillItems, region, (hint, name) => !isCoordinatesOutsideRegion(hint, region, name));
+          for (const item of _fillItems) {
+            const nrm = normalizeText(item.raw.name);
+            if (!nrm || usedNorm.has(nrm)) continue; // 批內重名
+            if (!item.validated) { saveBlockedSpotNames([item.raw.name], region); continue; }
+            const stop = createStopFromTemplate({ ...item.validated, stayMin: item.template.stayMin, dayIndex: item.template.dayIndex, baseId: 'replan-fill', transitMode: getPreferredVehicleMode(), transitMin: null });
             const endIdx = replanStops.findIndex(x => x.type === 'end');
             replanStops.splice(endIdx >= 0 ? endIdx : replanStops.length, 0, stop); // 插在終點站之前
             usedNorm.add(nrm);
@@ -8559,6 +8717,9 @@
             _rgFit.fits ? 'green' : 'orange');
         }
       } catch (fitErr) { console.warn('[replanWithAI] 超時壓縮略過：', fitErr); }
+
+      _genPerf.mark('補站/座標重驗/收斂');
+      _genPerf.table('重新規劃');
 
       if (_rgOverlay) _rgOverlay.style.display = 'none';
       renderReplanBoard();
@@ -8610,17 +8771,15 @@
           parts: [{ text: `${buildGeminiSystemPrompt()}\n\n${contextBlock}\n\n使用者訊息：${userMessage}` }]
         }
       ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.6
-      }
+      generationConfig: buildGenConfig({ temperature: 0.6, maxOutputTokens: 8192, thinking: 'low' })
     };
 
-    const response = await fetch(endpoint, {
+    // 帶逾時（60s）：卡住的 Vertex 呼叫不該讓聊天式調整永遠轉圈
+    const response = await fetchReplanWithTimeout(endpoint, {
       method: 'POST',
       headers: await vertexAuthHeaders(),
       body: JSON.stringify(payload)
-    });
+    }, 60000);
 
     if (!response.ok) {
       throw vertexHttpError(response.status, 'Gemini API 失敗');
@@ -11987,6 +12146,9 @@
       feedbackToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
       window.closeLogin();
     } catch (e) {
+      if (firebaseAuth.currentUser && needsEmailVerification(firebaseAuth.currentUser)) {
+        try { await firebaseAuth.signOut(); } catch (_e) {}
+      }
       feedbackToast(authErrorMessage(e, 'register'), 'red');
     } finally {
       emailRegistrationInProgress = false;
@@ -12103,9 +12265,11 @@
     if (!firebaseEnabled || !firebaseAuth) return;
     firebaseAuth.onAuthStateChanged(async (user) => {
       if (user) {
-        if (needsEmailVerification(user) && !emailRegistrationInProgress) {
-          await firebaseAuth.signOut();
-          feedbackToast('請先完成電子信箱驗證後再登入。', 'orange');
+        if (needsEmailVerification(user)) {
+          if (!emailRegistrationInProgress) {
+            await firebaseAuth.signOut();
+            feedbackToast('請先完成電子信箱驗證後再登入。', 'orange');
+          }
           return;
         }
         let name = user.displayName || user.email?.split('@')[0] || '使用者';

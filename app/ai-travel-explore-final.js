@@ -199,7 +199,7 @@ function parseDurationFromText(text) {
 async function fetchPlaceReviewsText(name, destination, apiKey) {
   if (!apiKey || !name) return '';
   try {
-    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -207,7 +207,7 @@ async function fetchPlaceReviewsText(name, destination, apiKey) {
         'X-Goog-FieldMask': 'places.reviews,places.editorialSummary'
       },
       body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 })
-    });
+    }, 10000, '評論查詢');
     if (!res.ok) return '';
     const data = await res.json();
     const place = data.places && data.places[0];
@@ -741,7 +741,11 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     wizardData.returnDate ? `回程日期：${wizardData.returnDate}` : null,
     win.multi
       ? `時間長度：兩天一夜（第一天 ${win.start}–${win.day1End} 約 ${win.day1Hours} 小時並過夜；第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程）`
-      : `時間長度：${wizardData.days || '1天'}（${win.start} ～ ${win.end}，請安排景點填滿此時段）`,
+      : (() => {
+          // 明確給「含交通的總時長目標」讓 AI 一次排滿，減少事後 fillTripTimeBudget 補站輪數
+          const _totalMin = parseDurationMinutes(wizardData.days || '1天');
+          return `時間長度：${wizardData.days || '1天'}（${win.start} ～ ${win.end}）。全程目標約 ${_totalMin} 分鐘（含站間交通時間，站間車程可粗估每段 15–30 分鐘）；請把「停留＋交通」的總和排到 ${Math.max(60, _totalMin - 30)}～${_totalMin} 分鐘之間，寧可多排一站也不要留大段空檔`;
+        })(),
     isSolo ? '旅行方式：獨旅' : `同行人數：${wizardData.people || '2人'}`,
     `主要交通工具：${({ taxi: '計程車', scooter: '機車', car: '汽車' }[wizardData.transportMode]) || '汽車'}（各段移動以此工具為主，短程可步行）`,
     ...buildPreferenceLines(wizardData),
@@ -810,13 +814,15 @@ function extractGeminiResponseText(data) {
 function parsePlanJsonFromText(text) {
   const raw = String(text || '').trim();
   if (!raw) throw new Error('AI 回傳內容為空。');
+  // thinking 關閉時模型偶爾把 {title,stops} 包成單元素陣列 [{...}] → 解包取第一個物件
+  const unwrap = (v) => (Array.isArray(v) ? v[0] : v);
   try {
-    return JSON.parse(raw);
+    return unwrap(JSON.parse(raw));
   } catch (error) {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      return JSON.parse(raw.slice(start, end + 1));
+      return unwrap(JSON.parse(raw.slice(start, end + 1)));
     }
     throw new Error('AI 回傳格式不是有效 JSON。');
   }
@@ -839,42 +845,129 @@ function vertexHttpError(status, kind) {
   return new Error(`${kind}（${status}）`);
 }
 
+// ── [gen-perf] 生成效能打點：純 console 量測（正式站 F12 可讀），不影響流程 ──
+const _genPerf = {
+  _t0: 0, _last: 0, _marks: [],
+  start() { this._t0 = this._last = performance.now(); this._marks = []; },
+  mark(label) {
+    const now = performance.now();
+    this._marks.push({ 階段: label, 耗時ms: Math.round(now - this._last) });
+    this._last = now;
+  },
+  table(tag) {
+    try {
+      if (!this._marks.length) return;
+      console.info(`[gen-perf] ${tag || ''} 總耗時 ${Math.round(performance.now() - this._t0)}ms`);
+      console.table(this._marks);
+    } catch (_e) {}
+  }
+};
+
+// [gen-perf] 印出 Gemini 回應的 token 用量（thoughtsTokenCount = thinking 開銷的直接證據）
+function logGeminiUsage(tag, usage) {
+  if (!usage) return;
+  try {
+    console.info(`[gen-perf][tokens] ${tag}`, {
+      prompt: usage.promptTokenCount ?? null,
+      thoughts: usage.thoughtsTokenCount ?? null,
+      output: usage.candidatesTokenCount ?? null,
+      total: usage.totalTokenCount ?? null
+    });
+  } catch (_e) {}
+}
+
+// 統一組 generationConfig：gemini-3 flash 預設開 thinking 且不限輸出長度，是生成延遲的最大單一來源。
+// 正式站實測（2026-07-15，同一提示詞）：預設 thinking 1224 tokens/9.6s、'low' 1037/8.9s、budget 0 → 0/3.5s；
+// 主生成大 prompt 用 'low' 時 thinking 仍破數千 tokens（TTFT>30s、6144 上限被吃爆→JSON 截斷）。
+// 因此全部行程 JSON 呼叫一律 thinking:0——品質防線在前端：景點只能從已驗證清單挑選、
+// 座標逐站驗證、路線由 reorderStopsAlongRoute/sortStopsByNearestRoute 客戶端重排。
+// 注意 maxOutputTokens 涵蓋 thinking＋輸出總量，設太緊會把輸出吃光（實測 256 會回空字串）。
+function buildGenConfig({ temperature, maxOutputTokens, thinking }) {
+  return {
+    responseMimeType: 'application/json',
+    temperature,
+    maxOutputTokens: maxOutputTokens || 8192,
+    thinkingConfig: thinking === 'low' ? { thinkingLevel: 'low' } : { thinkingBudget: 0 }
+  };
+}
+
+// 帶逾時的 fetch：任一 Places / Vertex 呼叫卡住都不該讓整條生成掛死。
+// 逾時 abort 後 throw（帶 label），呼叫端既有的 catch 降級路徑會自然接手。
+async function fetchWithTimeout(url, options, timeoutMs, label) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 10000);
+  try {
+    return await fetch(url, { ...(options || {}), signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error(`${label || '網路請求'}逾時（${timeoutMs}ms）`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchGeminiJson({ apiKey, model, payload }) {
   const vertex = getVertexConfig();
   if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
   const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: await vertexAuthHeaders(),
     body: JSON.stringify(payload)
-  });
+  }, 60000, 'AI 生成');
   if (!response.ok) {
     throw vertexHttpError(response.status, 'Vertex API 失敗');
   }
-  return response.json();
+  const data = await response.json();
+  logGeminiUsage(`generateContent:${model}`, data && data.usageMetadata);
+  return data;
 }
 
 async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
   const vertex = getVertexConfig();
   if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
   const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`;
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: await vertexAuthHeaders(),
-    body: JSON.stringify(payload)
-  });
+  // 串流的逾時策略：連線階段 60s——實測 SSE 的 response headers 會等到「第一個 token」才送出，
+  // 大 prompt＋thinking 的 TTFT 可超過 30s（實測 15s/30s 都會誤殺正常請求）；此逾時只防真掛死。
+  // 開始收流後不設硬限，改用「距上次 chunk 90s 無資料」的 idle 偵測 abort。
+  const _streamCtrl = new AbortController();
+  let _idleTimer = setTimeout(() => _streamCtrl.abort(), 60000);
+  const _resetIdle = (ms) => { clearTimeout(_idleTimer); _idleTimer = setTimeout(() => _streamCtrl.abort(), ms); };
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: await vertexAuthHeaders(),
+      body: JSON.stringify(payload),
+      signal: _streamCtrl.signal
+    });
+  } catch (error) {
+    clearTimeout(_idleTimer);
+    if (error && error.name === 'AbortError') throw new Error('AI 連線逾時（60s），請再試一次。');
+    throw error;
+  }
   if (!response.ok || !response.body) {
+    clearTimeout(_idleTimer);
     throw vertexHttpError(response.status, 'Vertex stream 失敗');
   }
+  _resetIdle(90000);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let fullText = '';
   let sseBuffer = '';
+  let lastUsage = null; // [gen-perf] 串流最後一個事件帶 usageMetadata
 
+  try {
   while (true) {
-    const { value, done } = await reader.read();
+    let value, done;
+    try { ({ value, done } = await reader.read()); }
+    catch (error) {
+      if (error && error.name === 'AbortError') throw new Error('AI 串流閒置逾時（90s 無資料），請再試一次。');
+      throw error;
+    }
     if (done) break;
+    _resetIdle(90000);
     sseBuffer += decoder.decode(value, { stream: true });
     const lines = sseBuffer.split('\n');
     sseBuffer = lines.pop() || '';
@@ -885,6 +978,7 @@ async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
       if (!payloadText || payloadText === '[DONE]') continue;
       try {
         const eventJson = JSON.parse(payloadText);
+        if (eventJson && eventJson.usageMetadata) lastUsage = eventJson.usageMetadata;
         const chunkText = extractGeminiResponseText(eventJson);
         if (!chunkText) continue;
         fullText += chunkText;
@@ -894,7 +988,11 @@ async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
       }
     }
   }
+  } finally {
+    clearTimeout(_idleTimer); // 收流結束（成功或失敗）都要清掉 idle 計時器
+  }
 
+  logGeminiUsage(`streamGenerateContent:${model}`, lastUsage);
   return fullText;
 }
 
@@ -1097,10 +1195,7 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
         parts: [{ text: built.prompt }]
       }
     ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.6
-    }
+    generationConfig: buildGenConfig({ temperature: 0.6, maxOutputTokens: 8192, thinking: 0 })
   };
 
   async function requestOnce(model, streamMode) {
@@ -2097,7 +2192,9 @@ async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = 
   const seenNames = new Set();
   const allPlaces = [];
 
-  for (const query of queries) {
+  // 平行發出所有 query（原本逐個 await 串行，5 個 query 吃 5 個 RTT）；
+  // 去重與 25 筆上限仍照原 query 順序在結果陣列上處理，輸出與序列版一致。
+  const fetchOne = async (query) => {
     const body = {
       textQuery: query,
       languageCode: 'zh-TW',
@@ -2112,7 +2209,7 @@ async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = 
       };
     }
     try {
-      const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2120,25 +2217,30 @@ async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = 
           'X-Goog-FieldMask': 'places.displayName,places.location,places.types,places.regularOpeningHours,places.formattedAddress,places.rating'
         },
         body: JSON.stringify(body)
-      });
+      }, 10000, '景點清單');
       const data = await res.json();
-      if (!Array.isArray(data.places)) continue;
-      for (const place of data.places) {
-        const name = place.displayName?.text;
-        if (!name || seenNames.has(name)) continue;
-        seenNames.add(name);
-        allPlaces.push({
-          name,
-          lat: place.location?.latitude,
-          lng: place.location?.longitude,
-          businessHours: (place.regularOpeningHours?.weekdayDescriptions || []).join('；') || '未知',
-          address: place.formattedAddress || '',
-          rating: place.rating ?? null,
-        });
-        if (allPlaces.length >= 25) break;
-      }
+      return Array.isArray(data.places) ? data.places : [];
     } catch (e) {
       console.warn('fetchGoogleMapsPoiList 失敗:', e);
+      return [];
+    }
+  };
+  const resultsByQuery = await Promise.all(queries.map(fetchOne));
+
+  for (const places of resultsByQuery) {
+    for (const place of places) {
+      const name = place.displayName?.text;
+      if (!name || seenNames.has(name)) continue;
+      seenNames.add(name);
+      allPlaces.push({
+        name,
+        lat: place.location?.latitude,
+        lng: place.location?.longitude,
+        businessHours: (place.regularOpeningHours?.weekdayDescriptions || []).join('；') || '未知',
+        address: place.formattedAddress || '',
+        rating: place.rating ?? null,
+      });
+      if (allPlaces.length >= 25) break;
     }
     if (allPlaces.length >= 25) break;
   }
@@ -2227,7 +2329,7 @@ async function fetchCoordinateFromGooglePlaces(name, destination) {
         }
       };
     }
-    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2235,7 +2337,7 @@ async function fetchCoordinateFromGooglePlaces(name, destination) {
         'X-Goog-FieldMask': 'places.location,places.displayName'
       },
       body: JSON.stringify(body)
-    });
+    }, 10000, '座標查詢');
     const data = await res.json();
     const places = Array.isArray(data.places) ? data.places : [];
     // 只接受名稱嚴格配對者；找不到就回 null（不要退回 places[0]，避免套到只共用通用後綴的別處地點）
@@ -2343,8 +2445,21 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
       return stop;
     }
 
+    // live Maps 清單命中的站（matchStopsToLivePlaces 已貼上 searchText 來源的座標/營業時間）
+    // 資料與本函式要抓的完全同源，重打一次沒有資訊增益 → 直接短路，省一次 Places。
+    if (stop.coordinateSource === 'google_places_matched'
+        && Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))) {
+      if (stop.businessHours && wizardData.departureDate) {
+        const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+        if (dayWindow && dayWindow.closed) return null; // 出發日休息 → 照舊過濾
+      }
+      stop.placeVerified = true;
+      stop.coordVerified = true; // searchText 來源座標，與本函式驗證同級
+      return stop;
+    }
+
     try {
-      const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2353,7 +2468,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
         },
         // 取多筆候選，從中挑「名稱嚴格配對且在目的地範圍內」者，避免只取 top1 而被通用後綴（漁港/部落）誤配到別的地點
         body: JSON.stringify({ textQuery: `${name} ${resolveGeoRegion(destination)}`, languageCode: 'zh-TW', maxResultCount: 5 })
-      });
+      }, 10000, '景點驗證');
       const data = await res.json();
       const places = Array.isArray(data.places) ? data.places : [];
       if (!places.length) return null;
@@ -2591,7 +2706,7 @@ async function fetchNearbySubSpots(coord, radius) {
   if (_nearbySubSpotCache.has(cacheKey)) return _nearbySubSpotCache.get(cacheKey);
   let out = [];
   try {
-    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchNearby', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2605,7 +2720,7 @@ async function fetchNearbySubSpots(coord, radius) {
         includedTypes: ['tourist_attraction', 'park'],
         locationRestriction: { circle: { center: { latitude: coord.lat, longitude: coord.lng }, radius } }
       })
-    });
+    }, 10000, '附近景點');
     const data = await res.json();
     out = (Array.isArray(data.places) ? data.places : [])
       .map(p => ({
@@ -2659,16 +2774,27 @@ async function enrichBigAttractionSubSpots(stops, destination) {
   const key = window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.GOOGLE_MAPS_API_KEY;
   if (!key) return stops;
   const otherNorms = new Set(stops.map(s => normalizeLookupText(s && s.name)).filter(Boolean));
-  for (const stop of stops) {
-    if (!stop || stop.type === 'start' || stop.type === 'end') continue;
-    if (isFoodStop(stop)) continue; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
-    if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) continue; // 交通樞紐閘門：車站/機場等樞紐不補子景點、不搬座標
+  // 閘門條件抽成共用：預抓與決策迴圈用同一組，避免多抓被跳過站的 nearby 浪費呼叫
+  const _passesGate = (stop) => {
+    if (!stop || stop.type === 'start' || stop.type === 'end') return false;
+    if (isFoodStop(stop)) return false; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
+    if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) return false; // 交通樞紐閘門
+    return !!getStopCoordinate(stop);
+  };
+  // 平行預抓所有站的附近 POI（原本迴圈內逐站 await 串行，每站一個 RTT 疊加）；
+  // 決策迴圈讀寫共享的 otherNorms／跨站查重，必須維持串行——只平行化網路段。
+  const _nearbyByStop = new Map();
+  await Promise.allSettled(stops.filter(_passesGate).map(async (stop) => {
     const coord = getStopCoordinate(stop);
-    if (!coord) continue;
+    try { _nearbyByStop.set(stop, await fetchNearbySubSpots(coord, SUB_SPOT_MERGE_RADIUS_M)); }
+    catch (_e) { /* 失敗＝該站沒有 nearby，決策迴圈自然跳過 */ }
+  }));
+  for (const stop of stops) {
+    if (!_passesGate(stop)) continue;
+    const coord = getStopCoordinate(stop);
     const parentName = String(stop.name || '');
     const parentNorm = normalizeLookupText(parentName);
-    let nearby;
-    try { nearby = await fetchNearbySubSpots(coord, SUB_SPOT_MERGE_RADIUS_M); } catch (e) { continue; }
+    const nearby = _nearbyByStop.get(stop);
     if (!nearby || !nearby.length) continue;
     const nearbyNames = nearby.map(n => n.name);
     const nearbyNormSet = new Set(nearby.map(n => normalizeLookupText(n.name)).filter(Boolean));
@@ -2875,7 +3001,7 @@ function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardDa
     ? `景點「只能」從以下本地清單挑選未使用者（名稱需完全一致，嚴禁清單以外的任何景點）：\n${_localPool.slice(0, 40).map((p) => `・${p.name}`).join('\n')}`
     : `景點須為 ${dest} 周邊真實存在、能在 Google Maps 搜尋到的正式名稱`;
   return [
-    `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 1} 個景點（多補 1 個備用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
+    `你是台灣微旅行規劃 AI。目前 ${dest} 行程時間偏短，請沿行程路線補 ${needed + 3} 個景點（多補 3 個備用，供座標驗證淘汰後仍夠用），用來填滿約 ${shortfallMin} 分鐘的空檔。`,
     _avoid ? `⚠️ 個人禁忌／需避免（務必遵守）：${_avoid}` : null,
     `已使用景點（絕對禁止重複）：${excluded || '（無）'}`,
     (startLoc || endLoc)
@@ -2895,7 +3021,9 @@ async function fillTripTimeBudget(middleStops, wizardData, destination, startCoo
   const fullSeq = (arr) => [startStub, ...arr, endStub].filter(Boolean);
   let stops = [...middleStops];
   const usedNorm = new Set(stops.map(s => normalizeLookupText(s.name)));
-  for (let iter = 0; iter < 3; iter++) {
+  // 由 3 輪縮為 1 輪：每輪＝1 次 Gemini＋2 波 Places，3 輪串行是生成尾端最大延遲；
+  // 改以「單輪多要 3 個備用候選」補足命中率（buildTimeFillPrompt 的 needed+3）。
+  for (let iter = 0; iter < 1; iter++) {
     const shortfall = targetMin - estimateTripMinutes(fullSeq(stops));
     if (shortfall <= 45) break;
     const need = Math.max(1, Math.min(4, Math.ceil(shortfall / 50)));
@@ -2903,7 +3031,7 @@ async function fillTripTimeBudget(middleStops, wizardData, destination, startCoo
     try {
       const payload = {
         contents: [{ role: 'user', parts: [{ text: buildTimeFillPrompt(destination, need, shortfall, stops.map(s => s.name), wizardData) }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.9 }
+        generationConfig: buildGenConfig({ temperature: 0.9, maxOutputTokens: 2048, thinking: 0 })
       };
       text = extractGeminiResponseText(await fetchGeminiJson({ apiKey: '', model: GEMINI_MODEL, payload }));
     } catch (e) { break; }
@@ -2945,7 +3073,11 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     ? matchStopsToLivePlaces(sourceStops, livePlaces)
     : sourceStops;
   const destination = wizardData.dest || wizardData.destCustom || wizardData.region || '';
+  // step2「對應地圖」涵蓋多個子階段，逐段更新 subLabel 讓等待有敘事（僅生成流程中顯示）
+  const _sub = (label) => { if (isGeneratingTrip && typeof setWizGenStep === 'function') setWizGenStep(2, label); };
+  _sub('讀取景點快取中…');
   const poiCache = await fetchDestinationPoiCache(destination);
+  _genPerf.mark('opt: poiCache 讀取');
 
   // Fetch start/end coords early so they are available for corridor filtering below
   const _defaultHub   = getDefaultTransitHub(destination);
@@ -2970,9 +3102,12 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
         : fetchCoordinateFromGooglePlaces(_endLocCalc, destination).catch(() => null));
   const [_startCoords, _rawEndCoords] = await Promise.all([_resolveStart, _resolveEnd]);
   const _endCoords = _startLocCalc === _endLocCalc ? _startCoords : _rawEndCoords;
+  _genPerf.mark('opt: 起訖點解析');
 
   const sanitizedStops = sanitizeStopCoordinates(preMatchedStops, wizardData, poiCache);
+  _sub('補齊景點座標中…');
   const enrichedStops = await enrichMissingCoordinates(sanitizedStops, destination);
+  _genPerf.mark('opt: 缺座標補齊');
 
   // Corridor filter: try 5km first; if too few stops, expand to 10km
   let stopsForVerify = enrichedStops;
@@ -2992,14 +3127,21 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     }
   }
 
+  _sub('驗證景點真實性中…');
   const verifiedStops = await verifyAndFilterStopsWithPlaces(stopsForVerify, destination, wizardData);
+  _genPerf.mark('opt: Places 逐站驗證');
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   // 合併同一大景區內密集子景點（如三仙台觀景台／跨海步橋 → 單一「三仙台」站）
   const mergedNearby = mergeNearbySubAttractions(geographicallySorted);
   // 大景區以單站進來、合併不到鄰近站時，用 Places 附近搜尋補出子景點並標記合併（只貼標籤，不加站）
+  _sub('比對大景區子景點中…');
   const enrichedNearby = await enrichBigAttractionSubSpots(mergedNearby, destination).catch(() => mergedNearby);
+  _genPerf.mark('opt: 大景區子景點');
   // 合併後若時間縮水，沿路線補景點填回目標時段（含回終點交通、不超時）
+  _sub('檢查行程時段長度中…');
   const filledStops = await fillTripTimeBudget(enrichedNearby, wizardData, destination, _startCoords, _endCoords).catch(() => enrichedNearby);
+  _genPerf.mark('opt: 補時段(fillTripTimeBudget)');
+  _sub('整理路線順序中…');
   // 最後輸出前再重排一次，避免合併/補景點後路線南北來回跑
   const orderedStops = reorderStopsAlongRoute(filledStops, _startCoords, wizardData);
   const ruledStops = applyTripPlanningRules(orderedStops, wizardData);
@@ -3313,6 +3455,9 @@ async function doRegister() {
     showToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
     closeLogin();
   } catch(e) {
+    if (firebaseAuth.currentUser && needsEmailVerification(firebaseAuth.currentUser)) {
+      try { await firebaseAuth.signOut(); } catch (_e) {}
+    }
     showToast(authErrorMessage(e, 'register'), 'red');
   } finally {
     emailRegistrationInProgress = false;
@@ -3499,9 +3644,11 @@ async function saveUserPreferences() {
 if (typeof firebase !== 'undefined') {
   firebase.auth().onAuthStateChanged(async (user) => {
     if (user) {
-      if (needsEmailVerification(user) && !emailRegistrationInProgress) {
-        await firebase.auth().signOut();
-        showToast('請先完成電子信箱驗證後再登入。', 'orange');
+      if (needsEmailVerification(user)) {
+        if (!emailRegistrationInProgress) {
+          await firebase.auth().signOut();
+          showToast('請先完成電子信箱驗證後再登入。', 'orange');
+        }
         return;
       }
       isLoggedIn = true;
@@ -3846,7 +3993,7 @@ function renderMyTrips() {
         </div>
         <div class="mt-actions">
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
-          ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&guest=1'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
+          ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
           ${t.collab ? '' : `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>`}
           ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
@@ -5196,25 +5343,26 @@ async function _doGeneration(trip, wData) {
   if (isGeneratingTrip) return;
   isGeneratingTrip = true;
   try {
+    _genPerf.start();
     setWizGenStep(0);
     const _liveDest = wData.dest || wData.destCustom || '';
     // 本地優先：有本地景點資料就直接用，跳過 Google Maps 即時抓取
     const _localHint = buildLocalPoiHintBlock(_liveDest);
-    let livePlaces = [];
-    let livePoiHint = '';
-    if (_localHint) {
-      livePoiHint = _localHint;
-    } else {
-      const _liveCenter = getDestinationCenter(_liveDest);
-      livePlaces = await fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
-      livePoiHint = livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '';
-    }
+    // 景點與餐廳互不相依：兩個 promise 先發再各自 await（原本串行，兩段 RTT 疊加）
+    const _liveCenter = getDestinationCenter(_liveDest);
+    const _poiPromise = _localHint
+      ? Promise.resolve([])
+      : fetchGoogleMapsPoiList(_liveDest, wData.interests || [], _liveCenter).catch(() => []);
     // 餐廳一律即時抓（本地 poi-data 不含餐廳），讓 AI 有用餐站候選——不吃本地、每次都撈最新
-    const _foodPlaces = await fetchGoogleMapsFoodList(_liveDest, getDestinationCenter(_liveDest)).catch(() => []);
+    const _foodPromise = fetchGoogleMapsFoodList(_liveDest, _liveCenter).catch(() => []);
+    let livePlaces = await _poiPromise;
+    let livePoiHint = _localHint || (livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '');
+    const _foodPlaces = await _foodPromise;
     if (_foodPlaces.length) {
       livePlaces = livePlaces.concat(_foodPlaces);
       livePoiHint = [livePoiHint, buildLiveFoodHintBlock(_foodPlaces)].filter(Boolean).join('\n\n');
     }
+    _genPerf.mark('step0 景點/餐廳清單');
     setWizGenStep(1);
 
     let lastNames = [];
@@ -5227,11 +5375,14 @@ async function _doGeneration(trip, wData) {
         const names = extractNamesFromStream(fullText);
         if (names.length > lastNames.length) {
           lastNames = names;
-          setWizGenStep(1, '已識別 ' + names.length + ' 個景點，持續接收中…');
+          // 滾動顯示最新識別的景點名，讓等待「看得到進度」
+          const latest = String(names[names.length - 1] || '').slice(0, 12);
+          setWizGenStep(1, `已識別 ${names.length} 個景點${latest ? `：${latest}` : ''}…`);
         }
       }
     });
 
+    _genPerf.mark('step1 Gemini 主生成');
     setWizGenStep(2);
 
     if (finalPlan && finalPlan.stops) {
@@ -5242,6 +5393,8 @@ async function _doGeneration(trip, wData) {
       trip.aiTitle = trip.customTitle ? trip.title : (finalPlan.title || trip.title);
       trip.aiReply = finalPlan.reply || '';
     }
+    _genPerf.mark('step2 後處理');
+    _genPerf.table('行程生成');
 
     const _idx = myTrips.findIndex(t => t.id === trip.id);
     if (_idx !== -1) myTrips[_idx] = trip;
@@ -5607,8 +5760,9 @@ async function collabRevoke() {
 }
 function collabOpenInEditor() {
   if (!collabState) return;
-  const guest = WAI_COLLAB.canEdit(collabMyRole()) ? '' : '&guest=1';
-  window.location = 'ai-travel-planner-v8.html?sharedId=' + encodeURIComponent(collabState.tripId) + guest;
+  // 登入成員（含 viewer）一律直接開啟：planner 依 members 角色自動套唯讀。
+  // 不可帶 guest=1——訪客路徑已改走後端 shareToken 核對，登入成員沒有 token 會被誤判成「分享連結無效」。
+  window.location = 'ai-travel-planner-v8.html?sharedId=' + encodeURIComponent(collabState.tripId);
 }
 // 共用：彙整當下成員偏好 → 直接生成團體行程（「精靈建立完」與「面板再生成」共用）
 async function runCollabGeneration(tripId) {

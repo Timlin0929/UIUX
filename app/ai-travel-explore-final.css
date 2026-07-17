@@ -574,7 +574,7 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .cs-secondary:hover{border-color:var(--accent);color:var(--accent);}
 
 /* ─── TOAST ─── */
-.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:10px 20px;border-radius:30px;font-size:17px;opacity:0;transition:all .3s;z-index:999;pointer-events:none;white-space:nowrap;}
+.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:10px 20px;border-radius:30px;font-size:17px;opacity:0;transition:all .3s;z-index:999;pointer-events:none;max-width:min(90vw,560px);white-space:normal;text-align:center;text-wrap:pretty;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 .toast.green{background:var(--accent);}
 .toast.orange{background:var(--accent2);}

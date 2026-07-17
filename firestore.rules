@@ -1,23 +1,43 @@
 rules_version = '2';
 
-// WanderAI / TravelLink AI — Firestore 安全規則（雙端合併版：網頁 + Android）
-// 兩端共用同一個 Firebase 專案與同一份規則；修改後務必兩端對齊，只從這份部署。
+// WanderAI / TravelLink AI — Firestore 安全規則
+// ★ 2026-07-15 App 相容版（討論稿）：以泓廷 v3（join_proofs 版）為基底，
+//   最小幅放寬至「現行 Android App 全功能可用」。所有相對 v3 的改動都以「★App」標記。
 //
-// 2026-07-13 合併修正：
-// 1. 邀請文件 id 以去除連字號後的邀請碼查找。
-// 2. 加入成員時只允許新增登入者自己的 email；editorEmails 最多只能移除自己。
-// 3. 保留 Android joinPin 加入流程與快取集合寫入權限。
-// 4. editor 可安全取得／釋放重新規劃鎖，避免多人同時重排行程。
-// 5. 回饋更新不可竄改原作者 email；poi_cache 僅允許登入者讀取。
-// 6. 相容舊行程的 members.role editor，同時限制加入者只能建立自己的 viewer 成員資料。
+// 相對 v3 的改動總覽（共 9 類）：
+//   1. ★App email_verified 不再硬性要求（假信箱測試帳號無法驗證，會連建立行程都被拒）。
+//      函式保留，僅 web 想要的路徑可自行加回。長期解法＝全面改用 Google 登入後再開啟。
+//   2. ★App micro_trips read 增加三個放行條件：userEmail==本人（歷史查詢）、
+//      有 inviteCode／joinPin 的「可分享行程」對登入者可讀（邀請碼查詢、deep link 預覽）。
+//      —— 若泓廷堅持 join_proof 嚴格讀取，App 需改接 CF，這條可收回。
+//   3. ★App 加入分支：join_proof 之外，恢復 inviteCodeActive（invites 正規化碼查找）與
+//      joinPinValid（舊 PIN 過渡期）兩個替代條件；白名單補 memberUids（App 退出流程會動到）。
+//   4. ★App editor 白名單補 App 欄位：aiTitle/aiReply/appDays/transportMode/imageUrl/editingLocks。
+//   5. ★App 新增兩個「成員自己」分支：更新自己的 members.{key}.prefs（填偏好）、
+//      回饋後回寫 overallRating/feedbackSubmittedAt。
+//   6. ★App presence 同時接受兩種 schema（web: email/status/updatedAt；App: displayName/emoji/lastSeen），
+//      並取消 updatedAt==request.time 的硬性要求（App 用客戶端時間戳）。
+//   7. ★App invites：create 的 createdAt 放寬為 is timestamp（App 用 Timestamp.now()）；
+//      擁有者判定補 ownerUid（舊行程沒有 ownerEmail，補發邀請碼才不會死）。
+//   8. ★App hours_cache / scenic_points 恢復登入者可寫（營業時間快取、景點評分聚合）。
+//      —— 若要鎖 admin-only，App 需先把這兩條寫入移除或搬進 CF。
+//   9. ★App feedback（頂層）接受 App schema（isValidAppFeedback），read 放寬為登入者可讀
+//  10. ★App W3（2026-07-16）：micro_trips update 新增「全體成員可更新 tripProgress」分支
+//      （行程進行中打卡/跳過/完成，viewer 也要能打卡；只放行 tripProgress 單一欄位）。
+//      （App 以 itineraryDocId 查個人化提示）。若在意 web 回饋的 email 曝光，
+//      可改為 App 另開 app_feedback 集合（需 App 改動）。
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 會被多個頂層集合共用的函式必須宣告在 database scope；放在
-    // micro_trips 內時，feedback / travel_sessions 無法呼叫，部署會失敗。
+    // 共用函式一律放 database scope（micro_trips 內宣告的話 feedback / travel_sessions 用不到）
     function signedIn() {
       return request.auth != null;
     }
 
+    function hasEmail() {
+      return signedIn() && 'email' in request.auth.token;
+    }
+
+    // 保留備用：全面改用 Google 登入（天生 verified）後，可把 hasEmail() 的使用處換回這個
     function isEmailVerified() {
       return signedIn()
         && request.auth.token.get('email_verified', false) == true;
@@ -28,13 +48,22 @@ service cloud.firestore {
     }
 
     function isTripMemberOrOwner(tripId) {
-      return signedIn() && 'email' in request.auth.token && isEmailVerified() && (
-        request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('memberEmails', [])
-        || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerEmail', null)
-        || request.auth.uid == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerUid', null)
+      // ★Web 修正（2026-07-16）：先 exists() 再 get()——對不存在的行程 get().data 會直接
+      // 讓整條規則求值錯誤（travel_sessions 事件、presence/member_prefs/feedback 子集合都會炸），
+      // 加上 exists 讓「行程不存在」穩定地評為 false（拒絕）而非 error。
+      return signedIn()
+        && exists(/databases/$(database)/documents/micro_trips/$(tripId))
+        && (
+        request.auth.uid == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerUid', null)
+        || (hasEmail() && (
+          request.auth.token.email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('memberEmails', [])
+          || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerEmail', null)
+          || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('userEmail', null)
+        ))
       );
     }
 
+    // 網頁端回饋 schema（v3 原樣保留）
     function isValidFeedback(data) {
       return data.keys().hasOnly(['email', 'name', 'tripRating', 'aiAccuracy', 'comment', 'visitedCount', 'totalStops', 'submittedAt', 'appPlatform', 'stopRatings'])
         && data.email is string
@@ -49,6 +78,17 @@ service cloud.firestore {
         && (!('stopRatings' in data) || (data.stopRatings is map && data.stopRatings.keys().size() <= 50));
     }
 
+    // ★App Android 端回饋 schema（FeedbackViewModel.submitFeedback）
+    function isValidAppFeedback(data) {
+      return data.keys().hasOnly(['itineraryDocId', 'itineraryTitle', 'region', 'overallRating',
+          'wantToVisitAgainStops', 'dontWantToVisitAgainStops', 'highlight', 'stopFeedbacks',
+          'aiScheduleAccurate', 'aiTransitAccurate', 'aiHoursAccurate', 'suggestions', 'submittedAt'])
+        && data.itineraryDocId is string && data.itineraryDocId.size() <= 150
+        && data.itineraryTitle is string && data.itineraryTitle.size() <= 200
+        && data.overallRating is int && data.overallRating >= 0 && data.overallRating <= 5
+        && data.submittedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
@@ -60,18 +100,34 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/micro_trips/$(tripId)/join_proofs/$(request.auth.uid)).data.get('expiresAt', request.time) > request.time;
       }
 
+      // ★App 邀請碼有效性：invites 文件 id 為正規化碼（去連字號），App/網頁註冊時兩種 id 都會寫
+      function inviteCodeActive(data) {
+        return data.get('inviteCode', '') != ''
+          && exists(/databases/$(database)/documents/invites/$(data.inviteCode.replace('-', '')))
+          && get(/databases/$(database)/documents/invites/$(data.inviteCode.replace('-', ''))).data.get('active', false) == true;
+      }
+
+      // ★App 舊 6 位 PIN 過渡期相容（2026-07-14 後 App 已不再發新 PIN，48h 後自然失效，屆時可移除）
+      function joinPinValid(data) {
+        return data.get('joinPin', '') != ''
+          && data.get('pinExpiresAt', null) is timestamp
+          && data.pinExpiresAt > request.time;
+      }
+
       function isOwner(data) {
         return signedIn() && (
           request.auth.uid == data.get('ownerUid', null)
-          || ('email' in request.auth.token && isEmailVerified() && request.auth.token.email == data.get('ownerEmail', null) && data.get('ownerEmail', null) != null)
+          // ★App 移除 isEmailVerified 要求（其餘與 v3 相同）
+          || (hasEmail() && request.auth.token.email == data.get('ownerEmail', null) && data.get('ownerEmail', null) != null)
+          // ★Web 修正（2026-07-16）：一般個人行程（網頁生成、App 歷史）只有 userEmail、無
+          // ownerUid/ownerEmail——read/delete 都認 userEmail，update 卻不認，導致個人行程的
+          // 存檔/改名/狀態變更全部 permission-denied。userEmail 於 create 時已驗證必須==本人。
+          || (hasEmail() && request.auth.token.email == data.get('userEmail', null) && data.get('userEmail', null) != null)
         );
       }
 
       function hasLegacyEditorRole(data) {
-        return signedIn()
-          && 'email' in request.auth.token
-          && isEmailVerified()
-          && request.auth.token.email is string
+        return hasEmail()
           && ('members' in data)
           && data.members is map
           && memberKey(request.auth.token.email) in data.members
@@ -81,11 +137,9 @@ service cloud.firestore {
 
       function isEditor(data) {
         return isOwner(data)
-          || (signedIn()
+          || (hasEmail()
             && ('editorEmails' in data)
             && data.editorEmails is list
-            && 'email' in request.auth.token
-            && isEmailVerified()
             && request.auth.token.email in data.editorEmails)
           || hasLegacyEditorRole(data);
       }
@@ -95,8 +149,7 @@ service cloud.firestore {
           && (
             (request.resource.data.get('regenLock', null) is map
               && request.resource.data.get('regenLock', {}).keys().hasOnly(['by', 'byName', 'at'])
-              && 'email' in request.auth.token
-              && isEmailVerified()
+              && hasEmail()
               && request.resource.data.get('regenLock', {}).by == request.auth.token.email
               && request.resource.data.get('regenLock', {}).at == request.time
               && (!('regenLock' in resource.data)
@@ -104,8 +157,7 @@ service cloud.firestore {
                 || resource.data.regenLock.at < request.time - duration.value(5, 'm')))
             || (!('regenLock' in request.resource.data)
               && ('regenLock' in resource.data)
-              && 'email' in request.auth.token
-              && isEmailVerified()
+              && hasEmail()
               && resource.data.regenLock.by == request.auth.token.email)
           );
       }
@@ -129,8 +181,7 @@ service cloud.firestore {
         );
       }
 
-      // 網頁加入時只能新增自己的 members map 項目，且初始角色必須是 viewer。
-      // Android 若沒有使用 members map，允許它保持原狀，只更新 memberEmails。
+      // 加入時只能新增自己的 members map 項目，且初始角色必須是 viewer
       function membersSafeOnJoin(oldData, newData) {
         return newData.get('members', {}) == oldData.get('members', {})
           || (
@@ -150,7 +201,7 @@ service cloud.firestore {
           );
       }
 
-      // 退出行程時只能移除自己的 members map 項目。
+      // 退出時只能移除自己的 members map 項目
       function membersSafeOnLeave(oldData, newData) {
         return newData.get('members', {}) == oldData.get('members', {})
           || (
@@ -167,10 +218,27 @@ service cloud.firestore {
           );
       }
 
+      // ★App 成員更新「自己的」members map 項目（GroupSetupScreen 填偏好：
+      // members.{自己key}.prefs / ready / interests / pace / budget），
+      // 不得動到別人的項目，也不得改自己的 role（防自我升權）
+      function membersSelfUpdateOnly(oldData, newData) {
+        return oldData.get('members', {}) is map
+          && newData.get('members', {}) is map
+          && newData.get('members', {}).diff(oldData.get('members', {}))
+            .addedKeys().hasOnly([])
+          && newData.get('members', {}).diff(oldData.get('members', {}))
+            .removedKeys().hasOnly([])
+          && newData.get('members', {}).diff(oldData.get('members', {}))
+            .changedKeys().hasOnly([memberKey(request.auth.token.email)])
+          && newData.members[memberKey(request.auth.token.email)] is map
+          && newData.members[memberKey(request.auth.token.email)].get('email', '') == request.auth.token.email
+          && newData.members[memberKey(request.auth.token.email)].get('role', '')
+             == oldData.members[memberKey(request.auth.token.email)].get('role', '');
+      }
+
       allow create: if signedIn()
         && (!('ownerUid' in request.resource.data) || request.resource.data.ownerUid == request.auth.uid)
-        && ('email' in request.auth.token)
-        && isEmailVerified()
+        && hasEmail()   // ★App 移除 isEmailVerified（v3 在此會擋掉所有未驗證信箱的帳號）
         && (!('ownerEmail' in request.resource.data) || request.resource.data.ownerEmail == request.auth.token.email)
         && (!('userEmail' in request.resource.data) || request.resource.data.userEmail == request.auth.token.email)
         && (!('memberEmails' in request.resource.data)
@@ -178,27 +246,55 @@ service cloud.firestore {
           || request.resource.data.memberEmails.toSet().hasOnly([request.auth.token.email]))
         && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([]);
 
-      allow read: if signedIn() && 'email' in request.auth.token && (
+      // ★App read 較 v3 增加三個條件（v3 只有 owner/member/join_proof）：
+      //   userEmail==本人   → App 歷史頁的 userEmail 查詢
+      //   inviteCode != ''  → 邀請碼加入前的行程查詢（whereEqualTo inviteCode）、deep link / QR 預覽
+      //   joinPin != ''     → 舊 PIN 過渡期的查詢（48h 後自然絕跡，可隨 joinPinValid 一併移除）
+      // 語意＝「有分享碼的行程，任何登入者可讀」。若要收緊成 join_proof 嚴格制，App 需改接 CF。
+      allow read: if signedIn() && (
         request.auth.uid == resource.data.get('ownerUid', null)
-        || request.auth.token.email in resource.data.get('memberEmails', [])
+        || (hasEmail() && request.auth.token.email in resource.data.get('memberEmails', []))
+        || (hasEmail() && request.auth.token.email == resource.data.get('userEmail', null))
         || userHasJoinProof(tripId)
+        || resource.data.get('inviteCode', '') != ''
+        || resource.data.get('joinPin', '') != ''
       );
 
       allow update: if (isOwner(resource.data)
         && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([]))
+        // 編輯者：白名單制。★App 補 aiTitle/aiReply/appDays/transportMode/imageUrl/editingLocks
+        //（App 的共編重新生成、插圖上傳、編輯鎖都會動到）
         || (isEditor(resource.data)
           && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([])
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people', 'wizardData',
             'stops', 'status', 'currentStopIndex', 'startedAt', 'updatedAt',
-            'lastEditedBy', 'lastEditedByName', 'titleVersion'
+            'lastEditedBy', 'lastEditedByName', 'titleVersion',
+            'aiTitle', 'aiReply', 'appDays', 'transportMode', 'imageUrl', 'editingLocks'
           ]))
         || (isEditor(resource.data) && validRegenLockChange())
-        // 4. 容許新成員加入行程
+        // ★App 成員更新自己的偏好（members.{自己}.prefs 等）
+        || (hasEmail()
+          && request.auth.token.email in resource.data.get('memberEmails', [])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'updatedAt'])
+          && membersSelfUpdateOnly(resource.data, request.resource.data))
+        // ★App 成員送出回饋後回寫評分摘要
         || (signedIn()
-          && 'email' in request.auth.token
-          && isEmailVerified()
-          && userHasJoinProof(tripId)
+          && (request.auth.uid == resource.data.get('ownerUid', null)
+            || (hasEmail() && request.auth.token.email in resource.data.get('memberEmails', [])))
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['overallRating', 'feedbackSubmittedAt']))
+        // ★App W3 行程進行中：全體成員（含 viewer）可更新打卡/跳過/完成進度。
+        // tripProgress 是獨立巢狀 map（status/startedAt/completedAt/checkIns/skips），
+        // 打卡本來就該全員可做，且此分支只允許動 tripProgress 一個欄位，無升權疑慮
+        || (signedIn()
+          && (request.auth.uid == resource.data.get('ownerUid', null)
+            || (hasEmail() && request.auth.token.email in resource.data.get('memberEmails', [])))
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['tripProgress'])
+          && request.resource.data.get('tripProgress', {}) is map)
+        // 新成員加入：★App join_proof（CF 制）之外恢復 inviteCodeActive / joinPinValid 兩個客戶端路徑；
+        // 白名單補 memberUids（App 舊格式輔助欄位，退出流程會 arrayRemove）
+        || (hasEmail()
+          && (userHasJoinProof(tripId) || inviteCodeActive(resource.data) || joinPinValid(resource.data))
           && request.resource.data.get('memberEmails', []).size() == resource.data.get('memberEmails', []).size() + 1
           && request.resource.data.get('memberEmails', []).size() <= resource.data.get('maxMembers', 10)
           && request.resource.data.memberEmails.hasAll(resource.data.get('memberEmails', []))
@@ -210,11 +306,9 @@ service cloud.firestore {
           && editorEmailsSafeOnJoin(resource.data, request.resource.data)
           && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([])
           && request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['memberEmails', 'members', 'editorEmails']))
-        // 5. 容許成員自己退出行程
-        || (signedIn()
-          && 'email' in request.auth.token
-          && isEmailVerified()
+            .hasOnly(['memberEmails', 'members', 'editorEmails', 'memberUids']))
+        // 成員自己退出（★App 白名單同樣補 memberUids）
+        || (hasEmail()
           && request.resource.data.get('memberEmails', []).size() == resource.data.get('memberEmails', []).size() - 1
           && resource.data.get('memberEmails', []).hasAll(request.resource.data.memberEmails)
           && request.auth.token.email in resource.data.get('memberEmails', [])
@@ -226,12 +320,12 @@ service cloud.firestore {
           && editorEmailsSafeOnJoin(resource.data, request.resource.data)
           && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([])
           && request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['memberEmails', 'members', 'editorEmails']));
+            .hasOnly(['memberEmails', 'members', 'editorEmails', 'memberUids']));
 
       allow delete: if signedIn() && (
         request.auth.uid == resource.data.get('ownerUid', null)
-        || ('email' in request.auth.token && isEmailVerified() && request.auth.token.email == resource.data.get('userEmail', null))
-        || ('email' in request.auth.token && isEmailVerified() && request.auth.token.email == resource.data.get('ownerEmail', null))
+        || (hasEmail() && request.auth.token.email == resource.data.get('userEmail', null))
+        || (hasEmail() && request.auth.token.email == resource.data.get('ownerEmail', null))
       );
 
       match /join_proofs/{uid} {
@@ -239,16 +333,18 @@ service cloud.firestore {
         allow write: if false; // 僅限 CF / Admin SDK 寫入
       }
 
+      // ★App presence 同時容納兩種 schema：
+      //   web:  doc id = emailKey，欄位 email/status/updatedAt
+      //   App:  doc id = uid，欄位 displayName/emoji/lastSeen（30 秒心跳，客戶端時間戳）
       match /presence/{memberId} {
         allow read: if isTripMemberOrOwner(tripId);
         allow create, update: if isTripMemberOrOwner(tripId)
-          && (memberId == memberKey(request.auth.token.email) || memberId == request.auth.uid)
-          && request.resource.data.keys().hasOnly(['email', 'status', 'updatedAt'])
-          && request.resource.data.email == request.auth.token.email
-          && request.resource.data.updatedAt == request.time;
+          && (memberId == request.auth.uid
+            || (hasEmail() && memberId == memberKey(request.auth.token.email)))
+          && request.resource.data.keys().hasOnly(['email', 'status', 'updatedAt', 'displayName', 'emoji', 'lastSeen']);
         allow delete: if signedIn()
-          && 'email' in request.auth.token
-          && (memberId == memberKey(request.auth.token.email) || memberId == request.auth.uid);
+          && (memberId == request.auth.uid
+            || (hasEmail() && memberId == memberKey(request.auth.token.email)));
       }
 
       match /member_prefs/{memberId} {
@@ -258,16 +354,12 @@ service cloud.firestore {
         allow update: if isTripMemberOrOwner(tripId)
           && resource.data.email == request.auth.token.email
           && request.resource.data.email == request.auth.token.email;
-        allow delete: if signedIn()
-          && 'email' in request.auth.token
-          && isEmailVerified()
+        allow delete: if hasEmail()
           && resource.data.email == request.auth.token.email;
       }
 
       match /feedback/{feedbackId} {
-        allow read: if request.auth != null
-          && 'email' in request.auth.token
-          && isEmailVerified()
+        allow read: if hasEmail()
           && (
             request.auth.token.email == resource.data.email
             || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerEmail', null)
@@ -276,57 +368,51 @@ service cloud.firestore {
         allow create: if isTripMemberOrOwner(tripId)
           && request.resource.data.email == request.auth.token.email
           && isValidFeedback(request.resource.data);
-        allow update: if request.auth != null
-          && 'email' in request.auth.token
-          && isEmailVerified()
+        allow update: if hasEmail()
           && resource.data.email == request.auth.token.email
           && request.resource.data.email == request.auth.token.email
           && isValidFeedback(request.resource.data);
-        allow delete: if request.auth != null
-          && 'email' in request.auth.token
-          && isEmailVerified()
+        allow delete: if hasEmail()
           && resource.data.email == request.auth.token.email;
       }
     }
 
-    // 快取改為僅 Admin SDK 可寫，用戶端唯讀。
+    // ★App 恢復登入者可寫（v3 鎖 admin-only）：
+    //   scenic_points＝App 回饋後的景點評分聚合（transaction: ratingSum/ratingCount/ratedTripIds）
+    //   hours_cache ＝App 營業時間 7 天快取（省 Place Details API）
+    // 若要鎖回 admin-only，App 需先移除這兩條寫入（評分改走 CF、hours 快取改純本地）。
     match /scenic_points/{docId} {
-      allow read: if request.auth != null;
-      allow write: if false;
+      allow read, write: if request.auth != null;
     }
 
     match /hours_cache/{docId} {
-      allow read: if request.auth != null;
-      allow write: if false;
+      allow read, write: if request.auth != null;
     }
 
     match /poi_cache/{docId} {
       allow read: if request.auth != null;
     }
 
+    // 頂層 feedback：web 與 App 兩種 schema 並存
+    // ★App read 放寬為登入者可讀——App 以 whereEqualTo(itineraryDocId) 查個人化提示，
+    //   無法用 email 過濾證明。若在意 web 回饋 email 曝光，改法＝App 另開 app_feedback 集合。
     match /feedback/{docId} {
-      allow read: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
-        && resource.data.email == request.auth.token.email;
+      allow read: if request.auth != null;
       allow create: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
-        && request.resource.data.email == request.auth.token.email
-        && isValidFeedback(request.resource.data);
-      allow update: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
+        && (
+          isValidAppFeedback(request.resource.data)   // ★App schema（無 email 欄位）
+          || (hasEmail()
+            && request.resource.data.email == request.auth.token.email
+            && isValidFeedback(request.resource.data))
+        );
+      allow update: if hasEmail()
         && resource.data.email == request.auth.token.email
         && request.resource.data.email == request.auth.token.email
         && isValidFeedback(request.resource.data);
-      allow delete: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
+      allow delete: if hasEmail()
         && resource.data.email == request.auth.token.email;
     }
 
-    // Android 唯讀
     match /poi_knowledge/{docId} {
       allow read: if request.auth != null;
     }
@@ -338,18 +424,24 @@ service cloud.firestore {
     match /invites/{code} {
       allow get: if request.auth != null;
       allow list: if false;
-      allow create: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
+      // ★App 相對 v3 的兩處放寬：
+      //   1. 擁有者判定補 ownerUid（舊行程沒有 ownerEmail，owner 補發邀請碼時 invites 註冊才不會死）
+      //   2. createdAt 放寬為 is timestamp（App 用 Timestamp.now()；若要求 ==request.time，
+      //      App 需改用 FieldValue.serverTimestamp()，可列入 App 下一波修改後收緊）
+      allow create: if hasEmail()
         && request.resource.data.keys().hasOnly(['tripId', 'active', 'createdBy', 'createdAt'])
         && exists(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId))
-        && get(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId)).data.get('ownerEmail', null) == request.auth.token.email
+        && (
+          get(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId)).data.get('ownerEmail', null) == request.auth.token.email
+          || get(/databases/$(database)/documents/micro_trips/$(request.resource.data.tripId)).data.get('ownerUid', null) == request.auth.uid
+        )
         && request.resource.data.createdBy == request.auth.token.email
-        && request.resource.data.createdAt == request.time;
-      allow update: if request.auth != null
-        && 'email' in request.auth.token
-        && isEmailVerified()
-        && get(/databases/$(database)/documents/micro_trips/$(resource.data.tripId)).data.get('ownerEmail', null) == request.auth.token.email
+        && request.resource.data.createdAt is timestamp;
+      allow update: if hasEmail()
+        && (
+          get(/databases/$(database)/documents/micro_trips/$(resource.data.tripId)).data.get('ownerEmail', null) == request.auth.token.email
+          || get(/databases/$(database)/documents/micro_trips/$(resource.data.tripId)).data.get('ownerUid', null) == request.auth.uid
+        )
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active']);
       allow delete: if false;
     }
@@ -379,8 +471,7 @@ service cloud.firestore {
     }
 
     match /public_trips/{shareId} {
-      // 公開分享改由後端依 tripId + shareToken 即時讀取並去敏，避免公開集合
-      // 被列舉，也不會因行程更新後忘記同步副本而顯示舊資料。
+      // 公開分享改由後端依 tripId + shareToken 即時讀取並去敏
       allow read, write: if false;
     }
   }

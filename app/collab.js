@@ -29,8 +29,18 @@ window.WAI_COLLAB = (function () {
 
   // ── 產碼 / 正規化 ──
   function randFrom(alphabet, n) {
+    if (!window.crypto || !window.crypto.getRandomValues) {
+      throw new Error('目前瀏覽器不支援安全亂數，無法建立邀請連結。');
+    }
     var s = '';
-    for (var i = 0; i < n; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+    var limit = 256 - (256 % alphabet.length);
+    while (s.length < n) {
+      var bytes = new Uint8Array(Math.max(8, (n - s.length) * 2));
+      window.crypto.getRandomValues(bytes);
+      for (var i = 0; i < bytes.length && s.length < n; i++) {
+        if (bytes[i] < limit) s += alphabet[bytes[i] % alphabet.length];
+      }
+    }
     return s;
   }
   function generateInviteCode() {
