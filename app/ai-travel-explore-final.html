@@ -17,6 +17,7 @@
 <script src="cost-config.js"></script>
 <script src="avoid-tags.js"></script>
 <script src="collab.js?v=20260714-collab-fix"></script>
+<script src="friends.js?v=20260716-w4-friends"></script>
 <script src="wheel-picker.js"></script>
 <link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260714-collab-fix">
 </head>
@@ -29,7 +30,7 @@
 <div class="overlay" id="previewOverlay" onclick="if(event.target===this)closePreview()">
   <div class="preview-modal" id="previewModal">
     <div class="pm-header" id="pmHeader">
-      <button class="pm-close" onclick="closePreview()">✕</button>
+      <button class="pm-close" onclick="closePreview()" aria-label="關閉行程預覽">✕</button>
       <div class="pm-title" id="pmTitle"></div>
       <div class="pm-tags" id="pmTags"></div>
       <div class="pm-stats" id="pmStats"></div>
@@ -44,7 +45,7 @@
     </div>
     <div class="pm-body" id="pmBody"></div>
     <div class="pm-footer">
-      <button class="pm-like-btn" id="pmLikeBtn" onclick="togglePreviewLike()">
+      <button class="pm-like-btn" id="pmLikeBtn" onclick="togglePreviewLike()" aria-label="喜歡這個行程">
         <span id="pmLikeIcon">🤍</span><span id="pmLikeCount">0</span>
       </button>
       <button class="pm-copy-btn" id="pmCopyBtn" onclick="copyTrip()">📋 複製這份行程</button>
@@ -55,7 +56,7 @@
 <!-- ─── OVERLAY: LOGIN ─── -->
 <div class="overlay" id="loginOverlay" onclick="if(event.target===this)closeLogin()" style="z-index:300">
   <div class="login-modal" style="position:relative">
-    <button class="lm-close" onclick="closeLogin()">✕</button>
+    <button class="lm-close" onclick="closeLogin()" aria-label="關閉登入視窗">✕</button>
     <div class="lm-title">歡迎回來 🗺</div>
     <div class="lm-sub">登入後可以儲存行程、複製他人規劃</div>
     <div class="lm-tabs">
@@ -82,7 +83,7 @@
 <!-- ─── OVERLAY: PREF WIZARD ─── -->
 <div class="overlay" id="prefWizardOverlay" onclick="if(event.target===this)closePrefWizard()" style="z-index:300">
   <div class="login-modal" style="position:relative;max-width:500px">
-    <button class="lm-close" onclick="closePrefWizard()">✕</button>
+    <button class="lm-close" onclick="closePrefWizard()" aria-label="關閉喜好設定">✕</button>
     <div class="lm-title">設定個人喜好 ✨</div>
     <div class="lm-sub">這些長期偏好會成為每趟行程的預設值與 AI 規劃的參考；飲食禁忌則會套用到所有行程。建立行程時仍可為單趟自由調整。</div>
     <div class="wizard-field" style="margin-top:20px;text-align:left">
@@ -184,7 +185,7 @@
 <!-- ─── OVERLAY: INVITE CODE ─── -->
 <div class="overlay" id="inviteOverlay" onclick="if(event.target===this)closeInvite()" style="z-index:300">
   <div class="login-modal" style="position:relative">
-    <button class="lm-close" onclick="closeInvite()">✕</button>
+    <button class="lm-close" onclick="closeInvite()" aria-label="關閉邀請碼輸入">✕</button>
     <div class="lm-title">加入共編行程 🔑</div>
     <div class="lm-sub">請輸入朋友分享的 8 碼邀請碼</div>
     <div class="lm-field">
@@ -197,7 +198,7 @@
 <!-- ─── OVERLAY: CHANGE PASSWORD ─── -->
 <div class="overlay" id="changePwdOverlay" onclick="if(event.target===this)closeChangePwd()" style="z-index:300">
   <div class="login-modal" style="position:relative">
-    <button class="lm-close" onclick="closeChangePwd()">✕</button>
+    <button class="lm-close" onclick="closeChangePwd()" aria-label="關閉修改密碼">✕</button>
     <div class="lm-title">修改密碼 🔒</div>
     <div class="lm-sub">為了安全，請先輸入目前的密碼</div>
     <div class="lm-field"><label>目前密碼</label><input type="password" id="cpwCurrent" placeholder="目前的密碼"></div>
@@ -210,7 +211,7 @@
 <!-- ─── OVERLAY: TRIP MODE CHOICE ─── -->
 <div class="overlay" id="modeChoiceOverlay" onclick="if(event.target===this)closeModeChoice()" style="z-index:300">
   <div class="login-modal" style="position:relative;max-width:480px;text-align:center;">
-    <button class="lm-close" onclick="closeModeChoice()">✕</button>
+    <button class="lm-close" onclick="closeModeChoice()" aria-label="關閉模式選擇">✕</button>
     <div class="lm-title">建立微旅行</div>
     <div class="lm-sub">選擇你的製作方式</div>
     <div class="mode-choice-cards">
@@ -221,7 +222,7 @@
       </button>
       <button class="mode-choice-card" onclick="selectTripMode('collab')">
         <div class="mode-choice-icon">👥</div>
-        <div class="mode-choice-name">多人共作</div>
+        <div class="mode-choice-name">共編行程</div>
         <div class="mode-choice-desc">邀請朋友一起規劃行程</div>
       </button>
     </div>
@@ -231,7 +232,7 @@
 <!-- ─── OVERLAY: COLLAB INVITE CODE DISPLAY ─── -->
 <div class="overlay" id="collabCodeOverlay" onclick="if(event.target===this)closeCollabCode()" style="z-index:350">
   <div class="login-modal" style="position:relative;max-width:380px;text-align:center;">
-    <button class="lm-close" onclick="closeCollabCode()">✕</button>
+    <button class="lm-close" onclick="closeCollabCode()" aria-label="關閉邀請碼顯示">✕</button>
     <div class="lm-title">🎉 行程已建立！</div>
     <div class="lm-sub">分享以下邀請碼，讓朋友加入共作</div>
     <div class="collab-code-box" id="collabCodeDisplay">WNDR-XXXX</div>
@@ -242,8 +243,8 @@
 <!-- ─── OVERLAY: COLLAB PANEL (members + prefs + group generate) ─── -->
 <div class="overlay" id="collabPanelOverlay" style="z-index:360">
   <div class="login-modal collab-panel" style="position:relative">
-    <button class="lm-close" onclick="closeCollabPanel()">✕</button>
-    <div class="lm-title">👥 多人共作</div>
+    <button class="lm-close" onclick="closeCollabPanel()" aria-label="關閉共編面板">✕</button>
+    <div class="lm-title">👥 共編行程</div>
     <div class="lm-sub">分享邀請碼、填好各自偏好，擁有者隨時可生成團體行程</div>
     <div id="collabPanelBody"></div>
   </div>
@@ -252,16 +253,16 @@
 <!-- ─── OVERLAY: JOURNEY JOIN ─── -->
 <div class="overlay" id="journeyOverlay" onclick="if(event.target===this)closeJourneyJoin()" style="z-index:300">
   <div class="journey-modal">
-    <button class="lm-close" onclick="closeJourneyJoin()">✕</button>
+    <button class="lm-close" onclick="closeJourneyJoin()" aria-label="關閉邀請碼加入">✕</button>
     <div class="journey-kicker">📱 手機快速進入</div>
-    <div class="journey-title">輸入流程碼，直接進入旅遊</div>
+    <div class="journey-title">輸入邀請碼，加入共編行程</div>
     <div class="journey-preview">
       <div class="journey-preview-label">目前綁定的旅程</div>
       <div class="journey-preview-title" id="journeyPreviewTitle">左營站外 2 小時微旅行</div>
       <div class="journey-preview-meta" id="journeyPreviewMeta">14:00 - 15:45 · 邀請碼 WNDR-88A</div>
     </div>
     <div class="lm-field" style="margin-bottom:0;">
-      <label for="journeyCodeInput">流程碼</label>
+      <label for="journeyCodeInput">邀請碼</label>
       <input type="text" id="journeyCodeInput" placeholder="例如：WNDR-88A" style="text-transform:uppercase; letter-spacing:2px; font-family:monospace; font-size:22px; text-align:center;">
     </div>
     <div class="journey-actions">
@@ -274,7 +275,7 @@
 <div class="overlay" id="journeyItineraryOverlay" onclick="if(event.target===this)closeJourneyItineraryPreview()" style="z-index:320">
   <div class="journey-itinerary-modal">
     <div class="journey-itinerary-hero">
-      <button class="lm-close" onclick="closeJourneyItineraryPreview()">✕</button>
+      <button class="lm-close" onclick="closeJourneyItineraryPreview()" aria-label="關閉行程檢視">✕</button>
       <div class="journey-itinerary-kicker">行前預覽</div>
       <div class="journey-itinerary-title" id="journeyItineraryTitle">左營站外 2 小時微旅行</div>
       <div class="journey-itinerary-sub" id="journeyItinerarySub">先快速確認集合資訊與沿途節奏，進入旅遊前就知道這段路線會怎麼走。</div>
@@ -289,7 +290,7 @@
         <div class="journey-itinerary-stat-value" id="journeyItineraryMeeting">左營站 1 號出口</div>
       </div>
       <div class="journey-itinerary-stat">
-        <div class="journey-itinerary-stat-label">流程碼</div>
+        <div class="journey-itinerary-stat-label">邀請碼</div>
         <div class="journey-itinerary-stat-value" id="journeyItineraryCode">WNDR-88A</div>
       </div>
     </div>
@@ -317,7 +318,7 @@
     <input type="text" id="searchInput" placeholder="搜尋目的地、行程名稱…" oninput="handleSearch()">
   </div>
   <button class="topbar-new-btn" onclick="openWizard()">＋ 建立微旅行</button>
-  <button class="topbar-new-btn secondary" id="journeyJoinBtn" onclick="openJourneyJoin()" style="display:none;">📱 流程碼進入</button>
+  <button class="topbar-new-btn secondary" id="journeyJoinBtn" onclick="openJourneyJoin()" style="display:none;">📱 邀請碼快速加入</button>
   <div class="user-menu-wrap" id="userMenuWrap">
     <!-- injected by JS -->
   </div>
@@ -426,6 +427,27 @@
     <div class="my-trips-grid" id="myTripsGrid"></div>
   </div>
 </div>
+
+<!-- Week4 D1：我的好友頁（內容由 renderFriendsView 渲染） -->
+<div id="friendsView" style="display:none">
+  <div class="my-page">
+    <div class="my-page-header">
+      <div class="my-page-title">我的好友</div>
+      <div style="display:flex;gap:12px">
+        <button class="topbar-new-btn" onclick="openAddFriendModal()">➕ 加好友</button>
+      </div>
+    </div>
+    <div id="friendsPendingList"></div>
+    <div id="friendsList"></div>
+  </div>
+</div>
+
+<!-- UIUX#1：手機底部主導覽（≤700px 顯示；桌機由頂列導覽負責、此列隱藏） -->
+<nav id="mobileBottomNav" aria-label="主導覽">
+  <button class="mbn-item active" id="mbnExplore" onclick="showMainView('explore')"><span class="mbn-ico" aria-hidden="true">🧭</span>探索</button>
+  <button class="mbn-item" id="mbnMyTrips" onclick="showMainView('mytrips')"><span class="mbn-ico" aria-hidden="true">📋</span>我的微旅行</button>
+  <button class="mbn-item" onclick="location.href='ai-travel-planner-v8.html'"><span class="mbn-ico" aria-hidden="true">✈️</span>行程編輯</button>
+</nav>
 
 <script src="./ai-travel-explore-final.js?v=20260714-collab-fix"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->

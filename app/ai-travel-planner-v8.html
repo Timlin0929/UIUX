@@ -61,8 +61,11 @@
           <button class="replan-btn primary" id="replanStartTripBtn" onclick="startTripProgress()" style="display:none;">▶ 開始行程</button>
           <button class="replan-btn primary" id="replanCompleteTripBtn" onclick="window.markTripAsCompleted()" style="display:none;">🏁 結束行程</button>
           <button class="replan-btn secondary" id="replanResetTripBtn" onclick="window.resetTripProgress()" style="display:none;">↩ 重設進度</button>
-          <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
-          <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
+          <span id="heroMoreGroup">
+            <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
+            <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
+          </span>
+          <button class="replan-btn secondary" id="heroMoreBtn" onclick="toggleHeroMore()" aria-label="更多操作">⋯ 更多</button>
           <button class="replan-btn primary" id="replanApplyBtn" onclick="applyReplan()" style="display:none;">套用新規劃</button>
           <button class="replan-btn secondary" id="replanCancelBtn" onclick="cancelReplan()" style="display:none;">取消</button>
           <div class="prototype-id-chip" id="prototypeTripId">原型資料</div>
@@ -359,7 +362,7 @@
     <div class="map-info-card" id="mapInfoCard" onmousedown="event.stopPropagation()">
       <div class="mic-header">
         <div class="mic-title" id="micTitle">標點名稱</div>
-        <button class="mic-close" onclick="closePinInfo()">✕</button>
+        <button class="mic-close" onclick="closePinInfo()" aria-label="關閉景點資訊">✕</button>
       </div>
       <div class="mic-body">
         <div class="mic-desc" id="micDesc">這裡會顯示導覽說明。</div>
@@ -379,7 +382,7 @@
   <div class="ai-drawer" id="aiDrawer">
     <div class="ai-header">
       <div class="ai-title"><span>🤖</span> 隨行管家 AI</div>
-      <button class="close-btn" onclick="toggleAI()">✕</button>
+      <button class="close-btn" onclick="toggleAI()" aria-label="關閉 AI 助手">✕</button>
     </div>
     <div class="ai-chat-area" id="aiChatArea"></div>
     <div class="ai-input-area">
@@ -416,7 +419,7 @@
         <div class="travel-tools-title" id="travelToolsTitle">旅遊工具</div>
         <div class="travel-tools-subtitle" id="travelToolsSubtitle">網址匯入與行程匯出都放在這裡。</div>
       </div>
-      <button class="travel-tools-close" onclick="closeTravelTools()">✕</button>
+      <button class="travel-tools-close" onclick="closeTravelTools()" aria-label="關閉旅遊工具">✕</button>
     </div>
     <div class="travel-tools-tabs">
       <button class="travel-tools-tab active" id="travelToolsTabImport" onclick="setTravelToolTab('import')">網址匯入</button>
@@ -517,7 +520,7 @@
 
 <div id="imgLightbox" class="img-lightbox" onclick="closeImageLightbox(event)">
   <div class="img-lightbox-inner" onclick="event.stopPropagation()">
-    <button class="img-lightbox-close" onclick="closeImageLightbox()">✕</button>
+    <button class="img-lightbox-close" onclick="closeImageLightbox()" aria-label="關閉圖片預覽">✕</button>
     <img id="imgLightboxImg" src="" alt="行程圖預覽" onclick="toggleLightboxZoom(this)">
     <div class="img-lightbox-actions">
       <button class="img-lightbox-btn" onclick="downloadFromLightbox()">↓ 下載</button>
@@ -531,6 +534,18 @@
     <div class="stay-modal-sub" id="stayModalSub"></div>
     <div class="stay-modal-grid" id="stayModalGrid"></div>
     <button class="stay-modal-cancel" onclick="closeStayModal()">取消</button>
+  </div>
+</div>
+<!-- Week4 C6：旅遊紀錄「景點備註」輸入（個人資料，存 visitedSpots.note） -->
+<div id="noteModal" style="display:none" onclick="if(event.target===this)closeNoteModal()">
+  <div class="stay-modal-box">
+    <div class="stay-modal-title">📝 景點備註</div>
+    <div class="stay-modal-sub" id="noteModalSub"></div>
+    <textarea id="noteModalText" class="note-modal-textarea" maxlength="500" rows="5" placeholder="寫下這個景點的回憶或心得…（最多 500 字，只有你看得到）"></textarea>
+    <div class="note-modal-actions">
+      <button class="stay-modal-cancel" onclick="closeNoteModal()">取消</button>
+      <button class="note-modal-save" onclick="saveVisitedNote()">儲存</button>
+    </div>
   </div>
 </div>
 <div id="replanGenOverlay" style="display:none">
@@ -555,7 +570,7 @@
 <!-- ─── OVERLAY: LOGIN ─── -->
 <div class="overlay" id="loginOverlay" onclick="if(event.target===this)closeLogin()" style="z-index:300">
   <div class="login-modal" style="position:relative">
-    <button class="lm-close" onclick="closeLogin()">✕</button>
+    <button class="lm-close" onclick="closeLogin()" aria-label="關閉登入視窗">✕</button>
     <div class="lm-title">歡迎回來 🗺</div>
     <div class="lm-sub">登入後可以儲存行程、複製他人規劃</div>
     <div class="lm-tabs">
@@ -582,7 +597,7 @@
 <!-- ─── OVERLAY: CHANGE PASSWORD ─── -->
 <div class="overlay" id="changePwdOverlay" onclick="if(event.target===this)closeChangePwd()" style="z-index:300">
   <div class="login-modal" style="position:relative">
-    <button class="lm-close" onclick="closeChangePwd()">✕</button>
+    <button class="lm-close" onclick="closeChangePwd()" aria-label="關閉修改密碼">✕</button>
     <div class="lm-title">修改密碼 🔒</div>
     <div class="lm-sub">請輸入您目前的密碼與新密碼。</div>
     <div class="lm-field"><label>目前密碼</label><input type="password" id="cpwCurrent" placeholder="••••••••"></div>

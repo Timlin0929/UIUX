@@ -180,7 +180,7 @@ window.WAI_COLLAB = (function () {
   // ════════════════════════════════════════════════════
   function db() {
     if (typeof firebaseDb === 'undefined' || !firebaseDb) {
-      throw new Error('Firebase 尚未初始化，無法使用多人協作功能。');
+      throw new Error('Firebase 尚未初始化，無法使用共編功能。');
     }
     return firebaseDb;
   }
@@ -193,7 +193,7 @@ window.WAI_COLLAB = (function () {
     var response = await fetch('/api/collab/' + path, Object.assign({}, options || {}, { headers: headers }));
     var body = {};
     try { body = await response.json(); } catch (_e) {}
-    if (!response.ok) throw new Error(body.message || '多人協作服務暫時無法使用。');
+    if (!response.ok) throw new Error(body.message || '共編服務暫時無法使用。');
     return body;
   }
 

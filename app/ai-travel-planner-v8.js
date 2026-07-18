@@ -3413,6 +3413,55 @@
     feedbackToast('照片已刪除', 'blue');
   }
 
+  // ── Week4 C6：景點文字備註（個人資料：visitedSpots.note，走既有整包鏡像同步）──
+  let noteModalTargetName = null;
+
+  function openVisitedNoteModal(name) {
+    const norm = (name || '').replace(/\s/g, '').toLowerCase();
+    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    if (!rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
+    noteModalTargetName = name;
+    const sub = document.getElementById('noteModalSub');
+    const textarea = document.getElementById('noteModalText');
+    if (sub) sub.textContent = rec.name; // textContent 塞名稱、textarea 用 .value——都不進 innerHTML，無 XSS 面
+    if (textarea) textarea.value = rec.note || '';
+    const modal = document.getElementById('noteModal');
+    if (modal) modal.style.display = 'flex';
+    if (textarea) setTimeout(() => textarea.focus(), 0);
+  }
+
+  function closeNoteModal() {
+    const modal = document.getElementById('noteModal');
+    if (modal) modal.style.display = 'none';
+    noteModalTargetName = null;
+  }
+
+  function saveVisitedNote() {
+    if (!noteModalTargetName) return closeNoteModal();
+    const textarea = document.getElementById('noteModalText');
+    const val = textarea ? String(textarea.value).trim().slice(0, 500) : '';
+    const ok = updateVisitedPlaceByName(noteModalTargetName, (p) => { p.note = val; });
+    closeNoteModal();
+    if (!ok) return feedbackToast('備註儲存失敗：找不到造訪紀錄', 'orange');
+    renderTravelLog();
+    feedbackToast(val ? '📝 備註已儲存' : '備註已清除', 'green');
+  }
+
+  // UIUX#6：手機版把「網址匯入／匯出行程圖」收進「⋯ 更多」浮出選單（桌機兩鈕直出、更多鈕隱藏）
+  function toggleHeroMore() {
+    const g = document.getElementById('heroMoreGroup');
+    if (g) g.classList.toggle('open');
+  }
+  document.addEventListener('click', (e) => {
+    const g = document.getElementById('heroMoreGroup');
+    const btn = document.getElementById('heroMoreBtn');
+    if (g && g.classList.contains('open')
+        && !g.contains(e.target)
+        && !(btn && btn.contains(e.target))) {
+      g.classList.remove('open');
+    }
+  });
+
   // ── 旅程拼貼（把一趟旅程的照片合成一張大圖，分享/下載）──
 
   function renderCollageBar() {
@@ -4775,7 +4824,7 @@
       .map(s => s.name);
     const starsRow = (field, val) => `
       <div class="tripfb-stars" id="tripfb-stars-${field}">
-        ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= val ? 'on' : ''}" onclick="setFeedbackStar('${field}',${i})">★</button>`).join('')}
+        ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= val ? 'on' : ''}" onclick="setFeedbackStar('${field}',${i})" aria-label="評分 ${i} 星">★</button>`).join('')}
       </div>`;
     const canSubmit = tripFeedbackDraft.tripRating > 0 && tripFeedbackDraft.aiAccuracy > 0;
     overlay.innerHTML = `
@@ -4799,10 +4848,11 @@
           <div class="tripfb-label">各景點評分<span class="tripfb-hint">選填，再點同一顆星可取消</span></div>
           ${tripFeedbackStopNames.map((n, idx) => {
             const v = tripFeedbackDraft.stopRatings[n] || 0;
-            return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px;">
-              <span style="font-size:13px;color:#2b4c6b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeFeedbackText(n)}</span>
-              <div class="tripfb-stars" id="tripfb-stopstars-${idx}" style="flex-shrink:0;">
-                ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= v ? 'on' : ''}" style="font-size:17px;" onclick="setStopFeedbackStar(${idx},${i})">★</button>`).join('')}
+            // UIUX#7：名稱與星等改上下兩行——長站名在手機/窄彈窗不再擠壓五顆星
+            return `<div class="tripfb-stop-row">
+              <span class="tripfb-stop-name">${escapeFeedbackText(n)}</span>
+              <div class="tripfb-stars tripfb-stop-stars" id="tripfb-stopstars-${idx}">
+                ${[1,2,3,4,5].map(i => `<button type="button" class="tripfb-star ${i <= v ? 'on' : ''}" onclick="setStopFeedbackStar(${idx},${i})" aria-label="為「${escapeFeedbackText(n)}」評分 ${i} 星">★</button>`).join('')}
               </div>
             </div>`;
           }).join('')}
@@ -4926,11 +4976,20 @@
                 ${photos.map(p => `
                   <div class="travellog-photo-thumb">
                     <img src="${escapeHtml(p.url)}" alt="" loading="lazy" onclick="openImageLightbox(this.src)">
-                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(p.ts) || 0})">✕</button>
+                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(p.ts) || 0})" aria-label="刪除這張照片">✕</button>
                   </div>
                 `).join('')}
-                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameJs}')" title="新增照片">📷</button>
+                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameJs}')" title="新增照片" aria-label="上傳景點照片">📷</button>
               </div>`;
+            // Week4 C6：個人文字備註列（有備註→顯示文字＋✏️ 編輯；無→「＋ 加備註」）
+            const noteRow = s.note
+              ? `<div class="travellog-note-row">
+                  <span class="travellog-note-text">${escapeHtml(s.note)}</span>
+                  <button class="travellog-note-edit" onclick="openVisitedNoteModal('${nameJs}')" title="編輯備註" aria-label="編輯備註">✏️</button>
+                </div>`
+              : `<div class="travellog-note-row">
+                  <button class="travellog-note-add" onclick="openVisitedNoteModal('${nameJs}')">＋ 加備註</button>
+                </div>`;
             return `
             <div class="travellog-spot-card">
               <div class="travellog-spot-main">
@@ -4939,8 +4998,9 @@
                   <span class="travellog-spot-name">${nameEsc}</span>
                   <span class="travellog-spot-meta">${escapeHtml(s.visitDate || '')}${s.tripTitle ? ' · ' + escapeHtml(s.tripTitle) : ''}${s.gpsVerified === true ? ' <span class="travellog-gps-badge">📍 GPS</span>' : ''}</span>
                 </div>
-                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameJs}')">✕</button>
+                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameJs}')" aria-label="移除景點紀錄">✕</button>
               </div>
+              ${noteRow}
               ${photoRow}
             </div>`;
           }).join('')}
@@ -6250,11 +6310,11 @@
 
     if (!currentTripIsCollab || !currentTripMembers) {
       if (countEl) countEl.textContent = '👤 個人行程';
-      if (stackEl) stackEl.innerHTML = '<div class="avatar">🧍</div><div class="avatar-info"><div style="font-weight:600;font-size:16px;">個人行程</div><div style="font-size:13px;color:var(--ink3);">改用「多人共作」可邀請朋友一起編輯</div></div>';
+      if (stackEl) stackEl.innerHTML = '<div class="avatar">🧍</div><div class="avatar-info"><div style="font-weight:600;font-size:16px;">個人行程</div><div style="font-size:13px;color:var(--ink3);">改用「共編行程」可邀請朋友一起編輯</div></div>';
       if (orgEl) orgEl.textContent = '你';
       if (codeEl) codeEl.textContent = '--';
       if (qrEl) qrEl.innerHTML = '個人行程<br>沒有邀請碼';
-      if (hintEl) hintEl.textContent = '改用「多人共作」建立行程，才會有邀請碼與分享 QR';
+      if (hintEl) hintEl.textContent = '改用「共編行程」建立行程，才會有邀請碼與分享 QR';
       return;
     }
 
@@ -8001,7 +8061,8 @@
         tripTitle: currentTripTitle || '',
         emoji: stop.emoji || '📍',
         gpsVerified: extras.gpsVerified ?? null, // true=GPS 驗證到場、false=超距強制打卡、null=手動/舊資料
-        photos: []                               // {url, path, ts}；path=Storage 路徑（刪檔用）
+        photos: [],                              // {url, path, ts}；path=Storage 路徑（刪檔用）
+        note: ''                                 // Week4 C6：個人文字備註（舊資料無此欄位視同空字串）
       });
     } else {
       // 移除紀錄時一併清掉 Storage 上的照片（失敗靜默，孤兒檔可容忍）

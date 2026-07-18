@@ -441,6 +441,38 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wai-action-btn:disabled{opacity:.55;cursor:wait;}
 .wai-confirm-list{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#f5f8fc;color:#46566a;font-size:14px;line-height:1.75;}
 .wai-confirm-list b{color:var(--ink);}
+
+/* ── Week4 D2：團體綜合視覺化（純 CSS 橫條，不引圖表庫） ── */
+.collab-agg-bars{display:flex;flex-direction:column;gap:5px;margin-bottom:10px;}
+.collab-agg-bar-row{display:flex;align-items:center;gap:8px;}
+.collab-agg-bar-label{flex-shrink:0;width:76px;font-size:13px;color:var(--ink,#1c2b3a);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.collab-agg-bar-track{flex:1;height:8px;background:#e9eff8;border-radius:999px;overflow:hidden;}
+.collab-agg-bar-fill{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#2f6fed,#6b54d3);}
+.collab-agg-bar-count{flex-shrink:0;font-size:12px;color:#8fa4b8;min-width:32px;text-align:right;}
+.collab-agg-empty{font-size:13px;color:#8fa4b8;margin-bottom:8px;}
+.collab-agg-hint{font-size:12.5px;color:#7a6a1f;background:#fdf6df;border-radius:8px;padding:6px 10px;margin:4px 0;line-height:1.5;text-wrap:pretty;}
+.collab-agg-conflict{color:#c0392b;font-weight:700;}
+.collab-agg-hint.collab-agg-conflict{background:#fdecea;color:#a93226;font-weight:normal;}
+.collab-agg-by{font-size:12px;color:#8fa4b8;margin-left:2px;}
+
+/* ── Week4 D1：我的好友／群組 ── */
+.friends-section-title{font-size:14px;font-weight:800;color:#8fa4b8;letter-spacing:.5px;margin:22px 0 10px;}
+.friends-row{display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--surface,#fff);border:1px solid var(--border,#e1e8f2);border-radius:12px;margin-bottom:8px;}
+.friends-row-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;font-size:15px;color:var(--ink);}
+.friends-row-main b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.friends-row-sub{font-size:12.5px;color:var(--ink3,#8fa4b8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.friends-mini-btn{font-size:13px;font-weight:700;border:1px solid #cdd9ea;background:#fff;color:#37506e;border-radius:8px;padding:7px 11px;cursor:pointer;white-space:nowrap;flex-shrink:0;}
+.friends-mini-btn:hover{background:#f0f5fc;}
+.friends-mini-btn.primary{border:none;background:linear-gradient(135deg,#2f6fed,#6b54d3);color:#fff;}
+.friends-mini-btn.ghost{color:#607189;}
+.friends-mini-btn.ghost.danger{color:#c0392b;border-color:#f0c4bd;}
+.friends-empty{padding:18px 14px;border:1px dashed #cdd9ea;border-radius:12px;color:var(--ink3,#8fa4b8);font-size:14px;text-align:center;text-wrap:pretty;}
+/* 好友空狀態引導卡（UIUX#5：加好友入口直接放進空狀態，不再只寫「按右上」） */
+.friends-empty-hero{padding:34px 20px;display:flex;flex-direction:column;align-items:center;gap:12px;}
+.friends-empty-emoji{font-size:44px;line-height:1;}
+.friends-empty-title{font-size:16px;font-weight:800;color:var(--ink,#1c2b3a);}
+.friends-empty-steps{margin:0;padding-left:1.4em;text-align:left;font-size:13.5px;line-height:1.9;color:var(--ink3,#8fa4b8);}
+.friends-empty-hero .wai-action-btn{margin-top:4px;padding:11px 22px;font-size:15px;}
 /* ── 建立行程：分段步驟進度條（取代舊 CLI 面板）── */
 .wiz-gen-progress{margin-top:14px;padding-top:14px;border-top:1px dashed #d9e2ee;animation:fadeNode .3s ease both;}
 .wgp-title{font-size:14px;font-weight:800;color:#1176c9;text-align:center;margin-bottom:14px;letter-spacing:.3px;}
@@ -901,6 +933,9 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   .collab-qr-row{align-items:flex-start;}
   .collab-role-sel{min-width:82px;}
   .wai-action-card{padding:20px;}
+  /* Week4 D1：好友頁手機版——按鈕列換行、名字欄不擠壓 */
+  .friends-row{flex-wrap:wrap;}
+  .friends-row-main{flex-basis:100%;}
   .gen-container{width:calc(100vw - 24px);}
 
   /* 建立行程精靈：改單欄、步驟兩排、內距收斂 */
@@ -917,4 +952,31 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   .wizard-btn{min-height:46px;font-size:16px;padding:12px 16px;}
   .wizard-flow-wrap{padding:16px;min-height:auto;}
   .wizard-flow-title{font-size:26px;}
+}
+
+/* ══════════ UIUX 優化（2026-07-18）══════════ */
+
+/* #1 手機底部主導覽：≤700px 顯示（桌機由頂列導覽負責） */
+#mobileBottomNav{display:none;}
+@media (max-width:700px){
+  #mobileBottomNav{position:fixed;left:0;right:0;bottom:0;z-index:500;display:flex;background:var(--surface,#fff);border-top:1px solid var(--border,#e1e8f2);padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 16px rgba(21,38,59,.08);}
+  .mbn-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px 9px;border:none;background:none;font-size:11.5px;color:var(--ink3,#8fa4b8);cursor:pointer;white-space:nowrap;}
+  .mbn-ico{font-size:20px;line-height:1;}
+  .mbn-item.active{color:var(--accent,#2f6fed);font-weight:700;}
+  /* 內容底部留空，避免被固定底列遮住 */
+  body{padding-bottom:calc(64px + env(safe-area-inset-bottom));}
+}
+
+/* #2 觸控目標 ≥44px：命中區擴大、圖示字級不變 */
+.pm-close{width:44px;height:44px;top:8px;right:8px;display:flex;align-items:center;justify-content:center;}
+.lm-close{width:44px;height:44px;display:flex;align-items:center;justify-content:center;}
+/* 星星：以 padding+負 margin 撐出 44 高命中區，不放大圖示、不改版面 */
+.pm-star{padding:10px 5px;margin:-10px -1px;}
+.tc-like-btn{min-height:40px;padding-top:8px;padding-bottom:8px;}
+
+/* #4 分類列：隱藏捲軸、保留滑動；手機右緣漸層提示還有更多選項 */
+.filter-bar{scrollbar-width:none;}
+.filter-bar::-webkit-scrollbar{display:none;}
+@media (max-width:700px){
+  .filter-bar{-webkit-mask-image:linear-gradient(90deg,#000 90%,transparent);mask-image:linear-gradient(90deg,#000 90%,transparent);}
 }

@@ -3305,9 +3305,17 @@ async function loadState() {
 function showMainView(view) {
   document.getElementById('exploreView').style.display = view==='explore' ? '' : 'none';
   document.getElementById('myTripsView').style.display = view==='mytrips' ? '' : 'none';
+  const friendsEl = document.getElementById('friendsView');
+  if (friendsEl) friendsEl.style.display = view==='friends' ? '' : 'none';
   document.getElementById('navExplore').classList.toggle('active', view==='explore');
   document.getElementById('navMyTrips').classList.toggle('active', view==='mytrips');
+  // UIUX#1：手機底部導覽 active 同步（好友頁時兩者皆非 active）
+  const mbnE = document.getElementById('mbnExplore');
+  const mbnM = document.getElementById('mbnMyTrips');
+  if (mbnE) mbnE.classList.toggle('active', view==='explore');
+  if (mbnM) mbnM.classList.toggle('active', view==='mytrips');
   if (view==='mytrips') renderMyTrips();
+  if (view==='friends') renderFriendsView();
 }
 
 // ══════════════════════════════════════════════════
@@ -3315,7 +3323,7 @@ function showMainView(view) {
 // ══════════════════════════════════════════════════
 function renderUserMenu() {
   const wrap = document.getElementById('userMenuWrap');
-  // 「📱 流程碼進入」只在登入後顯示（加入共編需要已登入帳號）
+  // 「📱 邀請碼快速加入」只在登入後顯示（加入共編需要已登入帳號）
   const journeyBtn = document.getElementById('journeyJoinBtn');
   if (journeyBtn) journeyBtn.style.display = isLoggedIn ? '' : 'none';
   if (!isLoggedIn) {
@@ -3349,8 +3357,9 @@ function renderUserMenu() {
         <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:13px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
         <div class="user-dd-item dd-mobile-only" onclick="location.href='ai-travel-planner-v8.html'">✈️ 行程編輯</div>
         <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
-        <div class="user-dd-item dd-mobile-only" onclick="openJourneyJoin();toggleUserDropdown()">📱 流程碼進入</div>
+        <div class="user-dd-item dd-mobile-only" onclick="openJourneyJoin();toggleUserDropdown()">📱 邀請碼快速加入</div>
         <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>
+        <div class="user-dd-item" onclick="showMainView('friends');toggleUserDropdown()">👥 我的好友${friendsPendingIncoming.length ? ` <span style="margin-left:auto;background:#fde8e6;color:#c0392b;font-size:13px;padding:1px 7px;border-radius:8px">${friendsPendingIncoming.length}</span>` : ''}</div>
         <div class="user-dd-sep"></div>
         <div class="user-dd-item" onclick="openPrefWizard();toggleUserDropdown()">🎯 修改個人喜好</div>
         ${_hasPwd ? `<div class="user-dd-item" onclick="openChangePwd();toggleUserDropdown()">🔒 修改密碼</div>` : ''}
@@ -3370,6 +3379,165 @@ document.addEventListener('click', e => {
     if (dd) dd.classList.remove('open');
   }
 });
+
+// ══════════════════════════════════════════════════
+// WEEK4 D1：好友（資料層在 friends.js / WAI_FRIENDS）
+// ══════════════════════════════════════════════════
+let friendsAccepted = [];        // 已成立好友（friendship docs）
+let friendsPendingIncoming = []; // 收到的邀請（toEmail == 我）
+let friendsPendingOutgoing = []; // 送出的邀請（fromEmail == 我）
+let friendsUnsub = null;
+
+// 登入後啟動好友即時訂閱（onAuthStateChanged 呼叫；登出時 stopFriendsSubscriptions 清理）
+function startFriendsSubscriptions(myEmail) {
+  stopFriendsSubscriptions();
+  if (!window.WAI_FRIENDS || !myEmail) return;
+  friendsUnsub = WAI_FRIENDS.subscribeFriendships(myEmail, (list) => {
+    friendsAccepted = list.filter(f => f.status === 'accepted');
+    friendsPendingIncoming = list.filter(f => f.status === 'pending' && f.toEmail === myEmail);
+    friendsPendingOutgoing = list.filter(f => f.status === 'pending' && f.fromEmail === myEmail);
+    renderUserMenu(); // 更新「我的好友」列的待確認數字
+    const view = document.getElementById('friendsView');
+    if (view && view.style.display !== 'none') renderFriendsView();
+  }, (err) => console.warn('好友訂閱失敗：', err));
+}
+function stopFriendsSubscriptions() {
+  if (friendsUnsub) { friendsUnsub(); friendsUnsub = null; }
+  friendsAccepted = []; friendsPendingIncoming = []; friendsPendingOutgoing = [];
+}
+
+// 從 friendship doc 取「對方」的 email 與顯示名
+function friendOtherParty(f) {
+  const myEmail = (currentUser && currentUser.email) || '';
+  const other = (f.emails || []).find(e => e !== myEmail) || '';
+  const name = (f.names && f.names[WAI_COLLAB.emailKey(other)]) || other;
+  return { email: other, name };
+}
+
+function renderFriendsView() {
+  const pendingHost = document.getElementById('friendsPendingList');
+  const listHost = document.getElementById('friendsList');
+  if (!pendingHost || !listHost) return;
+  if (!isLoggedIn) {
+    pendingHost.innerHTML = '';
+    listHost.innerHTML = `<div class="friends-empty">登入後即可管理好友。<button class="wai-action-btn primary" style="margin-left:10px" onclick="openLogin()">登入 / 註冊</button></div>`;
+    return;
+  }
+
+  // 待確認邀請（收到的在前，送出的在後）
+  const pendingRows = [
+    ...friendsPendingIncoming.map(f => {
+      const o = friendOtherParty(f);
+      return `<div class="friends-row">
+        <div class="friends-row-main"><b>${escapeHtml(o.name)}</b><span class="friends-row-sub">${escapeHtml(o.email)} · 邀請你成為好友</span></div>
+        <button class="friends-mini-btn primary" onclick="friendsAcceptInvite('${escapeHtml(f.id)}')">✓ 接受</button>
+        <button class="friends-mini-btn ghost" onclick="friendsRemove('${escapeHtml(f.id)}','reject')">✕ 拒絕</button>
+      </div>`;
+    }),
+    ...friendsPendingOutgoing.map(f => {
+      const o = friendOtherParty(f);
+      return `<div class="friends-row">
+        <div class="friends-row-main"><b>${escapeHtml(o.name)}</b><span class="friends-row-sub">${escapeHtml(o.email)} · 等待對方確認</span></div>
+        <button class="friends-mini-btn ghost" onclick="friendsRemove('${escapeHtml(f.id)}','cancel')">取消邀請</button>
+      </div>`;
+    })
+  ];
+  pendingHost.innerHTML = pendingRows.length
+    ? `<div class="friends-section-title">⏳ 待確認邀請（${pendingRows.length}）</div>${pendingRows.join('')}`
+    : '';
+
+  // 好友列表（空狀態＝引導卡：三步驟＋內嵌主按鈕，不再只寫「按右上」）
+  listHost.innerHTML = `<div class="friends-section-title">💛 我的好友（${friendsAccepted.length}）</div>`
+    + (friendsAccepted.length
+      ? friendsAccepted.map(f => {
+          const o = friendOtherParty(f);
+          return `<div class="friends-row">
+            <div class="friends-row-main"><b>${escapeHtml(o.name)}</b><span class="friends-row-sub">${escapeHtml(o.email)}</span></div>
+            <button class="friends-mini-btn ghost danger" onclick="friendsRemove('${escapeHtml(f.id)}','unfriend')">解除好友</button>
+          </div>`;
+        }).join('')
+      : `<div class="friends-empty friends-empty-hero">
+          <div class="friends-empty-emoji">🧑‍🤝‍🧑</div>
+          <div class="friends-empty-title">邀請旅伴，一起規劃共編行程</div>
+          <ol class="friends-empty-steps">
+            <li>輸入旅伴的 email 送出邀請</li>
+            <li>對方登入 WanderAI 按「接受」</li>
+            <li>建立共編行程，用邀請碼把好友拉進來</li>
+          </ol>
+          <button class="wai-action-btn primary" onclick="openAddFriendModal()">➕ 加好友</button>
+        </div>`);
+}
+
+// ── 加好友：email 精確搜尋 user_profiles → 送出邀請 ──
+function openAddFriendModal() {
+  if (!isLoggedIn) { openLogin(); return; }
+  openWaiActionModal({
+    title: '➕ 加好友',
+    subtitle: '輸入對方的 email（對方需登入過 WanderAI 才能被搜尋到）。',
+    body(content) {
+      content.innerHTML = `
+        <div style="display:flex;gap:8px;">
+          <input class="wai-action-input" id="friendSearchInput" type="email" placeholder="friend@example.com" style="flex:1;">
+          <button class="wai-action-btn primary" data-action="search" style="flex-shrink:0;">搜尋</button>
+        </div>
+        <div class="wai-action-error" role="alert"></div>
+        <div id="friendSearchResult"></div>`;
+      const input = content.querySelector('#friendSearchInput');
+      const error = content.querySelector('.wai-action-error');
+      const resultHost = content.querySelector('#friendSearchResult');
+      const doSearch = async () => {
+        const q = String(input.value || '').trim();
+        error.textContent = ''; resultHost.innerHTML = '';
+        if (!q) { error.textContent = '請輸入 email。'; return; }
+        if (q.toLowerCase() === String(currentUser.email).toLowerCase()) { error.textContent = '不能加自己為好友。'; return; }
+        resultHost.innerHTML = '<div class="friends-row-sub">搜尋中…</div>';
+        try {
+          const profile = await WAI_FRIENDS.findProfileByEmail(q);
+          if (!profile) { resultHost.innerHTML = ''; error.textContent = '找不到這個 email——對方需先登入過 WanderAI。'; return; }
+          resultHost.innerHTML = `<div class="friends-row" style="margin-top:10px;">
+            <div class="friends-row-main"><b>${profile.emoji ? escapeHtml(profile.emoji) + ' ' : ''}${escapeHtml(profile.name || profile.email)}</b><span class="friends-row-sub">${escapeHtml(profile.email)}</span></div>
+            <button class="friends-mini-btn primary" data-action="invite">送出邀請</button>
+          </div>`;
+          resultHost.querySelector('[data-action="invite"]').onclick = async (ev) => {
+            ev.currentTarget.disabled = true;
+            try {
+              await WAI_FRIENDS.sendInvite(
+                { email: currentUser.email, name: currentUser.name },
+                { email: profile.email, name: profile.name });
+              closeWaiActionModal();
+              showToast('✉️ 邀請已送出，等待對方確認', 'green');
+            } catch (e) {
+              ev.currentTarget.disabled = false;
+              error.textContent = (e && e.message) || '送出失敗，請稍後再試。';
+            }
+          };
+        } catch (e) {
+          resultHost.innerHTML = '';
+          error.textContent = (e && e.message) || '搜尋失敗，請稍後再試。';
+        }
+      };
+      content.querySelector('[data-action="search"]').onclick = doSearch;
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') doSearch(); });
+    },
+    onMount(modal) { setTimeout(() => modal.querySelector('#friendSearchInput').focus(), 0); }
+  });
+}
+
+async function friendsAcceptInvite(friendshipDocId) {
+  try {
+    await WAI_FRIENDS.acceptInvite(friendshipDocId);
+    showToast('🎉 已成為好友！', 'green');
+  } catch (e) { showToast('接受失敗：' + ((e && e.message) || e), 'red'); }
+}
+
+// kind: 'reject'（拒絕收到的邀請）/ 'cancel'（取消已送邀請）/ 'unfriend'（解除好友，需確認）
+async function friendsRemove(friendshipDocId, kind) {
+  if (kind === 'unfriend' && !window.confirm('確定要解除這位好友嗎？（對方列表也會同步移除）')) return;
+  try {
+    await WAI_FRIENDS.removeFriendship(friendshipDocId);
+    showToast(kind === 'unfriend' ? '已解除好友' : (kind === 'cancel' ? '已取消邀請' : '已拒絕邀請'), 'blue');
+  } catch (e) { showToast('操作失敗：' + ((e && e.message) || e), 'red'); }
+}
 
 function openLogin() { document.getElementById('loginOverlay').classList.add('open'); }
 function closeLogin() { document.getElementById('loginOverlay').classList.remove('open'); }
@@ -3449,6 +3617,11 @@ async function doRegister() {
         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       });
+      // Week4 D1：同步公開檔案（好友搜尋靠它）——註冊後就能被搜尋到，失敗不擋註冊
+      if (window.WAI_FRIENDS) {
+        try { await WAI_FRIENDS.syncMyProfile({ uid: user.uid, email, name, emoji: '🌟' }); }
+        catch (_e) { /* 登入時 onAuthStateChanged 會再同步一次 */ }
+      }
     }
     await user.sendEmailVerification();
     await firebaseAuth.signOut();
@@ -3673,10 +3846,16 @@ if (typeof firebase !== 'undefined') {
       }
       currentUser = userData;
       localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn, currentUser }));
+      // Week4 D1：同步公開檔案（好友搜尋靠它）＋啟動好友/群組即時訂閱（fire-and-forget，失敗不擋登入）
+      if (firebaseDb && window.WAI_FRIENDS) {
+        WAI_FRIENDS.syncMyProfile({ uid: user.uid, email: user.email, name: userData.name, emoji: userData.emoji })
+          .catch((e) => console.warn('同步公開檔案失敗：', e));
+        startFriendsSubscriptions(user.email);
+      }
       await loadState();
       renderUserMenu();
       renderGrid();
-      
+
       // 檢查是否為剛從 landing page 註冊跳轉進來的
       if (sessionStorage.getItem('wai_just_registered')) {
         sessionStorage.removeItem('wai_just_registered');
@@ -3684,6 +3863,7 @@ if (typeof firebase !== 'undefined') {
       }
     } else {
       if (myCollabTripsUnsub) { myCollabTripsUnsub(); myCollabTripsUnsub = null; }
+      stopFriendsSubscriptions(); // Week4 D1：登出清訂閱，比照 myCollabTripsUnsub
       isLoggedIn = false;
       currentUser = null;
       localStorage.removeItem('wai_user');
@@ -3747,13 +3927,12 @@ function renderGrid() {
           <span>💰 ${t.budget}</span>
           <span style="color:var(--gold)">${starStr(myRating)}</span>
           <span>${myRating.toFixed(1)}</span>
-          <span>❤️ ${t.likes+(liked?1:0)}</span>
         </div>
         <div class="tc-author-row">
           <div class="tc-ava">${t.ava}</div>
-          <div class="tc-author">${t.author} · ${t.authorTrips} 份</div>
+          <div class="tc-author">${t.author}</div>
           <div class="tc-actions">
-            <button class="tc-like-btn${liked?' liked':''}" onclick="toggleLike(event,'${t.id}')">${liked?'❤️':'🤍'} ${t.likes+(liked?1:0)}</button>
+            <button class="tc-like-btn${liked?' liked':''}" onclick="toggleLike(event,'${t.id}')" aria-label="${liked?'取消喜歡':'喜歡這個行程'}">${liked?'❤️':'🤍'} ${t.likes+(liked?1:0)}</button>
             <button class="tc-preview-btn" onclick="openPreview('${t.id}')">預覽</button>
           </div>
         </div>
@@ -3832,7 +4011,7 @@ function renderPmStars(my) {
   const row = document.getElementById('pmStars');
   row.innerHTML = `<span style="font-size:13px;color:rgba(255,255,255,.7);margin-right:4px">${my?'你給了 '+my+'星':'為行程評分'}</span>
     ${[1,2,3,4,5].map(i=>`
-      <button class="pm-star" onclick="rateTrip(${i})" style="color:${i<=my?'#f5c842':'rgba(255,255,255,.35)'}">★</button>`).join('')}`;
+      <button class="pm-star" onclick="rateTrip(${i})" aria-label="評分 ${i} 星" style="color:${i<=my?'#f5c842':'rgba(255,255,255,.35)'}">★</button>`).join('')}`;
 }
 function rateTrip(stars) {
   if (!currentPreviewId) return;
@@ -4265,7 +4444,7 @@ function buildInitialWizData(mode, extra) {
 async function startCollabLobby() {
   if (!isLoggedIn) { openLogin(); return; }
   if (!firebaseEnabled || !firebaseDb || !window.WAI_COLLAB) {
-    showToast('多人共作需要登入並連線 Firebase，請稍後再試。', 'orange');
+    showToast('共編需要登入並連線 Firebase，請稍後再試。', 'orange');
     return;
   }
   const newTrip = {
@@ -5283,11 +5462,11 @@ async function finishWizard() {
   // ── 多人共作：共用行程已在 lobby 建立，這裡只「更新」行程參數，再回成員面板由 owner 隨時生成 ──
   if (tripMode === 'collab') {
     if (!firebaseEnabled || !firebaseDb || !window.WAI_COLLAB) {
-      showToast('多人共作需要登入並連線 Firebase，請稍後再試。', 'orange');
+      showToast('共編需要登入並連線 Firebase，請稍後再試。', 'orange');
       return;
     }
     const collabTripId = wizData.collabTripId;
-    if (!collabTripId) { showToast('找不到共編行程，請從「多人共作」重新建立。', 'orange'); return; }
+    if (!collabTripId) { showToast('找不到共編行程，請從「共編行程」重新建立。', 'orange'); return; }
     try {
       const patch = {
         title: newTrip.title,
@@ -5455,7 +5634,7 @@ function openInviteConfirmation(code, preview, closeFn) {
   });
 }
 
-// 共用：以邀請碼／流程碼「真實加入」共編行程（「🔑 輸入邀請碼」與「📱 流程碼進入」共用）
+// 共用：以邀請碼「真實加入」共編行程（「🔑 輸入邀請碼」與「📱 邀請碼快速加入」共用；planner 的「流程碼」另指現場切旅遊模式）
 async function joinSharedTripByCode(rawCode, closeFn, confirmed = false) {
   const code = String(rawCode || '').trim();
   if (!code) { showToast('請輸入邀請碼', 'orange'); return; }
@@ -5528,6 +5707,66 @@ const COLLAB_INTERESTS = [
   { v: '美食', t: '🍜 美食' }, { v: '文化', t: '🏛️ 文化' }, { v: '自然', t: '🌿 自然' },
   { v: '打卡', t: '📸 打卡' }, { v: '運動', t: '🏃 運動' }, { v: '放鬆', t: '😌 放鬆' }
 ];
+
+// Week4 D2：從成員清單與 aggregateGroupProfile 輸出派生「視覺化用」資料。
+// 只讀 profile／members，不動彙整演算法（AI prompt 的 buildGroupPreferenceLines 吃同一份 profile）。
+function buildCollabAggView(profile, memberList) {
+  const total = Math.max(1, memberList.length);
+  const _label = (v) => { const hit = COLLAB_INTERESTS.find(i => i.v === v); return hit ? hit.t : v; };
+
+  // 1) 興趣票數橫條（票數高→低；aggregateGroupProfile 已排序 interests）
+  const bars = (profile.interests || []).map(v => {
+    const n = (profile.interestVotes && profile.interestVotes[v]) || 0;
+    return { label: _label(v), votes: n, pct: Math.round(n / total * 100) };
+  });
+
+  // 2) 節奏平手偵測：profile.pace 只回結果，自掃成員票（同 majorityPace 的計票邏輯）
+  const paceCounts = {};
+  memberList.forEach(m => {
+    const p = (m.prefs || m.preferences || {}).pace;
+    if (p) paceCounts[p] = (paceCounts[p] || 0) + 1;
+  });
+  const paceKeys = Object.keys(paceCounts);
+  let paceTie = null;
+  if (paceKeys.length > 1) {
+    const maxN = Math.max(...paceKeys.map(k => paceCounts[k]));
+    const top = paceKeys.filter(k => paceCounts[k] === maxN);
+    if (top.length > 1) {
+      const ownerMember = memberList.find(m => m && m.role === 'owner');
+      paceTie = {
+        detail: top.map(k => `${k} ${paceCounts[k]} 票`).join('：'),
+        ownerName: (ownerMember && ownerMember.name) || '發起人'
+      };
+    }
+  }
+
+  // 3) 預算差距：各成員 parseBudgetNumber（取 tier 下限），差 2 倍以上且絕對差 ≥500 才提示
+  const budgets = memberList
+    .map(m => WAI_COLLAB.parseBudgetNumber((m.prefs || m.preferences || {}).budget))
+    .filter(n => n > 0);
+  let budgetGap = null;
+  if (budgets.length >= 2) {
+    const min = Math.min(...budgets), max = Math.max(...budgets);
+    if (max >= min * 2 && max - min >= 500) budgetGap = { min, max };
+  }
+
+  // 4) avoid vs desired 衝突：avoid term（去 # 前綴）出現在他人想去清單文字中
+  const conflicts = [];
+  const desired = profile.desired || [];
+  (profile.avoid || []).forEach(a => {
+    const term = String(a.term || '').replace(/^#/, '');
+    if (!term) return;
+    desired.forEach(d => {
+      const text = String(d.text || '');
+      if (text.toLowerCase().includes(term.toLowerCase())) {
+        conflicts.push({ term, avoidBy: a.by || [], desireBy: d.by || '', desireText: text });
+      }
+    });
+  });
+  const conflictTerms = new Set(conflicts.map(c => c.term));
+
+  return { bars, paceTie, budgetGap, conflicts, conflictTerms, total };
+}
 
 function openCollabPanel(tripId) {
   if (!window.WAI_COLLAB || !firebaseDb) { showToast('多人協作需連線 Firebase', 'orange'); return; }
@@ -5693,10 +5932,40 @@ function renderCollabPanel() {
     <div class="collab-section">
       <div class="collab-section-title">團體綜合（即時）</div>
       <div class="collab-agg">
-        <div>節奏：<b>${profile.pace}</b>（多數決）</div>
-        <div>興趣：<b>${profile.interests.join('、') || '—'}</b></div>
-        <div>預算：<b>${profile.budget || '—'}</b>（平均）</div>
-        ${profile.avoid.length ? `<div>避免：${profile.avoid.map(a => a.term.replace(/^#/, '')).join('、')}</div>` : ''}
+        ${(() => {
+          // Week4 D2：純呈現層視覺化（票數橫條／平手／預算差距／衝突標紅），彙整演算法不動
+          const agg = buildCollabAggView(profile, memberList);
+          const barsHtml = agg.bars.length
+            ? `<div class="collab-agg-bars">${agg.bars.map(b => `
+                <div class="collab-agg-bar-row">
+                  <span class="collab-agg-bar-label">${escapeHtml(b.label)}</span>
+                  <span class="collab-agg-bar-track"><span class="collab-agg-bar-fill" style="width:${b.pct}%"></span></span>
+                  <span class="collab-agg-bar-count">${b.votes}/${agg.total}</span>
+                </div>`).join('')}</div>`
+            : `<div class="collab-agg-empty">成員填寫偏好後，這裡會顯示興趣票數統計</div>`;
+          const avoidHtml = profile.avoid.length
+            ? `<div>避免：${profile.avoid.map(a => {
+                const term = a.term.replace(/^#/, '');
+                const cls = agg.conflictTerms.has(term) ? ' class="collab-agg-conflict"' : '';
+                return `<span${cls}>${escapeHtml(term)}</span>`;
+              }).join('、')}</div>`
+            : '';
+          const desiredHtml = (profile.desired || []).length
+            ? `<div>想去：${profile.desired.map(dd => {
+                const hit = agg.conflicts.some(c => String(dd.text || '').toLowerCase().includes(c.term.toLowerCase()));
+                return `<span${hit ? ' class="collab-agg-conflict"' : ''}>${escapeHtml(dd.text)}</span>${dd.by ? `<span class="collab-agg-by">(${escapeHtml(dd.by)})</span>` : ''}`;
+              }).join('、')}</div>`
+            : '';
+          return `
+            ${barsHtml}
+            <div>節奏：<b>${escapeHtml(profile.pace)}</b>（多數決）</div>
+            ${agg.paceTie ? `<div class="collab-agg-hint">⚖️ 節奏平手（${escapeHtml(agg.paceTie.detail)}），依發起人「${escapeHtml(agg.paceTie.ownerName)}」的偏好為準</div>` : ''}
+            <div>預算：<b>${escapeHtml(profile.budget || '—')}</b>（平均）</div>
+            ${agg.budgetGap ? `<div class="collab-agg-hint">💰 成員預算差距較大：最低 $${agg.budgetGap.min.toLocaleString('en-US')}／最高 $${agg.budgetGap.max.toLocaleString('en-US')}，已取全員平均</div>` : ''}
+            ${avoidHtml}
+            ${desiredHtml}
+            ${agg.conflicts.map(c => `<div class="collab-agg-hint collab-agg-conflict">⚠️ 「${escapeHtml(c.term)}」被 ${escapeHtml((c.avoidBy || []).join('、') || '成員')} 列為避免，但 ${escapeHtml(c.desireBy || '成員')} 的想去清單提到它——生成時以避免為最高優先</div>`).join('')}`;
+        })()}
       </div>
     </div>
     <div class="collab-actions">
