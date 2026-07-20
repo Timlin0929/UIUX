@@ -309,6 +309,169 @@ function getLocalFoodList(destination) {
   return getLocalPoiList(destination, (typeof window !== 'undefined' && window.WAI_RESTAURANT_DATA) || null);
 }
 
+// ══════════════════════════════════════════════════
+// F4 預算硬約束：查價 helper（鏡像 planner ai-travel-planner-v8.js 的同名函式）
+// 門票：attraction-fee-config.js（人工維護，優先）→ poi-data.js 的 fee/feeNote（enrich:fees 寫入）。
+// 餐費：restaurant-data.js 的 costPerPerson/costNote（crawl:food 寫入）。
+// ══════════════════════════════════════════════════
+function normalizeFeeName(s) { return String(s || '').replace(/\s/g, '').replace(/臺/g, '台').toLowerCase(); }
+
+function getLocalPoiFeeMap(destination) {
+  const map = new Map();
+  const list = getLocalPoiList(destination) || [];
+  for (const p of list) {
+    if (!p || !p.name) continue;
+    const hasFee = Number.isFinite(Number(p.fee));
+    if (!hasFee && !p.feeNote) continue;
+    map.set(normalizeFeeName(p.name), { fee: hasFee ? Number(p.fee) : null, feeNote: p.feeNote || '' });
+  }
+  return map;
+}
+
+function getCuratedFee(name) {
+  const cfg = (typeof window !== 'undefined' && window.WAI_ATTRACTION_FEE) || null;
+  if (!cfg || !cfg.paid || !name) return null;
+  const key = normalizeFeeName(name);
+  for (const k of Object.keys(cfg.paid)) {
+    if (normalizeFeeName(k) === key) {
+      const e = cfg.paid[k] || {};
+      return { fee: Number.isFinite(Number(e.fee)) ? Number(e.fee) : null, feeNote: e.note || '' };
+    }
+  }
+  return null;
+}
+
+function lookupStopFee(feeMap, name) {
+  const curated = getCuratedFee(name);
+  if (curated) return curated;
+  if (!feeMap || !feeMap.size || !name) return null;
+  return feeMap.get(normalizeFeeName(name)) || null;
+}
+
+function getLocalFoodCostMap(destination) {
+  const map = new Map();
+  const list = getLocalFoodList(destination) || [];
+  for (const r of list) {
+    if (!r || !r.name) continue;
+    const hasCost = Number.isFinite(Number(r.costPerPerson));
+    if (!hasCost && !r.costNote) continue;
+    map.set(normalizeFeeName(r.name), { costPerPerson: hasCost ? Number(r.costPerPerson) : null, costNote: r.costNote || '' });
+  }
+  return map;
+}
+
+// 比對順序：exact → 去括號附註 exact → 前綴比對（至少 4 字）
+function lookupStopFoodCost(costMap, stop) {
+  if (!stop) return null;
+  if (Number.isFinite(Number(stop.costPerPerson))) return { costPerPerson: Number(stop.costPerPerson), costNote: stop.costNote || '' };
+  if (!costMap || !costMap.size || !stop.name) return null;
+  const full = normalizeFeeName(stop.name);
+  const exact = costMap.get(full);
+  if (exact) return exact;
+  const cut = String(stop.name).search(/[(（]/);
+  if (cut > 0) {
+    const hit = costMap.get(normalizeFeeName(String(stop.name).slice(0, cut)));
+    if (hit) return hit;
+  }
+  let best = null, bestLen = 0;
+  for (const [key, val] of costMap) {
+    if (key.length >= 4 && key.length > bestLen && full.startsWith(key)) { best = val; bestLen = key.length; }
+  }
+  return best;
+}
+
+function stopIsFood(stop, foodCostMap) {
+  if (typeof isFoodStop === 'function' && isFoodStop(stop)) return true;
+  return !!lookupStopFoodCost(foodCostMap, stop);
+}
+
+function sumStopFeesPerPerson(stops, destination) {
+  const feeMap = getLocalPoiFeeMap(destination);
+  const foodMap = getLocalFoodCostMap(destination);
+  let sum = 0;
+  for (const s of (Array.isArray(stops) ? stops : [])) {
+    if (stopIsFood(s, foodMap)) continue; // 餐廳歸餐飲
+    const hit = lookupStopFee(feeMap, s && s.name);
+    if (hit && Number.isFinite(hit.fee)) sum += hit.fee;
+  }
+  return Math.round(sum);
+}
+
+function sumStopFoodPerPerson(stops, destination) {
+  const costMap = getLocalFoodCostMap(destination);
+  let sum = 0;
+  for (const s of (Array.isArray(stops) ? stops : [])) {
+    const hit = lookupStopFoodCost(costMap, s);
+    if (hit && Number.isFinite(hit.costPerPerson)) sum += hit.costPerPerson;
+  }
+  return Math.round(sum);
+}
+
+// F4：純 mutation 版替換（鏡像 planner swapStopWithAlternative 的 mutation 段，不做 toast/render/persist）
+function swapStopToAlt(stop, alt) {
+  const prev = { name: stop.name, lat: stop.lat, lng: stop.lng, desc: stop.desc, isOutdoor: stop.isOutdoor };
+  stop.name = alt.name;
+  stop.desc = alt.desc || '';
+  stop.lat = alt.lat; stop.lng = alt.lng;
+  stop.scenicCoordinates = { lat: alt.lat, lng: alt.lng };
+  stop._lockedCoordinates = { lat: alt.lat, lng: alt.lng };
+  stop.coordVerified = true;
+  stop.isOutdoor = (alt.isOutdoor === true);
+  stop.placeId = null; stop.businessHours = null;
+  if (Array.isArray(stop.altNearby)) {
+    stop.altNearby = stop.altNearby.filter((a) => a.name !== alt.name);
+    if (prev.name && Number.isFinite(prev.lat)) {
+      stop.altNearby.unshift({ name: prev.name, lat: prev.lat, lng: prev.lng, desc: prev.desc || '', rating: null, isOutdoor: prev.isOutdoor, distM: 0 });
+    }
+  }
+}
+
+// F4 預算硬約束：生成後估算「交通＋門票＋餐飲」人均總額，超出預算級距上限時，
+// 逐次把「門票最貴的非用餐站」換成 altNearby 中免費（或查無票價）的替代景點，直到不超支或換無可換。
+// 回 { overrunPerPerson, swaps:[{from,to,fee}] } 或 null（無預算上限／無需處理）。
+function enforceBudgetCap(trip, wData) {
+  const tier = getBudgetTier(wData && wData.budget);
+  if (!tier || tier.perMax == null) return null; // 豪華（開放上限）或無預算 → 不做硬約束
+  const stops = Array.isArray(trip && trip.stops) ? trip.stops : [];
+  if (!stops.length) return null;
+  const dest = wData.dest || wData.destCustom || trip.region || '台東';
+  const transport = estimateTransportRough(dest, wData.transportMode, wData.people, wData.days).totalPerPerson;
+  const feeMap = getLocalPoiFeeMap(dest);
+  const foodMap = getLocalFoodCostMap(dest);
+  const cap = tier.perMax;
+  const usedNames = new Set(stops.map((s) => String((s && s.name) || '').trim()));
+  const total = () => transport + sumStopFeesPerPerson(stops, dest) + sumStopFoodPerPerson(stops, dest);
+  const swaps = [];
+  let guard = 0;
+  while (total() > cap && guard++ < 10) {
+    // 挑門票最貴的非用餐站
+    let target = null, targetFee = 0;
+    for (const s of stops) {
+      if (!s || s.type === 'start' || s.type === 'end' || !s.name) continue;
+      if (stopIsFood(s, foodMap)) continue;
+      const hit = lookupStopFee(feeMap, s.name);
+      const fee = (hit && Number.isFinite(hit.fee)) ? hit.fee : 0;
+      if (fee > targetFee && Array.isArray(s.altNearby) && s.altNearby.length) { target = s; targetFee = fee; }
+    }
+    if (!target || targetFee <= 0) break; // 沒有可降的付費景點 → 換不動
+    // altNearby 中找免費或查無票價的替代（未被行程使用者）
+    const alt = target.altNearby.find((a) => {
+      if (!a || !a.name || usedNames.has(String(a.name).trim())) return false;
+      const aFee = lookupStopFee(feeMap, a.name);
+      return !aFee || !Number.isFinite(aFee.fee) || aFee.fee === 0;
+    });
+    if (!alt) break; // 這站換不動，其他站門票更低也救不了 → 結束
+    usedNames.delete(String(target.name).trim());
+    const fromName = target.name;
+    swapStopToAlt(target, alt);
+    usedNames.add(String(target.name).trim());
+    swaps.push({ from: fromName, to: alt.name, fee: targetFee });
+  }
+  const overrun = Math.max(0, Math.round(total() - cap));
+  if (!swaps.length && overrun <= 0) return null;
+  return { overrunPerPerson: overrun, swaps };
+}
+
 // ── Plan B 替代景點（查看替換）：生成時保留 ──
 // 本地 POI 無室內/戶外欄位，用名稱＋描述關鍵字啟發式判斷（供「下雨換室內」用）。
 function classifyIndoorOutdoor(name, desc) {
@@ -405,7 +568,8 @@ async function fetchAndBuildLiveMapsHint(wizardData) {
 // 將「天數字串」統一轉成分鐘（支援 N小時 / 兩天一夜，並相容舊字串）
 function parseDurationMinutes(days) {
   const s = String(days || '').trim();
-  if (s === '2天' || s === '兩天一夜') return 960;          // 多日（過夜）以兩日活動估算
+  // 過夜行程一律以兩日活動估算；'3天'/'三天兩夜' 為舊資料相容別名，視同兩天一夜（本專案上限兩天一夜）
+  if (s === '2天' || s === '兩天一夜' || s === '3天' || s === '三天兩夜') return 960;
   const h = s.match(/^(\d+(?:\.\d+)?)\s*小時$/);
   if (h) return Math.round(parseFloat(h[1]) * 60);          // N小時 / N.5小時
   if (s === '半天') return 240;                              // 舊資料相容
@@ -414,7 +578,15 @@ function parseDurationMinutes(days) {
 }
 
 function isLongTrip(days) {
-  return String(days || '') === '2天';
+  const s = String(days || '');
+  return s === '2天' || s === '3天' || s === '三天兩夜';
+}
+
+// 天數字串 → 過夜行程天數（單日回 1）。本專案上限兩天一夜，舊 '3天' 資料視同 2 天。
+function getWizardDayCount(days) {
+  const s = String(days || '');
+  if (s === '2天' || s === '兩天一夜' || s === '3天' || s === '三天兩夜') return 2;
+  return 1;
 }
 
 // 人數 → 整數（容錯舊字串：「6人」→6、「3-4人」→3、「5-8人」→5、「1人」→1）
@@ -557,16 +729,24 @@ function calcTripEndTime(startTime, days) {
   return minutesToTimeString(startMin + duration);
 }
 
-// 計算行程每日時間窗口（單日：start–end；兩天一夜：第一天時數 + 第二天結束時間）
+// 計算行程每日時間窗口（單日：start–end；多日：第一天時數 + 中間日 8 小時 + 最後一天結束時間）
+// F5：day2EndTime 語意泛化為「最後一天玩到幾點」；保留 day1End/day2End 鍵讓既有兩天邏輯不變。
 function getTripDayWindows(wizardData) {
   const start = normalizeClockInput(wizardData.startTime, '09:00');
   if (!isLongTrip(wizardData.days)) {
     return { multi: false, start, end: calcTripEndTime(start, wizardData.days) };
   }
+  const dayCount = getWizardDayCount(wizardData.days);
   const d1h = Math.min(12, Math.max(1, Math.round(Number(wizardData.day1Hours) || 8)));
   const day1End = minutesToTimeString(timeStringToMinutes(start) + d1h * 60);
-  const day2End = normalizeClockInput(wizardData.day2EndTime, '12:00');
-  return { multi: true, start, day1Start: start, day1End, day1Hours: d1h, day2Start: start, day2End };
+  const lastEnd = normalizeClockInput(wizardData.day2EndTime, '12:00'); // 語意：最後一天玩到幾點
+  const dayWindows = [];
+  for (let i = 1; i <= dayCount; i++) {
+    if (i === 1) dayWindows.push({ day: 1, start, end: day1End });
+    else if (i === dayCount) dayWindows.push({ day: i, start, end: lastEnd });
+    else dayWindows.push({ day: i, start, end: minutesToTimeString(timeStringToMinutes(start) + 8 * 60) }); // 中間日約 8 小時
+  }
+  return { multi: true, start, dayCount, dayWindows, day1Start: start, day1End, day1Hours: d1h, day2Start: start, day2End: lastEnd };
 }
 
 function getPromptRuleLines(wizardData, mode) {
@@ -581,7 +761,7 @@ function getPromptRuleLines(wizardData, mode) {
   const endTime = win.multi ? win.day2End : win.end;
   const lines = [
     win.multi
-      ? `1. 這是「兩天一夜」行程：第一天 ${win.start}–${win.day1End}（約 ${win.day1Hours} 小時），第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程。請依兩天分配景點，第二天行程明顯較短`
+      ? `1. 這是「兩天一夜」行程：${(win.dayWindows || []).map(w => `第${w.day}天 ${w.start}–${w.end}`).join('、')}。請依 ${win.dayCount} 天分配景點，最後一天行程明顯較短（玩到 ${win.day2End} 後返程）`
       : `1. 針對 ${days} 的時間量身打造，行程時間窗口為 ${startTime} ～ ${endTime}`,
     `2. ${getPeopleProfile(people).planRule}`,
     `3. 符合 ${pace} 的節奏`,
@@ -609,9 +789,15 @@ function getPromptRuleLines(wizardData, mode) {
       }
     }
     if (isLongTrip(days)) {
-      lines.push(`13. 兩天一夜分配：第一天 ${win.start}–${win.day1End} 安排主要景點與過夜；第二天約 ${win.day2Start} 開始、最後一站需在 ${win.day2End} 前後 15 分鐘結束並返程，第二天景點數量明顯少於第一天`);
-      lines.push('14. 行程規劃應避開塞車路段，優先交通順暢、少折返路線；若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
-      lines.push(`15. 第一天安排 12:00-13:30 彈性午餐；第二天若於 ${win.day2End} 前結束，午餐視結束時間彈性安排`);
+      const _dc = win.dayCount || 2;
+      lines.push(`13. ${_dc} 天分配：${(win.dayWindows || []).map(w => `第${w.day}天 ${w.start}–${w.end}`).join('、')}；第一天安排主要景點與過夜，最後一天（第${_dc}天）最後一站需在 ${win.day2End} 前後 15 分鐘結束並返程，最後一天景點數量明顯少於其他天`);
+      lines.push(`14. 每個 stop 必須輸出 dayIndex 欄位（整數 1–${_dc}），標明該站屬於第幾天；同一天的站依時間排序，dayIndex 不可倒退`);
+      lines.push('15. 行程規劃應避開塞車路段，優先交通順暢、少折返路線；若時間落在 07:00-09:30 或 17:00-19:30，降低幹道與商圈壅塞路段經過頻率');
+      lines.push(`16. 第一天安排 12:00-13:30 彈性午餐；最後一天若於 ${win.day2End} 前結束，午餐視結束時間彈性安排`);
+      const _lodging = String(wizardData.lodgingName || '').trim();
+      lines.push(_lodging
+        ? `17. 住宿錨點：住宿地點為「${_lodging}」。每天最後一站請安排在住宿附近（車程 20 分鐘內），隔天第一站由住宿出發、也從鄰近景點開始，避免每天大幅折返`
+        : `17. 未指定住宿：請在 reply 用一句話推薦適合的住宿區域，並讓每天最後一站鄰近該區域、隔天第一站由該區域出發`);
     }
     const dest = wizardData.dest || wizardData.destCustom || '台東';
     const defaultHub = getDefaultTransitHub(dest);
@@ -629,6 +815,12 @@ function getPromptRuleLines(wizardData, mode) {
     if (wizardData.transportMode === 'car' || wizardData.transportMode === 'scooter') {
       const _vehicle = wizardData.transportMode === 'scooter' ? '機車' : '汽車';
       lines.push(`${lines.length + 1}. 本行程以${_vehicle}自駕為主：挑選景點時請一併考量停車可行性，盡量避開停車極度困難的點；對停車較不易的景點（如熱門老街、夜市、假日海灘、市區廟宇），請在該站 desc 末尾用一句話提醒停車狀況與建議（例如改停就近付費停車場、預留找車位的時間）。`);
+    }
+    // F3 自動避雨：行程期間有降雨機率偏高的日子 → 該日優先室內景點
+    const _rain = wizardData._rainOutlook;
+    if (_rain && Array.isArray(_rain.rainyDates) && _rain.rainyDates.length) {
+      const _rainTxt = _rain.rainyDates.map(r => `${r.date}（降雨機率約 ${r.pop}%）`).join('、');
+      lines.push(`${lines.length + 1}. ☔ 天氣預報：${_rainTxt} 降雨機率偏高，該日請優先安排室內景點（博物館、文化館、市場、咖啡廳、展館等），戶外景點（海灘、步道、觀景台）盡量集中在其他日子或改為可避雨的替代點，並在 reply 用一句話提醒使用者記得帶傘`);
     }
   } else {
     lines.push('5. 僅需回傳可用於預覽的 title + stops 骨架（每站至少 name/time/desc）');
@@ -740,7 +932,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
     wizardData.departureDate ? `出發日期：${wizardData.departureDate}` : null,
     wizardData.returnDate ? `回程日期：${wizardData.returnDate}` : null,
     win.multi
-      ? `時間長度：兩天一夜（第一天 ${win.start}–${win.day1End} 約 ${win.day1Hours} 小時並過夜；第二天約 ${win.day2Start} 開始、玩到 ${win.day2End} 後返程）`
+      ? `時間長度：兩天一夜（${(win.dayWindows || []).map(w => `第${w.day}天 ${w.start}–${w.end}`).join('；')}；最後一天玩到 ${win.day2End} 後返程）`
       : (() => {
           // 明確給「含交通的總時長目標」讓 AI 一次排滿，減少事後 fillTripTimeBudget 補站輪數
           const _totalMin = parseDurationMinutes(wizardData.days || '1天');
@@ -759,6 +951,9 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
       return `交通預估：每人約 $${tr.totalPerPerson}（${ferryPart}站間移動約 $${tr.movePerPerson}）。可動用於餐飲與付費體驗：每人約 ${bd.label}，請在此額度內安排，避免規劃會超支的高消費景點；用餐站請優先挑選人均消費落在此額度內的餐廳（餐廳候選已附人均消費）`;
     })() : null,
     wizardData.accommodation ? `住宿安排：${wizardData.accommodation}` : null,
+    (win.multi && String(wizardData.lodgingName || '').trim())
+      ? `住宿地點：${String(wizardData.lodgingName).trim()}（每晚行程以此為終點、隔日清晨由此出發）`
+      : (win.multi ? '住宿地點：未指定（請在 reply 推薦住宿區域，每日最後一站鄰近該區域）' : null),
     wizardData.desiredSpots ? `用戶希望去的景點：${wizardData.desiredSpots}` : null,
     `出發站點：${(wizardData.startLocation || '').trim() || getDefaultTransitHub(destination)}`,
     `回程站點：${(wizardData.endLocation || '').trim() || getDefaultTransitHub(destination)}`
@@ -767,7 +962,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
     ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
-    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode}]`;
+    : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode${win.multi ? ',dayIndex(整數1-' + (win.dayCount || 2) + '，該站屬於第幾天)' : ''}}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
     ? `\n\n${firebaseHint}`
@@ -786,7 +981,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
   const intro = `你是「${destination}」微旅行的 AI 規劃助手。${geoConstraint}${getPeopleProfile(wizardData.people).introSentence}`;
 
   const desiredNote = wizardData.desiredSpots
-    ? `\n\n⚠️ 用戶特別希望前往：${wizardData.desiredSpots}。請優先安排這些景點（時間不足時選最重要的），並圍繞它們規劃行程。`
+    ? `\n\n⚠️【最高優先·希望景點例外】用戶特別希望前往：${wizardData.desiredSpots}。這些是「必須安排」的景點——即使它們不在上方「已驗證景點快取／景點清單」中，也一定要排進 stops（此條優先於前面「只能從清單挑選、嚴禁清單以外景點」的限制；這些希望景點的真實性與座標會由系統後續自行驗證，你只需照用戶輸入的名稱填入）。時間不足時保留最重要的幾個，並圍繞它們規劃其餘行程。`
       + `\n但若其中某個景點與上方「個人禁忌／需避免」衝突（例如使用者對海鮮過敏卻指定海鮮餐廳、吃素卻指定燒肉店），一律以禁忌為最高優先：請勿安排該景點，改以附近、性質相近且不違反禁忌的替代景點取代；並在 reply 以一句話說明「哪個希望景點因禁忌被替換、換成了什麼」。`
     : '';
 
@@ -903,6 +1098,76 @@ async function fetchWithTimeout(url, options, timeoutMs, label) {
     throw error;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// ── F3 自動避雨：生成前抓 CWA 一週預報，找出行程期間降雨機率偏高的日子 ──
+// 只支援台東（CWA F-D0047-091 臺東縣）；出發日在 7 天內才有預報價值。
+// 與 planner 共用 localStorage 快取鍵 'wai_cwa_taitung_wk'（同 {exp,data} 形狀，30 分鐘）。
+async function fetchTripRainOutlook(wizardData) {
+  try {
+    if (!VERTEX_PROXY_BASE) return null;
+    const dest = String((wizardData && (wizardData.dest || wizardData.destCustom)) || '').replace(/臺/g, '台');
+    if (!dest.includes('台東')) return null;
+    const depStr = wizardData && wizardData.departureDate;
+    if (!depStr) return null;
+    const dep = new Date(String(depStr).replace(/-/g, '/'));
+    if (isNaN(dep.getTime())) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((dep - today) / 86400000);
+    if (diffDays < 0 || diffDays > 7) return null;
+
+    const CACHE_KEY = 'wai_cwa_taitung_wk';
+    let data = null;
+    try {
+      const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+      if (cached && cached.exp > Date.now() && cached.data) data = cached.data;
+    } catch (_e) {}
+    if (!data) {
+      const url = `${VERTEX_PROXY_BASE}/cwa/v1/rest/datastore/F-D0047-091?LocationName=${encodeURIComponent('臺東縣')}`;
+      const r = await fetchWithTimeout(url, null, 5000, 'CWA 天氣預報');
+      if (!r.ok) return null;
+      const json = await r.json();
+      const locs = (json.records && json.records.Locations && json.records.Locations[0] && json.records.Locations[0].Location) || [];
+      const tt = locs.find((x) => x.LocationName === '臺東縣') || locs[0];
+      if (!tt || !Array.isArray(tt.WeatherElement)) return null;
+      const byName = {};
+      tt.WeatherElement.forEach((e) => { byName[e.ElementName] = e.Time || []; });
+      const wxT = byName['天氣現象'] || [];
+      const valByStart = (arr, start, field) => {
+        const m = (arr || []).find((x) => x.StartTime === start);
+        return (m && m.ElementValue && m.ElementValue[0] && m.ElementValue[0][field]) || '';
+      };
+      const periods = wxT.map((t) => ({
+        start: t.StartTime, end: t.EndTime,
+        wx: (t.ElementValue && t.ElementValue[0] && t.ElementValue[0].Weather) || '',
+        pop: Number(valByStart(byName['12小時降雨機率'], t.StartTime, 'ProbabilityOfPrecipitation')) || 0
+      })).filter((p) => p.wx);
+      if (!periods.length) return null;
+      data = { locationName: '臺東縣', periods, fetchedAt: Date.now() };
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ exp: Date.now() + 30 * 60 * 1000, data })); } catch (_e) {}
+    }
+
+    // 行程日期集合（出發日～回程日，最多抓 7 天避免失控）
+    const tripDates = [];
+    const ret = wizardData.returnDate ? new Date(String(wizardData.returnDate).replace(/-/g, '/')) : null;
+    const last = (ret && !isNaN(ret.getTime()) && ret >= dep) ? ret : dep;
+    for (let d = new Date(dep); d <= last && tripDates.length < 7; d.setDate(d.getDate() + 1)) {
+      tripDates.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+    }
+    // 每日取各時段 pop 最大值；>=50 視為降雨機率偏高
+    const rainyDates = [];
+    tripDates.forEach((dateStr) => {
+      let maxPop = -1;
+      (data.periods || []).forEach((p) => {
+        const s = String(p.start || '');
+        if (s.slice(0, 10) === dateStr) maxPop = Math.max(maxPop, Number(p.pop) || 0);
+      });
+      if (maxPop >= 50) rainyDates.push({ date: dateStr, pop: maxPop });
+    });
+    return rainyDates.length ? { rainyDates } : null;
+  } catch (_e) {
+    return null; // 天氣抓不到不影響生成（靜默降級）
   }
 }
 
@@ -3158,6 +3423,37 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   const finalStops = assignTransportModes(withEndpoints, enrichedWizardData.transportMode);
   // 建立行程：若仍超出設定時長，平均分攤縮短各景點停留（餐廳例外、每站最多縮 35%）
   fitGeneratedStopsToTimeLimit(finalStops, wizardData);
+  // F5 多日：把 AI 輸出的 dayIndex 重新掛回最終站點（中間各步驟可能建新物件或增刪站）。
+  // 名稱命中 → 用 AI 給的 dayIndex；未命中（合併/補站）→ 沿用前一站的天次；end 站＝最後一天。
+  if (isLongTrip(wizardData.days)) {
+    const dayCount = getWizardDayCount(wizardData.days);
+    const _dnorm = (s) => String(s || '').replace(/\s/g, '').replace(/臺/g, '台').toLowerCase();
+    const dayByName = new Map();
+    sourceStops.forEach((s) => {
+      const di = Math.max(1, Math.min(dayCount, Math.round(Number(s && s.dayIndex)) || 0));
+      if (s && s.name && Number(s.dayIndex) >= 1) dayByName.set(_dnorm(s.name), di);
+    });
+    let cursor = 1;
+    finalStops.forEach((s) => {
+      if (!s) return;
+      if (s.type === 'start') { s.dayIndex = 1; cursor = 1; return; }
+      if (s.type === 'end') { s.dayIndex = dayCount; return; }
+      const hit = dayByName.get(_dnorm(s.name));
+      const existing = Math.round(Number(s.dayIndex)) || 0;
+      let di = hit || existing || cursor;
+      di = Math.max(cursor, Math.min(dayCount, Math.max(1, di))); // 不可倒退、不可超過天數
+      s.dayIndex = di;
+      cursor = di;
+    });
+    // 缺日防護：AI 常回「1,1,3,3,3」缺第 2 天，cursor 邏輯防倒退卻補不了缺日 →
+    // 中段站的相異日若沒連續覆蓋 1..dayCount，改用比例切分（避免 planner 時間軸連續跨夜爆表）。
+    const _mid = finalStops.filter((s) => s && s.type !== 'start' && s.type !== 'end');
+    const _distinct = [...new Set(_mid.map((s) => s.dayIndex))].sort((a, b) => a - b);
+    const _valid = _mid.length > 0 && _distinct.length === dayCount && _distinct.every((d, i) => d === i + 1);
+    if (!_valid && _mid.length) {
+      _mid.forEach((s, i) => { s.dayIndex = Math.max(1, Math.min(dayCount, Math.floor(i / _mid.length * dayCount) + 1)); });
+    }
+  }
   return finalStops;
 }
 
@@ -3406,7 +3702,173 @@ function stopFriendsSubscriptions() {
   friendsAccepted = []; friendsPendingIncoming = []; friendsPendingOutgoing = [];
 }
 
+// ══════════════════════════════════════════════════
+// F1 通知中心（資料層在 notifications.js / WAI_NOTIFY）
+// ══════════════════════════════════════════════════
+let notifItems = [];
+let notifUnsub = null;
+
+function startNotifSubscription(myEmail) {
+  stopNotifSubscription();
+  if (!window.WAI_NOTIFY || !myEmail) return;
+  const wrap = document.getElementById('notifWrap');
+  if (wrap) wrap.style.display = '';
+  notifUnsub = WAI_NOTIFY.subscribe(myEmail, (list) => {
+    notifItems = list;
+    updateNotifBadge();
+    const panel = document.getElementById('notifPanel');
+    if (panel && panel.classList.contains('open')) renderNotifPanel();
+    // F2 好友動態：動態流吃 notifItems，好友頁顯示中就即時重繪
+    const view = document.getElementById('friendsView');
+    if (view && view.style.display !== 'none') renderFriendsView();
+  }, () => {});
+}
+
+function stopNotifSubscription() {
+  if (notifUnsub) { notifUnsub(); notifUnsub = null; }
+  notifItems = [];
+  const wrap = document.getElementById('notifWrap');
+  if (wrap) wrap.style.display = 'none';
+  const panel = document.getElementById('notifPanel');
+  if (panel) panel.classList.remove('open');
+  updateNotifBadge();
+}
+
+function updateNotifBadge() {
+  const badge = document.getElementById('notifBadge');
+  if (!badge) return;
+  const unread = notifItems.filter(n => n && !n.read).length;
+  badge.style.display = unread ? '' : 'none';
+  badge.textContent = unread > 9 ? '9+' : String(unread);
+}
+
+const NOTIF_TYPE_META = {
+  collab_invite:         { emoji: '🎒', label: '共編邀請' },
+  friend_invite:         { emoji: '✉️', label: '好友邀請' },
+  friend_accept:         { emoji: '🎉', label: '好友成立' },
+  trip_renamed:          { emoji: '✏️', label: '行程改名' },
+  trip_regenerated:      { emoji: '🔄', label: '行程重生成' },
+  friend_trip_completed: { emoji: '🏁', label: '好友完成行程' }
+};
+
+function notifItemText(n) {
+  const who = n.fromName || n.fromEmail || '旅伴';
+  const title = n.tripTitle || '行程';
+  switch (n.type) {
+    case 'collab_invite':         return `${who} 邀請你共編「${title}」`;
+    case 'friend_invite':         return `${who} 邀請你成為好友`;
+    case 'friend_accept':         return `${who} 接受了你的好友邀請`;
+    case 'trip_renamed':          return `${who} 把共編行程改名為「${title}」`;
+    case 'trip_regenerated':      return `${who} 重新生成了「${title}」的行程`;
+    case 'friend_trip_completed': return `${who} 完成了行程「${title}」`;
+    default: return n.message || '新通知';
+  }
+}
+
+function notifTimeText(ts) {
+  try {
+    const d = ts && typeof ts.toDate === 'function' ? ts.toDate() : null;
+    if (!d) return '';
+    const diff = Date.now() - d.getTime();
+    if (diff < 60000) return '剛剛';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分鐘前`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小時前`;
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  } catch (_e) { return ''; }
+}
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  if (!panel) return;
+  const willOpen = !panel.classList.contains('open');
+  panel.classList.toggle('open', willOpen);
+  if (willOpen) renderNotifPanel();
+}
+
+function renderNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  if (!panel) return;
+  const unread = notifItems.filter(n => n && !n.read).length;
+  const rows = notifItems.map((n, i) => {
+    const meta = NOTIF_TYPE_META[n.type] || { emoji: '🔔', label: '通知' };
+    return `<button class="notif-item${n.read ? '' : ' unread'}" onclick="handleNotifClick(${i})">
+      <span class="notif-item-emoji">${meta.emoji}</span>
+      <span class="notif-item-main">
+        <span class="notif-item-text">${escapeHtml(notifItemText(n))}</span>
+        <span class="notif-item-sub">${escapeHtml(meta.label)}${notifTimeText(n.createdAt) ? ' · ' + escapeHtml(notifTimeText(n.createdAt)) : ''}</span>
+      </span>
+      ${n.read ? '' : '<span class="notif-dot"></span>'}
+    </button>`;
+  }).join('');
+  panel.innerHTML = `
+    <div class="notif-panel-head">
+      <span>🔔 通知</span>
+      ${unread ? `<button class="notif-mark-all" onclick="notifMarkAllRead()">全部標為已讀</button>` : ''}
+    </div>
+    ${rows || '<div class="notif-empty">目前沒有通知</div>'}`;
+}
+
+function notifMarkAllRead() {
+  const myEmail = (currentUser && currentUser.email) || '';
+  if (!myEmail || !window.WAI_NOTIFY) return;
+  WAI_NOTIFY.markAllRead(myEmail, notifItems);
+  notifItems = notifItems.map(n => ({ ...n, read: true })); // 樂觀更新，onSnapshot 會再校正
+  updateNotifBadge();
+  renderNotifPanel();
+}
+
+function handleNotifClick(idx) {
+  const n = notifItems[idx];
+  if (!n) return;
+  const myEmail = (currentUser && currentUser.email) || '';
+  if (!n.read && myEmail && window.WAI_NOTIFY) {
+    WAI_NOTIFY.markRead(myEmail, n.id);
+    notifItems[idx] = { ...n, read: true };
+    updateNotifBadge();
+  }
+  const panel = document.getElementById('notifPanel');
+  if (panel) panel.classList.remove('open');
+  // 依類型導頁
+  if ((n.type === 'collab_invite' || n.type === 'trip_renamed' || n.type === 'trip_regenerated') && n.tripId) {
+    // 已是成員（改名/重生成/曾受邀）→ 開共編面板；不是成員時 openCollabPanel 內部會擋
+    const isMine = (myTrips || []).some(t => t.id === n.tripId);
+    if (isMine) { openCollabPanel(n.tripId); return; }
+    if (n.type === 'collab_invite') { openJourneyJoin(); return; } // 尚未加入 → 引導輸入邀請碼
+    showMainView('mytrips');
+    return;
+  }
+  showMainView('friends');
+}
+// 面板外點擊自動收合
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('notifWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const panel = document.getElementById('notifPanel');
+    if (panel) panel.classList.remove('open');
+  }
+});
+
 // 從 friendship doc 取「對方」的 email 與顯示名
+// 共編面板「從好友邀請」：組含邀請碼的訊息複製到剪貼簿（idx 對應 renderCollabPanel 存的候選陣列）
+function collabInviteFriend(idx) {
+  const o = (window.__collabFriendCands || [])[idx];
+  const d = collabState && collabState.data;
+  if (!o || !d || !d.inviteCode) return showToast('邀請碼尚未就緒', 'orange');
+  const code = WAI_COLLAB.formatInviteCode(d.inviteCode);
+  const msg = `嗨 ${o.name || ''}！來一起共編行程「${d.title || '未命名行程'}」吧 🎒\n開啟 ${location.origin}${location.pathname} 後點「加入共編」，輸入邀請碼：${code}`;
+  navigator.clipboard.writeText(msg)
+    .then(() => showToast(`已複製給 ${o.name || o.email} 的邀請訊息，貼到聊天視窗即可`, 'green'))
+    .catch(() => showToast(msg, 'green'));
+  // F1：同步發站內通知（失敗靜默）
+  if (window.WAI_NOTIFY && currentUser && currentUser.email) {
+    const myKey = WAI_COLLAB.emailKey(currentUser.email);
+    WAI_NOTIFY.push(o.email, WAI_NOTIFY.nid(['collab_invite', d.id, myKey]), {
+      type: 'collab_invite', tripId: d.id, tripTitle: d.title || '未命名行程',
+      fromName: currentUser.name || '', message: `邀請碼 ${code}`
+    });
+  }
+}
+
 function friendOtherParty(f) {
   const myEmail = (currentUser && currentUser.email) || '';
   const other = (f.emails || []).find(e => e !== myEmail) || '';
@@ -3414,15 +3876,55 @@ function friendOtherParty(f) {
   return { email: other, name };
 }
 
+// F2 好友動態：不開新查詢——合併「通知流（friend_accept / friend_trip_completed）」
+// 與 friendsAccepted 的 acceptedAt，依時間新→舊取前 10 筆。
+function buildFriendsFeedItems() {
+  const toMs = (ts) => {
+    try { return ts && typeof ts.toDate === 'function' ? ts.toDate().getTime() : (Number(ts) || 0); }
+    catch (_e) { return 0; }
+  };
+  const items = [];
+  (friendsAccepted || []).forEach(f => {
+    const o = friendOtherParty(f);
+    items.push({ ts: toMs(f.acceptedAt), emoji: '🤝', text: `你和 ${o.name || o.email || '旅伴'} 成為好友` });
+  });
+  (notifItems || []).forEach(n => {
+    if (!n) return;
+    const who = n.fromName || n.fromEmail || '旅伴';
+    if (n.type === 'friend_accept') {
+      items.push({ ts: toMs(n.createdAt), emoji: '🎉', text: `${who} 接受了你的好友邀請` });
+    } else if (n.type === 'friend_trip_completed') {
+      items.push({ ts: toMs(n.createdAt), emoji: '🏁', text: `${who} 完成了行程「${n.tripTitle || '微旅行'}」` });
+    }
+  });
+  return items.sort((a, b) => b.ts - a.ts).slice(0, 10);
+}
+
+function renderFriendsFeed(host) {
+  const feed = buildFriendsFeedItems();
+  const timeTxt = (ms) => {
+    if (!ms) return '';
+    const d = new Date(ms);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  host.innerHTML = `<div class="friends-section-title">📣 好友動態</div>`
+    + (feed.length
+      ? feed.map(it => `<div class="friends-feed-row"><span class="friends-feed-emoji">${it.emoji}</span><span class="friends-feed-text">${escapeHtml(it.text)}</span><span class="friends-feed-time">${escapeHtml(timeTxt(it.ts))}</span></div>`).join('')
+      : `<div class="friends-empty" style="padding:14px 16px;">近期沒有好友動態</div>`);
+}
+
 function renderFriendsView() {
+  const feedHost = document.getElementById('friendsFeed');
   const pendingHost = document.getElementById('friendsPendingList');
   const listHost = document.getElementById('friendsList');
   if (!pendingHost || !listHost) return;
   if (!isLoggedIn) {
+    if (feedHost) feedHost.innerHTML = '';
     pendingHost.innerHTML = '';
     listHost.innerHTML = `<div class="friends-empty">登入後即可管理好友。<button class="wai-action-btn primary" style="margin-left:10px" onclick="openLogin()">登入 / 註冊</button></div>`;
     return;
   }
+  if (feedHost) renderFriendsFeed(feedHost); // F2 好友動態
 
   // 待確認邀請（收到的在前，送出的在後）
   const pendingRows = [
@@ -3501,11 +4003,17 @@ function openAddFriendModal() {
           resultHost.querySelector('[data-action="invite"]').onclick = async (ev) => {
             ev.currentTarget.disabled = true;
             try {
-              await WAI_FRIENDS.sendInvite(
+              const _fid = await WAI_FRIENDS.sendInvite(
                 { email: currentUser.email, name: currentUser.name },
                 { email: profile.email, name: profile.name });
               closeWaiActionModal();
               showToast('✉️ 邀請已送出，等待對方確認', 'green');
+              // F1：好友邀請通知（失敗靜默）
+              if (window.WAI_NOTIFY) {
+                WAI_NOTIFY.push(profile.email, WAI_NOTIFY.nid(['friend_invite', _fid]), {
+                  type: 'friend_invite', fromName: currentUser.name || '', message: ''
+                });
+              }
             } catch (e) {
               ev.currentTarget.disabled = false;
               error.textContent = (e && e.message) || '送出失敗，請稍後再試。';
@@ -3524,9 +4032,17 @@ function openAddFriendModal() {
 }
 
 async function friendsAcceptInvite(friendshipDocId) {
+  // 接受前先從 pending 名單記下邀請人（accept 後 onSnapshot 會把它移出 pending）
+  const invite = friendsPendingIncoming.find(f => f.id === friendshipDocId);
   try {
     await WAI_FRIENDS.acceptInvite(friendshipDocId);
     showToast('🎉 已成為好友！', 'green');
+    // F1：通知邀請人「對方接受了」（失敗靜默）
+    if (window.WAI_NOTIFY && invite && invite.fromEmail) {
+      WAI_NOTIFY.push(invite.fromEmail, WAI_NOTIFY.nid(['friend_accept', friendshipDocId]), {
+        type: 'friend_accept', fromName: (currentUser && currentUser.name) || '', message: ''
+      });
+    }
   } catch (e) { showToast('接受失敗：' + ((e && e.message) || e), 'red'); }
 }
 
@@ -3567,8 +4083,8 @@ function authErrorMessage(e, kind) {
   return '帳號或密碼錯誤，請確認後再試。';
 }
 
-let emailRegistrationInProgress = false;
-function needsEmailVerification(user) {
+// 信箱驗證只屬於註冊流程；既有帳號登入時不再以 emailVerified 阻擋。
+function isUnverifiedPasswordUser(user) {
   return !!user && !user.emailVerified
     && (user.providerData || []).some(p => p && p.providerId === 'password');
 }
@@ -3580,13 +4096,7 @@ async function doLogin() {
   if (!email || !pwd) { showToast('請填寫帳號和密碼', 'orange'); return; }
   if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
   try {
-    const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
-    if (needsEmailVerification(userCredential.user)) {
-      try { await userCredential.user.sendEmailVerification(); } catch (_e) {}
-      await firebaseAuth.signOut();
-      showToast('請先到信箱完成驗證；驗證信已重新寄出。', 'orange');
-      return;
-    }
+    await firebaseAuth.signInWithEmailAndPassword(email, pwd);
     showToast(`👋 歡迎回來！`, 'green');
     closeLogin();
   } catch(e) {
@@ -3602,7 +4112,6 @@ async function doRegister() {
   if (!name || !email || !pwd) { showToast('請填寫所有欄位', 'orange'); return; }
   if (!isValidEmail(email)) { showToast('請輸入正確的電子信箱格式', 'orange'); return; }
   if (pwd.length < 8) { showToast('密碼至少需要 8 個字元', 'orange'); return; }
-  emailRegistrationInProgress = true;
   try {
     const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
     const user = userCredential.user;
@@ -3625,15 +4134,13 @@ async function doRegister() {
     }
     await user.sendEmailVerification();
     await firebaseAuth.signOut();
-    showToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
+    showToast('註冊完成！驗證信已寄出，請到信箱完成驗證。', 'green');
     closeLogin();
   } catch(e) {
-    if (firebaseAuth.currentUser && needsEmailVerification(firebaseAuth.currentUser)) {
+    if (isUnverifiedPasswordUser(firebaseAuth.currentUser)) {
       try { await firebaseAuth.signOut(); } catch (_e) {}
     }
     showToast(authErrorMessage(e, 'register'), 'red');
-  } finally {
-    emailRegistrationInProgress = false;
   }
 }
 
@@ -3817,13 +4324,6 @@ async function saveUserPreferences() {
 if (typeof firebase !== 'undefined') {
   firebase.auth().onAuthStateChanged(async (user) => {
     if (user) {
-      if (needsEmailVerification(user)) {
-        if (!emailRegistrationInProgress) {
-          await firebase.auth().signOut();
-          showToast('請先完成電子信箱驗證後再登入。', 'orange');
-        }
-        return;
-      }
       isLoggedIn = true;
       let userData = {
         name: user.displayName || user.email?.split('@')[0] || '使用者',
@@ -3852,6 +4352,7 @@ if (typeof firebase !== 'undefined') {
           .catch((e) => console.warn('同步公開檔案失敗：', e));
         startFriendsSubscriptions(user.email);
       }
+      startNotifSubscription(user.email); // F1 通知中心：登入後啟動訂閱
       await loadState();
       renderUserMenu();
       renderGrid();
@@ -3864,6 +4365,7 @@ if (typeof firebase !== 'undefined') {
     } else {
       if (myCollabTripsUnsub) { myCollabTripsUnsub(); myCollabTripsUnsub = null; }
       stopFriendsSubscriptions(); // Week4 D1：登出清訂閱，比照 myCollabTripsUnsub
+      stopNotifSubscription(); // F1 通知中心：登出清訂閱＋藏鈴鐺
       isLoggedIn = false;
       currentUser = null;
       localStorage.removeItem('wai_user');
@@ -3949,7 +4451,13 @@ function filterCatByName(cat) {
   document.querySelectorAll('.filter-tab').forEach(t => t.classList.toggle('active', t.textContent.includes(cat)));
   renderGrid();
 }
-function handleSearch() { searchQ = document.getElementById('searchInput').value.trim(); renderGrid(); }
+// 搜尋 debounce：oninput 每鍵都整格 innerHTML 重建，清單長時輸入卡頓
+let _searchDebounceTimer = null;
+function handleSearch() {
+  searchQ = document.getElementById('searchInput').value.trim();
+  clearTimeout(_searchDebounceTimer);
+  _searchDebounceTimer = setTimeout(renderGrid, 250);
+}
 function handleSort(v) { activeSort = v; renderGrid(); }
 function searchTag(tag) { document.getElementById('searchInput').value = tag; searchQ = tag; renderGrid(); }
 
@@ -4104,11 +4612,13 @@ function filterMyTripsList(list, q) {
     return tokens.every(tok => hay.includes(tok));
   });
 }
+let _mtSearchDebounceTimer = null;
 function mtOnSearch(v) {
   mtSearchQuery = v;
   const clr = document.getElementById('mtSearchClear');
   if (clr) clr.style.display = String(v || '').length ? 'flex' : 'none';
-  renderMyTrips();
+  clearTimeout(_mtSearchDebounceTimer);
+  _mtSearchDebounceTimer = setTimeout(renderMyTrips, 250);
 }
 function mtClearSearch() {
   const input = document.getElementById('mtSearch');
@@ -4173,7 +4683,6 @@ function renderMyTrips() {
         <div class="mt-actions">
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
-          ${t.collab ? '' : `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}&replan=true'">🔄 重新規劃</button>`}
           ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
           <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
@@ -4215,10 +4724,12 @@ async function persistTripRename(t, name, expectedTitleVersion, forceOverwrite =
   if (firebaseEnabled && firebaseDb && typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
     const ref = firebaseDb.collection('micro_trips').doc(t.id);
     let writtenVersion = Number(expectedTitleVersion || 0) + 1;
+    let notifyEmails = []; // F1：交易內記下成員名單，成功後通知其他成員
     try {
       await firebaseDb.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
         const remote = snap.exists ? snap.data() : {};
+        notifyEmails = Array.isArray(remote.memberEmails) ? remote.memberEmails.slice() : [];
         const remoteVersion = Number(remote.titleVersion || 0);
         if (t.collab && !forceOverwrite && remoteVersion !== Number(expectedTitleVersion || 0)) {
           const conflict = new Error('title-conflict');
@@ -4236,6 +4747,13 @@ async function persistTripRename(t, name, expectedTitleVersion, forceOverwrite =
           lastEditedByName: (currentUser && currentUser.name) || firebaseAuth.currentUser.email || ''
         }, { merge: true });
       });
+      // F1：共編改名成功 → 通知其他成員（id 帶版本號，同版本只發一次；失敗靜默）
+      if (t.collab && window.WAI_NOTIFY && notifyEmails.length) {
+        WAI_NOTIFY.pushToMany(notifyEmails, WAI_NOTIFY.nid(['trip_renamed', t.id, 'v' + writtenVersion]), {
+          type: 'trip_renamed', tripId: t.id, tripTitle: name,
+          fromName: (currentUser && currentUser.name) || '', message: ''
+        });
+      }
       return { ok: true, titleVersion: writtenVersion };
     } catch (error) {
       return { ok: false, error };
@@ -4523,10 +5041,17 @@ function renderWizard() {
   if (wizStep===0) {
     // Step 0：目的地
     wizData.slotMinutes = getSafeSlotMinutes(wizData.days || '1天', wizData.pace || '平衡', wizData.people);
-    body.innerHTML = `<h3 class="wizard-block-title">✈️ 想去哪裡探險？</h3>
-      <p class="wizard-block-help">選擇熱門景點，或自由輸入任何地點</p>
+    body.innerHTML = `<h3 class="wizard-block-title">✈️ 開始規劃你的微旅行</h3>
+      <p class="wizard-block-help">先為行程取個名字，再選擇想去的地方</p>
       <div class="wizard-field">
-        <label>自由輸入</label>
+        <label>行程名稱 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，留空自動以「目的地＋天數」命名）</span></label>
+        <input type="text" id="wizTripName" maxlength="40" placeholder="例如：台東畢旅、週末放空之旅"
+          value="${String(wizData.tripName || '').replace(/"/g, '&quot;')}"
+          oninput="setWizTripName(this.value)"
+          style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #d8e2ef;border-radius:12px;font-size:15px;background:#f7fbff;color:#1f3a52;">
+      </div>
+      <div class="wizard-field">
+        <label>目的地・自由輸入</label>
         <input type="text" id="wizDestInput" placeholder="例：台東市、三仙台、知本…" value="${wizData.destCustom||''}" oninput="onDestInput(this.value)">
       </div>
       <div class="wizard-field">
@@ -4534,13 +5059,6 @@ function renderWizard() {
         <div class="wizard-choice-grid" style="grid-template-columns:repeat(3,1fr)">
           ${WIZ_DESTS.map(d=>`<button class="wizard-tag${wizData.dest===d.label?' active':''}" onclick="selectDest('${d.label}')" type="button" style="background:${wizData.dest===d.label?'#dff1ff':'#f7fbff'};border-color:${wizData.dest===d.label?'#7db8ee':'#d8e2ef'}">${d.emoji} ${d.label}</button>`).join('')}
         </div>
-      </div>
-      <div class="wizard-field">
-        <label>行程名稱 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，留空自動以「目的地＋天數」命名）</span></label>
-        <input type="text" id="wizTripName" maxlength="40" placeholder="例如：台東畢旅、週末放空之旅"
-          value="${String(wizData.tripName || '').replace(/"/g, '&quot;')}"
-          oninput="setWizTripName(this.value)"
-          style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #d8e2ef;border-radius:12px;font-size:15px;background:#f7fbff;color:#1f3a52;">
       </div>
       <div class="wizard-field">
         <label>旅行人數</label>
@@ -4563,6 +5081,7 @@ function renderWizard() {
         <label>整體旅行時間</label>
         ${(() => {
           const isMulti = isLongTrip(wizData.days);
+          const dayCount = getWizardDayCount(wizData.days);
           const hours = Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
           const startT = wizData.startTime || '09:00';
           const endT = calcTripEndTime(startT, wizData.days);
@@ -4570,6 +5089,7 @@ function renderWizard() {
           const day1End = minutesToTimeString(timeStringToMinutes(startT) + day1Hours * 60);
           const day2End = normalizeClockInput(wizData.day2EndTime, '12:00');
           const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:26px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+          const multiSummary = `🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）`;
           return `
             <div class="wizard-chips" style="margin-bottom:12px">
               <button class="wizard-tag${!isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('single')">☀️ 單日</button>
@@ -4593,7 +5113,7 @@ function renderWizard() {
                   </div>
                 </div>
               </div>
-              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）</p>
+              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">${multiSummary}</p>
             ` : `
               <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
                 ${stepBtn('−', 'adjustTripHours(-1)', hours <= 1)}
@@ -4616,7 +5136,8 @@ function renderWizard() {
     const endHint = autoHub ? `留空則自動使用「${autoHub}」` : (isLongTrip(wizData.days) ? '可填飯店或車站名稱' : '可填停車場或車站名稱');
     // 「本趟想偏重」折疊區：有設過個人興趣 → 預設折疊成摘要，可展開微調；禁忌一律以小提示呈現
     const _pf = (currentUser && currentUser.preferences) || null;
-    const _hasProfileFocus = !!(_pf && Array.isArray(_pf.interests) && _pf.interests.length);
+    // 有設「興趣」或「節奏」任一長期偏好就視為有 profile focus → 預設收合成摘要（只設節奏也算）
+    const _hasProfileFocus = !!(_pf && ((Array.isArray(_pf.interests) && _pf.interests.length) || (typeof _pf.pace === 'string' && _pf.pace.trim())));
     const _avoid = (_pf && typeof _pf.avoid === 'string') ? _pf.avoid.trim() : '';
     const _focusExpanded = (wizData._focusExpanded === undefined) ? !_hasProfileFocus : !!wizData._focusExpanded;
     body.innerHTML = `<h3 class="wizard-block-title">🚆 交通 & 旅遊偏好</h3>
@@ -4688,7 +5209,7 @@ function renderWizard() {
           <span class="${wizData.departureDate?'':'wai-dt-ph'}">${wizData.departureDate ? wizData.departureDate.replace(/-/g,'/') : '請選擇出發日期'}</span>
           <span class="wai-dt-ic">📅</span>
         </div>
-        ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:14px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${ wizData.returnDate !== wizData.departureDate ? '（隔日）' : '（當天）'}</p>` : ''}
+        ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:14px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${(() => { const dc = getWizardDayCount(wizData.days); return dc >= 2 ? `（第 ${dc} 天）` : '（當天）'; })()}</p>` : ''}
       </div>
 
       <div class="wizard-field">
@@ -4728,6 +5249,10 @@ function renderWizard() {
         <select id="wizAccommodation" onchange="wizData.accommodation=this.value">
           ${['飯店','民宿','背包客棧','露營','自備住宿'].map(a=>`<option ${wizData.accommodation===a?'selected':''}>${a}</option>`).join('')}
         </select>
+      </div>
+      <div class="wizard-field">
+        <label>住宿地點名稱 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，AI 會以此為每晚終點與隔日起點）</span></label>
+        <input type="text" id="wizLodgingName" maxlength="60" placeholder="例：知本老爺酒店、台東市區民宿…" value="${escapeHtml(wizData.lodgingName||'')}" oninput="wizData.lodgingName=this.value">
       </div>`:''}
       ${wizData.collabTripId ? `<div class="wizard-field"><div class="wiz-focus-avoid" style="background:#eef4ff;border-color:#cfe0f7;color:#2b4c6b">📍 想去的景點已在「成員偏好」設定（會綜合所有成員），這裡不再重複填寫。</div></div>` : `
       <div class="wizard-field">
@@ -4793,7 +5318,7 @@ function updateWizardDays(value) {
   renderWizard();
 }
 
-// 切換「單日 / 兩天一夜」
+// 切換「單日 / 兩天一夜」（本專案上限兩天一夜）
 function setTripDurationMode(mode) {
   if (mode === 'multi') {
     if (!wizData.day1Hours) wizData.day1Hours = 8;        // 第一天預設 8 小時
@@ -4982,10 +5507,13 @@ function timeStringToMinutes(value) {
 
 function minutesToTimeString(totalMinutes) {
   const safe = Math.max(0, Number(totalMinutes));
-  const h = Math.floor(safe / 60);
-  const m = safe % 60;
-  if (h >= 24) return `次日 ${String(h - 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  // 跨日換算：day2=次日、day3+=「第 N 天」（原本只減一次 24h，三天行程第 3 天會顯示「次日 33:00」）
+  const dayOffset = Math.floor(safe / (24 * 60));
+  const within = safe % (24 * 60);
+  const hhmm = `${String(Math.floor(within / 60)).padStart(2, '0')}:${String(within % 60).padStart(2, '0')}`;
+  if (dayOffset === 1) return `次日 ${hhmm}`;
+  if (dayOffset >= 2) return `第 ${dayOffset + 1} 天 ${hhmm}`;
+  return hhmm;
 }
 
 function normalizeClockInput(value, fallback = '09:00') {
@@ -5183,7 +5711,7 @@ function selectTransport(mode) {
 
 function autoUpdateReturnDate() {
   if (!wizData.departureDate) return;
-  const addDays = isLongTrip(wizData.days) ? 1 : 0;
+  const addDays = getWizardDayCount(wizData.days) - 1; // F5：回程日＝出發日＋(天數−1)
   const d = new Date(wizData.departureDate);
   d.setDate(d.getDate() + addDays);
   wizData.returnDate = d.toISOString().split('T')[0];
@@ -5453,6 +5981,7 @@ async function finishWizard() {
       returnDate: wizData.returnDate || '',
       budget: wizData.budget || '',
       accommodation: isLongTrip(days) ? (wizData.accommodation || '飯店') : '',
+      lodgingName: isLongTrip(days) ? String(wizData.lodgingName || '').trim().slice(0, 60) : '',
       ...(isLongTrip(days) ? { day1Hours: wizData.day1Hours || 8, day2EndTime: wizData.day2EndTime || '12:00' } : {}),
       desiredSpots: (wizData.desiredSpots || '').trim()
     },
@@ -5524,6 +6053,8 @@ async function _doGeneration(trip, wData) {
   try {
     _genPerf.start();
     setWizGenStep(0);
+    // F3 自動避雨：出發日近且台東有雨 → 注入 prompt 規則（_rainOutlook 為暫態欄位，不入庫）
+    wData._rainOutlook = await fetchTripRainOutlook(wData).catch(() => null);
     const _liveDest = wData.dest || wData.destCustom || '';
     // 本地優先：有本地景點資料就直接用，跳過 Google Maps 即時抓取
     const _localHint = buildLocalPoiHintBlock(_liveDest);
@@ -5571,6 +6102,22 @@ async function _doGeneration(trip, wData) {
       // 使用者自訂名稱（customTitle）優先：AI 標題只在未自訂時作為別名保存
       trip.aiTitle = trip.customTitle ? trip.title : (finalPlan.title || trip.title);
       trip.aiReply = finalPlan.reply || '';
+      // F4 預算硬約束：估算超支就把貴門票景點換成免費替代；換完仍超支則標記警示
+      try {
+        const _budget = enforceBudgetCap(trip, wData);
+        if (_budget) {
+          if (_budget.swaps.length) {
+            const _swapTxt = _budget.swaps.map(s => `「${s.from}」→「${s.to}」`).join('、');
+            trip.aiReply = `${trip.aiReply ? trip.aiReply + ' ' : ''}💰 為符合你的預算，已把 ${_swapTxt} 換成免費替代景點。`;
+          }
+          if (_budget.overrunPerPerson > 0) {
+            trip.budgetOverrun = _budget.overrunPerPerson;
+            if (typeof showToast === 'function') showToast(`⚠️ 估算仍超出人均預算約 $${_budget.overrunPerPerson}（估算值），可再調整景點或預算`, 'orange');
+          } else {
+            delete trip.budgetOverrun;
+          }
+        }
+      } catch (e) { console.warn('enforceBudgetCap failed:', e); }
     }
     _genPerf.mark('step2 後處理');
     _genPerf.table('行程生成');
@@ -5898,6 +6445,19 @@ function renderCollabPanel() {
         <button class="collab-mini-btn" onclick="collabCopy(document.getElementById('collabShareLink').value,'唯讀分享連結')">🔗 複製唯讀連結</button>
       </div>
       <div class="collab-qr-row"><img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div class="collab-qr-fallback" style="display:none">QR Code 暫時無法載入，請改用邀請碼或複製連結加入。</div><div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
+      ${(() => {
+        // 好友一鍵邀請：列出尚未加入這份行程的好友，點一下複製含邀請碼的訊息（零 schema 變動）
+        try {
+          const joined = new Set((d.memberEmails || []).map(x => String(x).toLowerCase()));
+          const cands = (friendsAccepted || []).map(f => friendOtherParty(f))
+            .filter(o => o && o.email && !joined.has(String(o.email).toLowerCase()));
+          window.__collabFriendCands = cands.slice(0, 12);
+          if (!window.__collabFriendCands.length) return '';
+          return `<div class="collab-pref-label" style="margin-top:8px;">從好友邀請（點一下複製邀請訊息，貼給對方即可）</div>
+            <div class="collab-friend-chips">${window.__collabFriendCands.map((o, i) =>
+              `<button class="collab-mini-btn" onclick="collabInviteFriend(${i})">👤 ${escapeHtml(String(o.name || o.email))}</button>`).join('')}</div>`;
+        } catch (_e) { return ''; }
+      })()}
       ${isOwner ? `<div class="collab-danger-row"><button class="collab-mini-btn ghost" onclick="collabRevoke()">停用邀請碼</button></div>` : ''}
     </div>
     <div class="collab-section">
@@ -6064,6 +6624,15 @@ async function runCollabGeneration(tripId) {
     if (!trip) { trip = { id: d.id, title: d.title, region: d.region, days: d.days, collab: true, role: 'owner', wizardData: wData, stops: [] }; myTrips.unshift(trip); }
     trip.wizardData = wData;
     await _doGeneration(trip, wData);
+    // F1：重生成完成 → 通知其他成員（id 帶小時戳，一小時內重複生成只發一次；失敗靜默）
+    if (window.WAI_NOTIFY && Array.isArray(d.memberEmails) && d.memberEmails.length && Array.isArray(trip.stops) && trip.stops.length) {
+      const _now = new Date();
+      const _hourStamp = `${_now.getFullYear()}${String(_now.getMonth() + 1).padStart(2, '0')}${String(_now.getDate()).padStart(2, '0')}${String(_now.getHours()).padStart(2, '0')}`;
+      WAI_NOTIFY.pushToMany(d.memberEmails, WAI_NOTIFY.nid(['trip_regen', tripId, _hourStamp]), {
+        type: 'trip_regenerated', tripId: tripId, tripTitle: trip.title || d.title || '共編行程',
+        fromName: (currentUser && currentUser.name) || '', message: ''
+      });
+    }
   } finally {
     if (locked) { try { await WAI_COLLAB.releaseRegenLock(tripId); } catch (e) {} }
   }
@@ -6155,3 +6724,21 @@ function showToast(msg, type='') {
   t.textContent = msg; t.className = `toast${type?' '+type:''} show`;
   clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove('show'), 2400);
 }
+
+// ── a11y：Esc 關閉最上層彈窗（原本所有 overlay 只能點外部/右上關閉，鍵盤無法操作）──
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const opens = [...document.querySelectorAll('.overlay.open')];
+  if (!opens.length) return;
+  // 取 z-index 最高者（login/prefWizard 是 300，一般 overlay 較低）
+  let top = opens[0], tz = -1;
+  opens.forEach((o) => { const z = parseInt(getComputedStyle(o).zIndex, 10) || 0; if (z >= tz) { tz = z; top = o; } });
+  // wizardOverlay 有生成中收合邏輯，走專屬 closeWizard；其餘直接關
+  if (top.id === 'wizardOverlay' && typeof closeWizard === 'function') closeWizard();
+  else top.classList.remove('open');
+});
+// 彈窗補 dialog 語意（螢幕報讀器才會宣告對話框情境）
+document.querySelectorAll('.overlay').forEach((ov) => {
+  const modal = ov.firstElementChild;
+  if (modal && !modal.hasAttribute('role')) { modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); }
+});

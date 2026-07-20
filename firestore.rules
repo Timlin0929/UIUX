@@ -499,6 +499,38 @@ service cloud.firestore {
       }
     }
 
+    // F1 通知中心：user_notifications/{emailKey}/items/{nid}
+    // - 收件人（emailKey == 自己 email 的 memberKey）可讀、可標已讀、可刪。
+    // - 寄件人只能 create（確定性 nid，同事件重送會撞既有 doc → 被拒＝天生防打擾），
+    //   且必須「認識」收件人：同行程成員，或雙方存在 friendships 文件（pending/accepted 皆可，
+    //   邀請類通知在關係成立前就要送）。
+    match /user_notifications/{emailKey}/items/{nid} {
+      function isRecipient() {
+        return hasEmail() && memberKey(request.auth.token.email) == emailKey;
+      }
+      function senderKnowsRecipient(data) {
+        return (data.get('tripId', '') != '' && isTripMemberOrOwner(data.tripId))
+          || exists(/databases/$(database)/documents/friendships/$(memberKey(request.auth.token.email) + '__' + emailKey))
+          || exists(/databases/$(database)/documents/friendships/$(emailKey + '__' + memberKey(request.auth.token.email)));
+      }
+      allow read: if isRecipient();
+      allow create: if hasEmail()
+        && request.resource.data.keys().hasOnly(['type', 'fromEmail', 'fromName', 'tripId', 'tripTitle', 'message', 'read', 'createdAt'])
+        && request.resource.data.type in ['collab_invite', 'friend_invite', 'friend_accept', 'trip_renamed', 'trip_regenerated', 'friend_trip_completed']
+        && request.resource.data.fromEmail == request.auth.token.email
+        && request.resource.data.fromName is string && request.resource.data.fromName.size() <= 100
+        && request.resource.data.tripId is string && request.resource.data.tripId.size() <= 150
+        && request.resource.data.tripTitle is string && request.resource.data.tripTitle.size() <= 200
+        && request.resource.data.message is string && request.resource.data.message.size() <= 200
+        && request.resource.data.read == false
+        && request.resource.data.createdAt == request.time
+        && senderKnowsRecipient(request.resource.data);
+      allow update: if isRecipient()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        && request.resource.data.read == true;
+      allow delete: if isRecipient();
+    }
+
     match /public_trips/{shareId} {
       // 公開分享改由後端依 tripId + shareToken 即時讀取並去敏
       allow read, write: if false;

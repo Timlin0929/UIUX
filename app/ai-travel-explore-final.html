@@ -6,20 +6,25 @@
 <title>WanderAI — 找點樂子</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='1' y='14' font-size='14'>🧭</text></svg>">
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="weather.env.js"></script>
-<script src="poi-data.js"></script>
-<script src="restaurant-data.js"></script>
+<script src="poi-data.js" defer></script>
+<script src="restaurant-data.js" defer></script>
+<script src="attraction-fee-config.js" defer></script>
 <script src="ferry-config.js"></script>
 <script src="cost-config.js"></script>
 <script src="avoid-tags.js"></script>
-<script src="collab.js?v=20260714-collab-fix"></script>
-<script src="friends.js?v=20260716-w4-friends"></script>
+<script src="collab.js?v=20260718-uiux"></script>
+<script src="friends.js?v=20260718-uiux"></script>
+<script src="notifications.js?v=20260719-f1"></script>
 <script src="wheel-picker.js"></script>
-<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260714-collab-fix">
+<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260719-f5">
+<link rel="stylesheet" href="./design-tokens.css?v=20260719-p2">
 </head>
 <body>
 
@@ -319,6 +324,10 @@
   </div>
   <button class="topbar-new-btn" onclick="openWizard()">＋ 建立微旅行</button>
   <button class="topbar-new-btn secondary" id="journeyJoinBtn" onclick="openJourneyJoin()" style="display:none;">📱 邀請碼快速加入</button>
+  <div class="notif-wrap" id="notifWrap" style="display:none;">
+    <button class="notif-bell" id="notifBellBtn" onclick="toggleNotifPanel()" aria-label="通知">🔔<span class="notif-badge" id="notifBadge" style="display:none"></span></button>
+    <div class="notif-panel" id="notifPanel"></div>
+  </div>
   <div class="user-menu-wrap" id="userMenuWrap">
     <!-- injected by JS -->
   </div>
@@ -437,6 +446,7 @@
         <button class="topbar-new-btn" onclick="openAddFriendModal()">➕ 加好友</button>
       </div>
     </div>
+    <div id="friendsFeed"></div>
     <div id="friendsPendingList"></div>
     <div id="friendsList"></div>
   </div>
@@ -449,7 +459,7 @@
   <button class="mbn-item" onclick="location.href='ai-travel-planner-v8.html'"><span class="mbn-ico" aria-hidden="true">✈️</span>行程編輯</button>
 </nav>
 
-<script src="./ai-travel-explore-final.js?v=20260714-collab-fix"></script>
+<script src="./ai-travel-explore-final.js?v=20260720-auth1"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
 <div id="genMiniBar" hidden onclick="reopenWizGen()">
   <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>

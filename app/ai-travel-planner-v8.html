@@ -6,8 +6,11 @@
 <title>WanderAI — 專屬旅遊畫布</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='1' y='14' font-size='14'>🗺️</text></svg>">
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260714-collab-fix">
+<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260719-f5">
+<link rel="stylesheet" href="./design-tokens.css?v=20260719-p2">
 </head>
 <body>
 
@@ -62,6 +65,7 @@
           <button class="replan-btn primary" id="replanCompleteTripBtn" onclick="window.markTripAsCompleted()" style="display:none;">🏁 結束行程</button>
           <button class="replan-btn secondary" id="replanResetTripBtn" onclick="window.resetTripProgress()" style="display:none;">↩ 重設進度</button>
           <span id="heroMoreGroup">
+            <button class="replan-btn secondary" onclick="openFullTripNavigation()">🧭 整趟導航</button>
             <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
             <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           </span>
@@ -212,25 +216,23 @@
     <div id="view-current-spot" class="view-section">
       <div class="spot-detail-header">
         <button class="spot-detail-back" onclick="switchView('itinerary')">←</button>
-        <div class="spot-detail-status">行程中</div>
+        <div class="spot-detail-status" id="spotDetailStatus">未開始</div>
       </div>
       <div class="spot-detail-hero">
-        <div class="spot-detail-title">小野柳</div>
-        <div class="spot-detail-distance">距離下一個地點 · 約 45 分鐘路程</div>
+        <div class="spot-detail-title" id="spotDetailTitle">尚未載入行程</div>
+        <div class="spot-detail-distance" id="spotDetailDistance">載入或生成行程後，這裡會顯示目前景點</div>
       </div>
-      <div class="spot-detail-image">🏞️</div>
+      <div class="spot-detail-image" id="spotDetailImage">🏞️</div>
       <div class="spot-detail-content">
         <div class="spot-detail-card">
           <div class="spot-detail-card-title">景點介紹</div>
-          <div class="spot-detail-card-desc">
-            富岡地質公園（小野柳）位於屏東県西側，被譽為「亞洲最美地質景觀」。每年吸引數百萬遊客前來欣賞獨特的海蝕地形與奇岩怪石。
+          <div class="spot-detail-card-desc" id="spotDetailDesc">
+            開始行程後，這裡會顯示目前景點的介紹。
           </div>
         </div>
-        <div class="spot-detail-card">
-          <div class="spot-detail-card-title">推薦活動</div>
-          <div class="spot-detail-card-desc">
-            沿著步道散策約 30 分鐘，可近距離欣賞地質奇觀；也可在觀景台拍照留念，俯瞰蒼藍大海。
-          </div>
+        <div class="spot-detail-card" id="spotDetailNoticeCard" style="display:none">
+          <div class="spot-detail-card-title">注意事項</div>
+          <div class="spot-detail-card-desc" id="spotDetailNotice"></div>
         </div>
         <div class="spot-detail-actions">
           <div class="spot-action-btn" onclick="playVoiceGuide()">
@@ -241,13 +243,13 @@
             <div class="spot-action-icon">📍</div>
             <div class="spot-action-label">行程詳情</div>
           </div>
-          <div class="spot-action-btn">
+          <div class="spot-action-btn" onclick="switchView('travellog')">
             <div class="spot-action-icon">📸</div>
             <div class="spot-action-label">照片分享</div>
           </div>
-          <div class="spot-action-btn">
+          <div class="spot-action-btn" onclick="openTripFeedback()">
             <div class="spot-action-icon">💬</div>
-            <div class="spot-action-label">留言評論</div>
+            <div class="spot-action-label">評分回饋</div>
           </div>
         </div>
       </div>
@@ -319,6 +321,7 @@
       <div style="padding: 0 16px 16px;">
         <p style="font-size:13px;color:var(--ink2);margin-bottom:16px;">已標記的景點會在 AI 重新規劃時自動排除，讓每次旅行都有新體驗。</p>
         <button class="travellog-rate-btn" onclick="openTripFeedback()">⭐ 為這趟旅程評分</button>
+        <button class="travellog-rate-btn" id="journalGenBtn" onclick="openTripJournal()">📖 生成遊記</button>
         <div id="travellog-collage-bar" style="margin-top:10px;"></div>
         <input type="file" id="tripPhotoInput" accept="image/*" multiple hidden>
         <div id="travellog-list" style="margin-top:16px;"></div>
@@ -388,7 +391,7 @@
     <div class="ai-input-area">
       <div class="chat-input-box">
         <input id="aiChatInput" type="text" placeholder="告訴我你想吃什麼、玩什麼...">
-        <button id="aiChatSendBtn" type="button">➤</button>
+        <button id="aiChatSendBtn" type="button" aria-label="送出訊息">➤</button>
       </div>
     </div>
   </div>
@@ -431,7 +434,7 @@
 
 <div class="mobile-view-switch" id="mobileViewSwitch">
   <button class="mobile-switch-btn active" id="mobileSwitchFunctions" onclick="setMobileMode('functions')">功能頁</button>
-  <button class="mobile-switch-btn" id="mobileSwitchSpot" onclick="switchView('current-spot'); setMobileMode('functions');">現在景點</button>
+  <button class="mobile-switch-btn" id="mobileSwitchSpot" onclick="switchView('current-spot')">現在景點</button>
   <button class="mobile-switch-btn" id="mobileSwitchMap" onclick="setMobileMode('map')">地圖</button>
 </div>
 
@@ -472,6 +475,7 @@
       </tbody>
     </table>
     <div class="driver-control-row">
+      <button class="driver-ctrl-btn primary" onclick="openFullTripNavigation()">🧭 整趟導航</button>
       <button class="driver-ctrl-btn primary" onclick="switchView('itinerary')">查看行程</button>
       <button class="driver-ctrl-btn warn" onclick="setRideMode('change-road')">改道路線</button>
     </div>
@@ -490,8 +494,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
-<script src="./collab.js?v=20260714-collab-fix"></script>
-<script src="./ai-travel-planner-v8.js?v=20260715-replan-controls"></script>
+<script src="./collab.js?v=20260718-uiux"></script>
+<script src="./notifications.js?v=20260719-f1"></script>
+<script src="./ai-travel-planner-v8.js?v=20260720-auth1"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。

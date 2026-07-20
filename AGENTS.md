@@ -69,3 +69,7 @@ Call out anything blocked by the local environment, such as browser automation, 
 ```
 
 If a user-logic issue is found during this pass, fix it directly and rerun the related flow before finishing.
+
+## User testing preference
+
+- When testing flows that require two different accounts, use two separate Chrome Profiles. Do not use two tabs in the same Profile as a substitute, because they share the same authentication session.

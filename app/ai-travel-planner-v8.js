@@ -1104,6 +1104,24 @@
     window.open(url, '_blank', 'noopener');
   }
 
+  // ── 整趟導航：一次把當日所有站串成 Google Maps 多點路線（起點→中停點→終點）──
+  // Google Maps dir URL 的 waypoints 上限 9 個；超過時取前 9 個中停點並提示。
+  function openFullTripNavigation() {
+    const coords = (replanStops || [])
+      .map((s) => ({ s, pos: getStopLatLng(s) }))
+      .filter((x) => x.pos);
+    if (coords.length < 2) return feedbackToast('行程站點不足或缺座標，無法整趟導航', 'orange');
+    const origin = coords[0].pos;
+    const dest = coords[coords.length - 1].pos;
+    const mids = coords.slice(1, -1);
+    if (mids.length > 9) feedbackToast('中停點超過 Google Maps 上限，僅帶入前 9 站', 'orange');
+    const waypoints = mids.slice(0, 9).map((x) => `${x.pos.lat},${x.pos.lng}`).join('|');
+    const mode = normalizeTransitMode(coords[0].s.transitMode) === 'walk' ? 'walking' : 'driving';
+    const url = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lng}&destination=${dest.lat},${dest.lng}`
+      + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=${mode}`;
+    window.open(url, '_blank', 'noopener');
+  }
+
   // 站名短版（嵌進提示句用）：先砍掉括號附註（餐廳名常帶「(最後點餐時間…)」整串），再截長度
   function shortStopName(name, maxLen = 14) {
     let s = String(name || '').trim();
@@ -2025,7 +2043,7 @@
                     durationLocked: s.durationLocked === true,
                     checkedInAt: s.checkedInAt || null,
                     isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
-                    dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                    dayIndex: clampDayIndex(s.dayIndex, 1),
                     __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
                   };
                 }
@@ -2113,7 +2131,7 @@
                 durationLocked: s.durationLocked === true,
                 checkedInAt: s.checkedInAt || null,
                 isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
-                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                dayIndex: clampDayIndex(s.dayIndex, 1),
                 __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
               };
             }));
@@ -3817,18 +3835,35 @@
     const startMin = getReplanStartMinutes();
     const limitMin = parseDurationMinutes(prefs.days);
     if (!Number.isFinite(limitMin) || limitMin <= 0) return { changed: false, fits: true, limitEndMin: null };
-    const limitEndMin = isMultiDayTrip(prefs.days)
-      ? getMultiDayWindow(prefs).day2EndMin
-      : startMin + limitMin;
+    // 逐日視窗：多日各自 [startMin,endMin]；單日單一視窗。每天各自從自己的 startMin 錨定，
+    // 故壓縮必須「只壓超出自己視窗的那天」——壓別天的停留幫不到超時日，還會白縮沒超時的日子。
+    const multi = isMultiDayTrip(prefs.days);
+    const win = multi ? getMultiDayWindow(prefs) : null;
+    const dayWindows = multi ? win.days : [{ startMin, endMin: startMin + limitMin }];
+    const limitEndMin = dayWindows[dayWindows.length - 1].endMin;
+    const dayOf = (s) => Math.max(1, Math.min(dayWindows.length, Math.round(Number(s && s.dayIndex)) || 1));
 
     const scheduleEnd = () => {
       const sch = buildReplanSchedule();
       return { sch, end: sch.length ? sch[sch.length - 1].end : startMin };
     };
     const curStayOf = (sch, i, stop) => Math.round((sch[i] && sch[i].computedStayMin) || (stop && stop.stayMin) || 0);
+    // 各日末站 end 超出該日視窗 endMin 的量；回傳總量、超時日集合、每日超量表。
+    const measureOverflow = (sch) => {
+      const dayEnd = {};
+      sch.forEach((row) => { const d = dayOf(row); dayEnd[d] = Math.max(dayEnd[d] || 0, row.end); });
+      let total = 0; const overDays = new Set(); const byDay = {};
+      dayWindows.forEach((w, idx) => {
+        const d = idx + 1;
+        const o = (dayEnd[d] || 0) - w.endMin;
+        if (o > 0) { total += o; overDays.add(d); byDay[d] = o; }
+      });
+      return { total, overDays, byDay };
+    };
 
-    let { sch, end } = scheduleEnd();
-    if (end <= limitEndMin) return { changed: false, fits: true, limitEndMin };
+    let { sch } = scheduleEnd();
+    let ov = measureOverflow(sch);
+    if (ov.total <= 0) return { changed: false, fits: true, limitEndMin };
 
     // 以首次排程的有效停留為「原本」，算 35% 下限（最多減 35% → 保底 65%）；
     // 端點（起點/終點）與餐廳/用餐站皆為例外，不參與扣時。
@@ -3843,23 +3878,18 @@
     let changed = false;
     let guard = 0;
     while (guard++ < 4000) {
-      const r = scheduleEnd(); sch = r.sch; end = r.end;
-      const overflow = end - limitEndMin;
-      if (overflow <= 0) break;
-      // 候選：可扣、且目前有效停留仍高於 35% 下限
-      const cands = info.filter(t => t.eligible && curStayOf(sch, t.i, t.stop) > t.floor);
+      const r = scheduleEnd(); sch = r.sch; ov = measureOverflow(sch);
+      if (ov.total <= 0) break;
+      // 候選：屬於超時日、可扣、且有效停留仍高於 35% 下限
+      const cands = info.filter(t => t.eligible && ov.overDays.has(dayOf(t.stop)) && curStayOf(sch, t.i, t.stop) > t.floor);
       if (!cands.length) break; // 已無可縮，盡力而為
-      // 平均分攤：本輪每站各扣約 overflow/N（至少 1 分），但不超過各自剩餘可縮空間；
-      // 部分站碰到下限後，剩餘量在下一輪由其餘站再均攤（水位填平）。
-      const share = Math.max(1, Math.floor(overflow / cands.length));
+      const share = Math.max(1, Math.floor(ov.total / cands.length));
       let applied = 0;
       for (const t of cands) {
-        const remain = overflow - applied;
-        if (remain <= 0) break;
         const curStay = curStayOf(sch, t.i, t.stop);
         const room = curStay - t.floor;
         if (room <= 0) continue;
-        const cut = Math.min(room, share, remain);
+        const cut = Math.min(room, share);
         if (cut <= 0) continue;
         t.stop.stayMin = curStay - cut;
         // 讓新的 stayMin 生效：清除手動時間覆寫
@@ -3871,20 +3901,19 @@
       if (applied <= 0) break; // 安全：本輪無法再扣則停止
     }
 
-    // 殘量收尾（精準落點優先）：主迴圈守 35% 後若仍超出（額度用罄），允許從「停留最久」的景點
-    // 再多扣（可略超過 35%，但每站至少保留 HARD_MIN 分），把剩餘分鐘扣到剛好落在設定時間。餐廳仍不扣。
+    // 殘量收尾（精準落點優先）：主迴圈守 35% 後若某日仍超出（額度用罄），從該超時日「停留最久」的
+    // 景點再多扣（可略超過 35%，但每站至少保留 HARD_MIN 分），扣到剛好落在該日視窗。餐廳仍不扣。
     const HARD_MIN = 5;
     guard = 0;
     while (guard++ < 4000) {
-      const r = scheduleEnd(); sch = r.sch; end = r.end;
-      const overflow = end - limitEndMin;
-      if (overflow <= 0) break;
-      const cands = info.filter(t => t.eligible && curStayOf(sch, t.i, t.stop) > HARD_MIN);
+      const r = scheduleEnd(); sch = r.sch; ov = measureOverflow(sch);
+      if (ov.total <= 0) break;
+      const cands = info.filter(t => t.eligible && ov.overDays.has(dayOf(t.stop)) && curStayOf(sch, t.i, t.stop) > HARD_MIN);
       if (!cands.length) break; // 連硬下限都到了，真的無法再扣
       cands.sort((a, b) => curStayOf(sch, b.i, b.stop) - curStayOf(sch, a.i, a.stop));
       const t = cands[0];
       const curStay = curStayOf(sch, t.i, t.stop);
-      const cut = Math.min(curStay - HARD_MIN, overflow);
+      const cut = Math.min(curStay - HARD_MIN, ov.byDay[dayOf(t.stop)] || ov.total);
       if (cut <= 0) break;
       t.stop.stayMin = curStay - cut;
       t.stop.manualStartMin = null;
@@ -3892,8 +3921,8 @@
       changed = true;
     }
 
-    const final = scheduleEnd();
-    return { changed, fits: final.end <= limitEndMin, limitEndMin };
+    const finalSch = scheduleEnd();
+    return { changed, fits: measureOverflow(finalSch.sch).total <= 0, limitEndMin };
   }
 
   // 套用匯出前壓縮並同步畫面/儲存/提示（回傳 fit 結果，無變動時為 no-op）
@@ -3973,10 +4002,13 @@
 
   function minutesToClock(totalMinutes) {
     const safe = Math.max(0, totalMinutes);
-    const h = Math.floor(safe / 60);
-    const m = safe % 60;
-    if (h >= 24) return `次日 ${String(h - 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    // 跨日換算：day2=次日、day3+=「第 N 天」（原本只減一次 24h，三天行程第 3 天會顯示「次日 33:00」）
+    const dayOffset = Math.floor(safe / (24 * 60));
+    const within = safe % (24 * 60);
+    const hhmm = `${String(Math.floor(within / 60)).padStart(2, '0')}:${String(within % 60).padStart(2, '0')}`;
+    if (dayOffset === 1) return `次日 ${hhmm}`;
+    if (dayOffset >= 2) return `第 ${dayOffset + 1} 天 ${hhmm}`;
+    return hhmm;
   }
 
   function updateMapTimeBanner(startStr, endStr, rawEndMin) {
@@ -3991,7 +4023,13 @@
     const endMin = (rawEndMin != null && Number.isFinite(rawEndMin)) ? rawEndMin : clockToMinutes(endStr);
     const diffMin = (Number.isFinite(startMin) && Number.isFinite(endMin)) ? endMin - startMin : null;
     rangeEl.textContent = `⏱ ${startStr} – ${endStr}`;
-    if (diffMin && diffMin > 0) {
+    const _prefsB = currentTripPreferences || {};
+    const _multiB = isMultiDayTrip(_prefsB.days);
+    const _winB = _multiB ? getMultiDayWindow(_prefsB) : null;
+    if (_multiB && _winB) {
+      // 多日：endMin 為跨日絕對分鐘，wall-clock 差值會膨脹成幾十小時 → 改顯示天數與每日概時
+      durEl.textContent = `共 ${_winB.dayCount} 天 · 每日約 ${Math.round(_winB.activeMinutes / _winB.dayCount / 60)} 小時`;
+    } else if (diffMin && diffMin > 0) {
       const h = Math.floor(diffMin / 60);
       const m = diffMin % 60;
       durEl.textContent = m > 0 ? `共 ${h} 小時 ${m} 分` : `共 ${h} 小時`;
@@ -3999,23 +4037,32 @@
       durEl.textContent = '';
     }
     if (warnEl) {
-      const prefs = currentTripPreferences || {};
-      const planStart = prefs.startTime || startStr;
-      const planDays = prefs.days;
-      const planEndStr = planDays ? calcReplanEndTime(planStart, planDays) : null;
-      const planEndMin = planEndStr ? clockToMinutes(planEndStr) : null;
-      const midnightOverrun = Number.isFinite(endMin) && endMin >= 24 * 60;
-      const planOverrun = planEndMin != null && Number.isFinite(endMin) && endMin > planEndMin + 1;
-      const overrun = planOverrun || midnightOverrun;
+      let overrun = false, overMin = 0, planEndLabel = '';
+      if (_multiB && _winB) {
+        // 多日：比對最後一天的視窗 end（絕對分鐘），不再拿當日 planEnd 對跨日 endMin
+        const lastEnd = _winB.days[_winB.days.length - 1].endMin;
+        overrun = Number.isFinite(endMin) && endMin > lastEnd + 1;
+        overMin = Math.max(1, endMin - lastEnd);
+        planEndLabel = minutesToClock(lastEnd);
+      } else {
+        const planStart = _prefsB.startTime || startStr;
+        const planDays = _prefsB.days;
+        const planEndStr = planDays ? calcReplanEndTime(planStart, planDays) : null;
+        const planEndMin = planEndStr ? clockToMinutes(planEndStr) : null;
+        const midnightOverrun = Number.isFinite(endMin) && endMin >= 24 * 60;
+        const planOverrun = planEndMin != null && Number.isFinite(endMin) && endMin > planEndMin + 1;
+        overrun = planOverrun || midnightOverrun;
+        const baseline = planEndMin != null ? planEndMin : (23 * 60 + 59);
+        overMin = Math.max(1, endMin - baseline);
+        planEndLabel = planEndStr || '';
+      }
       warnEl.style.display = overrun ? 'block' : 'none';
       if (overrun) {
-        const baseline = planEndMin != null ? planEndMin : (23 * 60 + 59);
-        const overMin = Math.max(1, endMin - baseline);
         const oh = Math.floor(overMin / 60);
         const om = overMin % 60;
         const overStr = oh > 0 ? (om > 0 ? `${oh}小時${om}分` : `${oh}小時`) : `${om}分`;
-        warnEl.textContent = planEndStr
-          ? `⚠ 超出規劃時間 ${overStr}（預計 ${planEndStr} 結束）`
+        warnEl.textContent = planEndLabel
+          ? `⚠ 超出規劃時間 ${overStr}（預計 ${planEndLabel} 結束）`
           : `⚠ 行程超出今日範圍 ${overStr}`;
       }
     }
@@ -4040,7 +4087,10 @@
     const source = String(mode || '').trim().toLowerCase();
     // 「大眾交通」已移除；舊行程若存有 public，遷移為汽車（避免長程段被當成走路）
     if (source === 'public') return 'car';
-    return TRANSIT_MODE_OPTIONS.some((item) => item.value === source) ? source : 'walk';
+    if (TRANSIT_MODE_OPTIONS.some((item) => item.value === source)) return source;
+    // 缺值/未知值退回使用者偏好車種（原本退 'walk'：任一環節掉欄位就整趟被當走路，
+    // 畫路線改要步行路線、回填真實步行時間後行程大幅超時，停留全被壓縮）
+    return getPreferredVehicleMode();
   }
 
   function getTransitModeMeta(mode) {
@@ -4215,28 +4265,31 @@
     const multiWindow = multiDay ? getMultiDayWindow(currentTripPreferences || {}) : null;
     let activeDay = 1;
     return replanStops.map((stop, index) => {
-      const stopDay = multiDay ? (Number(stop.dayIndex) === 2 ? 2 : 1) : 1;
-      if (multiDay && stopDay === 2 && activeDay !== 2) {
-        cursor = Math.max(cursor, multiWindow.day2StartMin);
-        activeDay = 2;
+      const stopDay = multiDay ? clampDayIndex(stop.dayIndex, 1) : 1;
+      if (multiDay && stopDay > activeDay) {
+        // F5 泛化：跨到任一新的一天，游標跳到該日開始（原本只處理第 2 天）
+        const dayWin = multiWindow.days[stopDay - 1] || multiWindow.days[multiWindow.days.length - 1];
+        cursor = Math.max(cursor, dayWin.startMin);
+        activeDay = stopDay;
       }
       const transitMode = normalizeTransitMode(stop.transitMode);
       stop.transitMode = transitMode;
       const defaultDuration = Math.max(5, stop.stayMin || 0);
+      const dayOffset = (stopDay - 1) * 24 * 60; // F5：manual 時刻若還是「當日時刻」，補上跨日偏移
       let preferredStart = Number.isFinite(stop.manualStartMin) ? stop.manualStartMin : cursor;
-      if (multiDay && stopDay === 2 && preferredStart < 24 * 60) preferredStart += 24 * 60;
+      if (multiDay && stopDay > 1 && preferredStart < dayOffset) preferredStart += dayOffset;
       let preferredEnd = Number.isFinite(stop.manualEndMin) ? stop.manualEndMin : (preferredStart + defaultDuration);
-      if (multiDay && stopDay === 2 && preferredEnd < 24 * 60) preferredEnd += 24 * 60;
+      if (multiDay && stopDay > 1 && preferredEnd < dayOffset) preferredEnd += dayOffset;
       const preferredDuration = Math.max(5, preferredEnd - preferredStart);
       const start = Math.max(preferredStart, cursor);
       const end = start + preferredDuration;
       const normalizedTransitMin = normalizeTransitMinutesValue(stop.transitMin);
       stop.transitMin = normalizedTransitMin;
-      
+
       let transit = 0;
       if (index < replanStops.length - 1) {
         transit = Number.isFinite(normalizedTransitMin) ? normalizedTransitMin : getDefaultTransitMinutes(transitMode);
-        const nextDay = multiDay ? (Number(replanStops[index + 1].dayIndex) === 2 ? 2 : 1) : stopDay;
+        const nextDay = multiDay ? clampDayIndex(replanStops[index + 1].dayIndex, 1) : stopDay;
         if (multiDay && nextDay !== stopDay) transit = 0; // 過夜不是站間交通時間
         const isDriveSeg = (transitMode === 'car' || transitMode === 'scooter');
         // 開車段的目的地若停在鄰近停車場，「停車後步行」也算進段落交通，
@@ -4350,7 +4403,7 @@
       mapPinId: assignedPinId,
       scenicCoordinates,
       businessHours: template.businessHours || null,
-      dayIndex: Math.max(1, Math.min(2, Number(template.dayIndex) || 1)),
+      dayIndex: clampDayIndex(template.dayIndex, 1),
       lat: stopCoordinates ? stopCoordinates.lat : null,
       lng: stopCoordinates ? stopCoordinates.lng : null,
       nearbyToiletLocations: template.toiletLocations || []
@@ -4637,6 +4690,23 @@
 
     if (typeof logTripEvent === 'function') {
       logTripEvent('trip_completed');
+    }
+
+    // F1 通知中心：完成行程 → 通知所有已成立好友（fire-and-forget，失敗靜默）
+    if (window.WAI_NOTIFY && window.WAI_COLLAB) {
+      (async () => {
+        try {
+          const { email, name } = getCurrentUserIdentity();
+          if (!email) return;
+          const friends = await WAI_NOTIFY.fetchAcceptedFriendEmails(email);
+          if (!friends.length) return;
+          const myKey = WAI_COLLAB.emailKey(email);
+          await WAI_NOTIFY.pushToMany(friends, WAI_NOTIFY.nid(['friend_done', currentItineraryId, myKey]), {
+            type: 'friend_trip_completed', tripId: currentItineraryId,
+            tripTitle: currentTripTitle || '微旅行', fromName: name || '', message: ''
+          });
+        } catch (e) { console.warn('[notify] trip_completed push failed:', e); }
+      })();
     }
 
     let addedCount = 0;
@@ -5171,7 +5241,7 @@
         checkedInAt: s.checkedInAt || null,
         isOutdoor: s.isOutdoor || false,
         altNearby: s.altNearby || null,
-        dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+        dayIndex: clampDayIndex(s.dayIndex, 1),
         __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
       };
     });
@@ -5336,7 +5406,7 @@
       checkedInAt: stop.checkedInAt || null,
       isOutdoor: stop.isOutdoor || false,
       altNearby: stop.altNearby || null,
-      dayIndex: Math.max(1, Math.min(2, Number(stop.dayIndex) || 1))
+      dayIndex: clampDayIndex(stop.dayIndex, 1)
     };
   }
 
@@ -5638,9 +5708,10 @@
 
   function getStopServiceDate(stop) {
     const departureDate = currentTripPreferences?.departureDate;
-    if (!departureDate || Number(stop && stop.dayIndex) !== 2) return departureDate;
+    const dayIdx = Math.round(Number(stop && stop.dayIndex)) || 1;
+    if (!departureDate || dayIdx <= 1) return departureDate;
     const date = new Date(departureDate + 'T00:00:00');
-    date.setDate(date.getDate() + 1);
+    date.setDate(date.getDate() + (dayIdx - 1)); // F5：第 N 天＝出發日＋(N−1)
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   }
 
@@ -5679,7 +5750,7 @@
     if (totalEl) {
       totalEl.textContent = schedule.length
         ? (multiDaySchedule
-          ? `兩天一夜 · 第 2 天 ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
+          ? `兩天一夜 · ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
           : `${minutesToClock(schedule[0].start)} - ${minutesToClock(schedule[schedule.length - 1].end)}`)
         : '--';
     }
@@ -5691,7 +5762,7 @@
     if (schedule.length) {
       const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
       if (heroTimeTag) heroTimeTag.textContent = multiDaySchedule
-        ? `⏱️ 兩天一夜 · 第 2 天 ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
+        ? `⏱️ 兩天一夜 · ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
         : `⏱️ ${minutesToClock(schedule[0].start)} – ${minutesToClock(schedule[schedule.length - 1].end)}`;
     }
 
@@ -6055,7 +6126,7 @@
     updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime), endTime);
     const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
     if (heroTimeTag) heroTimeTag.textContent = multiDaySchedule
-      ? `⏱️ 兩天一夜 · 第 2 天 ${minutesToClock(endTime)} 結束`
+      ? `⏱️ 兩天一夜 · ${minutesToClock(endTime)} 結束`
       : `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
 
     // 本地門票對照表（依目前行程目的地），供卡片顯示真實票價。
@@ -6082,7 +6153,7 @@
           <button class="voice-btn stop" onclick="stopVoiceGuide()">停止</button>
         </div>
       </div>
-      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `兩天一夜・第 2 天 ${minutesToClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
+      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `${getPrefsDayCount(currentTripPreferences || {}) >= 3 ? '三天兩夜' : '兩天一夜'}・第 ${getPrefsDayCount(currentTripPreferences || {})} 天 ${minutesToClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
       <div class="stay-suggestion-note">可直接調整每個景點的建議停留時間，系統會即時重新計算後續行程。</div>
     `;
 
@@ -6351,6 +6422,41 @@
   }
 
   // 切換左側視圖 (Itinerary, Budget, Members, Weather)
+  // 「現在景點」改為資料驅動：顯示進行中行程的目前站（未開始則顯示第一個景點站）
+  function renderCurrentSpotView() {
+    const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    const stops = (replanStops || []).filter(s => s && s.type !== 'start' && s.type !== 'end' && s.name);
+    if (!stops.length) {
+      set('spotDetailStatus', '未開始');
+      set('spotDetailTitle', '尚未載入行程');
+      set('spotDetailDistance', '載入或生成行程後，這裡會顯示目前景點');
+      set('spotDetailImage', '🏞️');
+      set('spotDetailDesc', '開始行程後，這裡會顯示目前景點的介紹。');
+      const nc = document.getElementById('spotDetailNoticeCard'); if (nc) nc.style.display = 'none';
+      return;
+    }
+    const ongoing = currentTripStatus === 'ongoing' && currentStopIndex >= 0 && replanStops[currentStopIndex];
+    const stop = ongoing ? replanStops[currentStopIndex] : stops[0];
+    const pos = replanStops.indexOf(stop);
+    const next = replanStops.slice(pos + 1).find(s => s && s.type !== 'start' && s.name);
+    set('spotDetailStatus', currentTripStatus === 'ongoing' ? '行程中' : (currentTripStatus === 'completed' ? '已完成' : '未開始'));
+    set('spotDetailTitle', stop.name || '景點');
+    let distText;
+    if (next && Number.isFinite(next.transitMin) && next.transitMin > 0) distText = `距離下一個地點 · 約 ${next.transitMin} 分鐘路程`;
+    else if (next) distText = `下一站：${next.name}`;
+    else distText = '這是本日最後一站';
+    if (stop.time) distText = `⏰ ${stop.time} · ` + distText;
+    set('spotDetailDistance', distText);
+    set('spotDetailImage', stop.emoji || '🏞️');
+    set('spotDetailDesc', (typeof hasMeaningfulSpotDescription === 'function' && hasMeaningfulSpotDescription(stop.desc)) ? String(stop.desc).trim() : '此景點暫無介紹，抵達後打卡可在旅記留下紀錄。');
+    const noticeCard = document.getElementById('spotDetailNoticeCard');
+    if (noticeCard) {
+      const notice = String(stop.notice || '').trim();
+      noticeCard.style.display = notice ? '' : 'none';
+      set('spotDetailNotice', notice);
+    }
+  }
+
   function switchView(viewId) {
     // 更新頂部按鈕狀態
     document.querySelectorAll('.nav-pill').forEach(btn => {
@@ -6369,6 +6475,7 @@
     if (viewId === 'travellog') renderTravelLog();
     if (viewId === 'budget') renderBudgetTracker();
     if (viewId === 'members') renderMembersView();
+    if (viewId === 'current-spot') renderCurrentSpotView();
     if (viewId === 'weather') refreshWeatherView(); // C5：切到天氣頁時抓 CWA 真實預報（失敗保留原內容）
 
     // 手機上的視圖模式邏輯
@@ -6657,7 +6764,7 @@
           </div>`).join('');
         const div = document.createElement('div');
         div.className = 'wc-rain-swap';
-        div.innerHTML = `<div class="wc-rain-swap-title">🌧 ${rd} 可能有雨，這些戶外景點可換成附近室內替代：</div>${items}`;
+        div.innerHTML = `<div class="wc-rain-swap-title">🌧 ${rd} 可能有雨，這些戶外景點可換成附近室內替代：<button class="wc-rain-swap-all" onclick="applyRainPlan()">☔ 一鍵切換雨天版</button></div>${items}`;
         container.appendChild(div);
       }
     }
@@ -6720,7 +6827,8 @@
     closeSwapPanel();
   };
 
-  function swapStopWithAlternative(stop, alt) {
+  function swapStopWithAlternative(stop, alt, opts) {
+    const quiet = !!(opts && opts.quiet); // F3：一鍵雨天版逐站替換時只做 mutation，收尾由呼叫端統一處理
     const prev = { name: stop.name, lat: stop.lat, lng: stop.lng, desc: stop.desc, isOutdoor: stop.isOutdoor };
     // 用替代景點覆蓋此站；座標鎖定跳過 Places 重驗
     stop.name = alt.name;
@@ -6738,12 +6846,38 @@
         stop.altNearby.unshift({ name: prev.name, lat: prev.lat, lng: prev.lng, desc: prev.desc || '', rating: null, isOutdoor: prev.isOutdoor, distM: 0 });
       }
     }
+    if (quiet) return;
     feedbackToast(`🔄 已換成「${alt.name}」`, 'green');
     renderItineraryDisplay();
     if (isReplanning && typeof renderReplanBoard === 'function') renderReplanBoard();
     persistCurrentTripStops();
     if (typeof syncMapToCurrentTrip === 'function') syncMapToCurrentTrip().catch(() => {});
   }
+
+  // F3：一鍵雨天版——把所有「戶外且有室內替代」的站一次換成室內候選（去重後逐站 quiet swap）
+  window.applyRainPlan = function () {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法替換景點', 'orange');
+    const stops = Array.isArray(replanStops) ? replanStops : [];
+    const usedNames = new Set(stops.map((s) => (s && s.name) || '').filter(Boolean));
+    let swapped = 0;
+    stops.forEach((stop) => {
+      if (!stop || stop.type === 'start' || stop.type === 'end') return;
+      if (!stop.isOutdoor || !Array.isArray(stop.altNearby)) return;
+      const alt = stop.altNearby.find((a) => a && a.isOutdoor === false && a.name && !usedNames.has(a.name));
+      if (!alt) return;
+      usedNames.delete(stop.name);
+      swapStopWithAlternative(stop, alt, { quiet: true });
+      usedNames.add(stop.name); // swap 後 stop.name 已是替代景點名
+      swapped++;
+    });
+    if (!swapped) return feedbackToast('目前沒有可換成室內的戶外景點', 'orange');
+    feedbackToast(`☔ 已把 ${swapped} 個戶外景點換成室內替代`, 'green');
+    renderItineraryDisplay();
+    if (isReplanning && typeof renderReplanBoard === 'function') renderReplanBoard();
+    persistCurrentTripStops();
+    if (typeof syncMapToCurrentTrip === 'function') syncMapToCurrentTrip().catch(() => {});
+    refreshWeatherView().catch(() => {});
+  };
 
   // 花費追蹤卡片：把人均預算拆成「交通（離島船票＋站間移動）」與「可動用餐飲/活動」並顯示。
   // 資料來自目前載入的行程站點（replanStops）＋偏好（currentTripPreferences）；缺費率/無行程時顯示友善提示。
@@ -6828,6 +6962,11 @@
       ? (bd.tier.perMax == null ? `每人 ${money(bd.tier.perMin)} 以上` : (bd.tier.perMin > 0 ? `每人 ${money(bd.tier.perMin)}–${money(bd.tier.perMax)}` : `每人 ${money(bd.tier.perMax)} 內`))
       : '（未選預算）';
 
+    // F4 預算硬約束：有上限的預算級距且估算總花費超過上限 → 紅色超支警示列
+    const overrunWarn = (bd && bd.tier.perMax != null && spendTotalPerPerson > bd.tier.perMax)
+      ? `<div class="budget-overrun-warn">⚠️ 目前估算已超出人均預算 ${money(bd.tier.perMax)}（超支 ${money(spendTotalPerPerson - bd.tier.perMax)}，估算值）</div>`
+      : '';
+
     host.innerHTML = `
       <div class="hero-section" style="padding-bottom: 24px;">
         <div class="hero-title">微旅行花費追蹤</div>
@@ -6837,6 +6976,7 @@
         ${discMain}
         ${progressBlock}
       </div>
+      ${overrunWarn}
       <div class="receipt-container">
         <div class="receipt-card">
           <div class="receipt-header">
@@ -7786,7 +7926,8 @@
   // 將「天數字串」統一轉成分鐘（支援 N小時 / 兩天一夜，並相容舊字串）
   function parseDurationMinutes(days) {
     const s = String(days || '').trim();
-    if (s === '2天' || s === '兩天一夜') return 960;
+    // 過夜行程一律以兩日活動估算；'3天'/'三天兩夜' 為舊資料相容別名，視同兩天一夜（本專案上限兩天一夜）
+    if (s === '2天' || s === '兩天一夜' || s === '3天' || s === '三天兩夜') return 960;
     const h = s.match(/^(\d+(?:\.\d+)?)\s*小時$/);
     if (h) return Math.round(parseFloat(h[1]) * 60);
     if (s === '半天') return 240;
@@ -7796,46 +7937,96 @@
 
   function isMultiDayTrip(days) {
     const value = String(days || '').trim();
-    return value === '2天' || value === '兩天一夜';
+    return value === '2天' || value === '兩天一夜' || value === '3天' || value === '三天兩夜';
   }
 
+  // prefs.days → 過夜行程天數（單日回 1）。本專案上限兩天一夜，舊 '3天' 資料視同 2 天。
+  function getPrefsDayCount(prefs) {
+    const s = String((prefs && prefs.days) || '').trim();
+    if (s === '2天' || s === '兩天一夜' || s === '3天' || s === '三天兩夜') return 2;
+    return 1;
+  }
+
+  // F5：dayIndex 統一 clamp（取代散落各處的 Math.max(1, Math.min(2, ...)) 硬上限）
+  function clampDayIndex(v, fallback) {
+    const dayCount = Math.max(1, getPrefsDayCount(currentTripPreferences || {}));
+    const n = Math.round(Number(v));
+    const fb = Number.isFinite(Number(fallback)) ? Number(fallback) : 1;
+    return Math.max(1, Math.min(dayCount, Number.isFinite(n) && n > 0 ? n : fb));
+  }
+
+  // F5 泛化：回 { startMin, dayCount, days:[{startMin,endMin}], activeMinutes }，
+  // 並保留 day1EndMin / day2StartMin / day2EndMin 舊鍵（dayCount==2 時值完全不變）。
+  // day2EndTime 語意＝「最後一天玩到幾點」；中間日（三天行程的第二天）約 8 小時。
   function getMultiDayWindow(prefs = {}) {
     const start = prefs.startTime || currentTripWindow.start || '09:00';
     const startMin = clockToMinutes(start) || (9 * 60);
+    const dayCount = Math.max(2, getPrefsDayCount(prefs));
     const day1Hours = Math.min(12, Math.max(1, Math.round(Number(prefs.day1Hours) || 8)));
-    const day2EndClock = prefs.day2EndTime || '12:00';
-    let day2EndMin = clockToMinutes(day2EndClock);
-    if (!Number.isFinite(day2EndMin)) day2EndMin = 12 * 60;
-    if (day2EndMin <= startMin) day2EndMin = startMin + 60;
+    const lastEndClock = prefs.day2EndTime || '12:00';
+    let lastEndMin = clockToMinutes(lastEndClock);
+    if (!Number.isFinite(lastEndMin)) lastEndMin = 12 * 60;
+    if (lastEndMin <= startMin) lastEndMin = startMin + 60;
+    const days = [];
+    let activeMinutes = 0;
+    for (let i = 1; i <= dayCount; i++) {
+      const base = startMin + (i - 1) * 24 * 60;
+      let endMin;
+      if (i === 1) endMin = base + day1Hours * 60;
+      else if (i === dayCount) endMin = base + Math.max(60, lastEndMin - startMin);
+      else endMin = base + 8 * 60; // 中間日約 8 小時
+      days.push({ startMin: base, endMin });
+      activeMinutes += endMin - base;
+    }
     return {
       startMin,
-      day1EndMin: startMin + day1Hours * 60,
-      day2StartMin: startMin + 24 * 60,
-      day2EndMin: day2EndMin + 24 * 60,
-      activeMinutes: day1Hours * 60 + Math.max(60, day2EndMin - startMin)
+      dayCount,
+      days,
+      activeMinutes,
+      day1EndMin: days[0].endMin,
+      day2StartMin: days[1].startMin,
+      day2EndMin: days[dayCount - 1].endMin
     };
   }
 
-  // 舊資料沒有 dayIndex 時，依兩天各自的活動時數切分；新資料則保留 AI／使用者的分日結果。
+  // 舊資料沒有 dayIndex 時，依各天活動時數占比切分；新資料則保留 AI／使用者的分日結果。
   function ensureStopDayIndexes(stops, prefs = {}) {
     if (!Array.isArray(stops) || !stops.length) return stops;
     if (!isMultiDayTrip(prefs.days)) {
       stops.forEach((stop) => { stop.dayIndex = 1; });
       return stops;
     }
+    const win = getMultiDayWindow(prefs);
+    const dayCount = win.dayCount;
     const middle = stops.filter((stop) => stop && stop.type !== 'start' && stop.type !== 'end');
-    const hasDay2 = middle.some((stop) => Number(stop.dayIndex) === 2);
-    if (!hasDay2 && middle.length) {
-      const win = getMultiDayWindow(prefs);
-      const ratio = win.day1EndMin - win.startMin;
-      const cut = Math.max(1, Math.min(middle.length - 1, Math.round(middle.length * ratio / win.activeMinutes)));
-      middle.forEach((stop, index) => { stop.dayIndex = index < cut ? 1 : 2; });
-    } else {
-      middle.forEach((stop) => { stop.dayIndex = Number(stop.dayIndex) === 2 ? 2 : 1; });
+    // AI 標的 dayIndex（clamp 後，0=無標記）
+    const clamped = middle.map((stop) => {
+      const n = Math.round(Number(stop.dayIndex));
+      return (Number.isFinite(n) && n > 0) ? Math.max(1, Math.min(dayCount, n)) : 0;
+    });
+    const distinct = [...new Set(clamped.filter((d) => d >= 1))].sort((a, b) => a - b);
+    // AI 分日「可信」＝每站都有標、且相異日連續覆蓋 1..dayCount（無缺日）。
+    // 否則（例：AI 回 1,1,3,3,3 缺第 2 天）改比例切分，避免缺日造成時間軸連續跨夜、時段爆表。
+    const aiValid = middle.length > 0
+      && clamped.every((d) => d >= 1)
+      && distinct.length === dayCount
+      && distinct.every((d, i) => d === i + 1);
+    if (aiValid) {
+      middle.forEach((stop, i) => { stop.dayIndex = clamped[i]; });
+    } else if (middle.length) {
+      // 依 days[] 各天活動分鐘占比，把站點比例切成 N 段
+      let cum = 0;
+      const bounds = win.days.map((d) => { cum += (d.endMin - d.startMin); return cum; });
+      middle.forEach((stop, index) => {
+        const frac = (index + 0.5) / middle.length * win.activeMinutes;
+        let day = bounds.findIndex((b) => frac <= b) + 1;
+        if (day <= 0) day = dayCount;
+        stop.dayIndex = Math.max(1, Math.min(dayCount, day));
+      });
     }
     stops.forEach((stop) => {
       if (stop.type === 'start') stop.dayIndex = 1;
-      if (stop.type === 'end') stop.dayIndex = 2;
+      if (stop.type === 'end') stop.dayIndex = dayCount;
     });
     // 路線排序只能調整同一天內的先後；分日欄位必須維持連續，避免第 2 天後又跳回第 1 天。
     stops.sort((a, b) => {
@@ -8189,7 +8380,7 @@
     const desiredSpots = (wizardData.desiredSpots || '').trim();
     const _durMin = parseDurationMinutes(days);
     const _mid = Math.max(1, Math.round(_durMin / 60));
-    const _base = (String(days) === '2天' || String(days) === '兩天一夜') ? [8, 14] : [Math.max(1, _mid - 1), _mid + 2];
+    const _base = isMultiDayTrip(days) ? [8, 14] : [Math.max(1, _mid - 1), _mid + 2];
     const _peopleProfile = getPeopleProfile(people);
     const min = Math.max(1, _base[0] + _peopleProfile.stopDelta);
     const max = Math.max(min, _base[1] + _peopleProfile.stopDelta);
@@ -8213,7 +8404,7 @@
       '【行程條件】',
       `目的地：${dest}`,
       multiDay
-        ? `行程長度：兩天一夜（第一天 ${startTime}～${minutesToClock(multiWindow.day1EndMin)}；第二天 ${startTime}～${endTime}）`
+        ? `行程長度：兩天一夜（${multiWindow.days.map((w, i) => `第${i + 1}天 ${minutesToClock(w.startMin % (24 * 60))}～${minutesToClock(w.endMin % (24 * 60))}`).join('；')}）`
         : `行程長度：${days}（時間窗口 ${startTime} ～ ${endTime}）`,
       isSolo ? `旅行方式：獨旅，節奏：${pace}，風格：${theme}` : `同行人數：${people}，節奏：${pace}，風格：${theme}`,
       `興趣：${interests}`,
@@ -8238,13 +8429,13 @@
       '【規劃規則】',
       `1. 必須包含 ${min}–${max} 個主要景點`,
       multiDay
-        ? `2. 每個景點都必須提供 dayIndex（1 或 2），第一天在 ${minutesToClock(multiWindow.day1EndMin)} 前結束；第二天從 ${startTime} 重新開始，最後一站在 ${endTime} 前後 15 分鐘內結束`
+        ? `2. 每個景點都必須提供 dayIndex（1 或 2 的整數），第一天在 ${minutesToClock(multiWindow.day1EndMin)} 前結束；第二天從 ${startTime} 重新開始，最後一站在 ${endTime} 前後 15 分鐘內結束`
         : `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
       `3. 每個景點必須是台灣 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
       (() => {
         // 單日行程：時間窗涵蓋用餐時段就強制安排具體店名的用餐站（餐廳候選由系統即時提供）
-        if (String(days) === '2天' || String(days) === '兩天一夜') return null;
+        if (isMultiDayTrip(days)) return null;
         const sM = clockToMinutes(startTime), eM = clockToMinutes(endTime);
         const overlaps = (a, b) => sM <= b && eM >= a;
         const meals = [];
@@ -8553,7 +8744,7 @@
           stayMin: Math.max(10, Math.min(180, s.duration || 30)),
           transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
           businessHours: s.businessHours || null,
-          dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+          dayIndex: clampDayIndex(s.dayIndex, 1),
           toiletLocations: []
         },
         hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -8599,7 +8790,7 @@
                   stayMin: Math.max(10, Math.min(180, s.duration || 30)),
                   transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
                   businessHours: s.businessHours || null,
-                  dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                  dayIndex: clampDayIndex(s.dayIndex, 1),
                   toiletLocations: []
                 },
                 hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -8645,7 +8836,7 @@
                   stayMin: Math.max(10, Math.min(180, s.duration || 30)),
                   transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-ai',
                   businessHours: s.businessHours || null,
-                  dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 1)),
+                  dayIndex: clampDayIndex(s.dayIndex, 1),
                   toiletLocations: []
                 },
                 hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng)))
@@ -8724,7 +8915,7 @@
                 stayMin: Math.max(15, Math.min(90, s.duration || 45)),
                 transitMode: getPreferredVehicleMode(), transitMin: null, baseId: 'replan-fill',
                 businessHours: s.businessHours || null,
-                dayIndex: Math.max(1, Math.min(2, Number(s.dayIndex) || 2)),
+                dayIndex: clampDayIndex(s.dayIndex, getPrefsDayCount(currentTripPreferences || {})),
                 toiletLocations: []
               },
               hint: (Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))) ? normalizeCoordinatePair(s.lat, s.lng) : null
@@ -8857,6 +9048,201 @@
     }
     return parsed;
   }
+
+  // ══════════════════════════════════════════════════
+  // AI 遊記（F6）：以本行程的打卡紀錄（含個人備註）生成第一人稱遊記。
+  // 存 localStorage（wai_trip_journals，tripId → {title,body,createdAt}），同行程重生成即覆蓋。
+  // ══════════════════════════════════════════════════
+  const TRIP_JOURNAL_KEY = 'wai_trip_journals';
+  let tripJournalGenerating = false;
+
+  function getLocalTripJournalMap() {
+    try { return JSON.parse(localStorage.getItem(TRIP_JOURNAL_KEY) || '{}'); } catch { return {}; }
+  }
+  function getLocalTripJournal(tripId) {
+    const map = getLocalTripJournalMap();
+    return (tripId && map[tripId]) ? map[tripId] : null;
+  }
+  function saveLocalTripJournal(tripId, journal) {
+    if (!tripId) return;
+    try {
+      const map = getLocalTripJournalMap();
+      map[tripId] = journal;
+      localStorage.setItem(TRIP_JOURNAL_KEY, JSON.stringify(map));
+    } catch (e) { console.warn('Save trip journal failed:', e); }
+  }
+
+  // 蒐集遊記素材：本行程的打卡景點（名稱／日期／備註／照片數）＋行程偏好＋既有評分
+  function collectJournalMaterial() {
+    const visited = getVisitedPlaces().filter(p => p && p.tripId && p.tripId === currentItineraryId);
+    const feedback = getLocalTripFeedback(currentItineraryId);
+    return {
+      tripTitle: currentTripTitle || '我的微旅行',
+      prefs: currentTripPreferences || {},
+      feedback: feedback,
+      places: visited.map(p => ({
+        name: p.name || '',
+        visitDate: p.visitDate || '',
+        note: (p.note || '').slice(0, 300),
+        photoCount: Array.isArray(p.photos) ? p.photos.length : 0
+      }))
+    };
+  }
+
+  function buildJournalPrompt(material) {
+    const lines = [];
+    lines.push('你是旅遊作家。請根據以下「真實造訪紀錄」，以第一人稱、繁體中文撰寫一篇 300-500 字的遊記。');
+    lines.push('【嚴格規則】');
+    lines.push('1. 只能寫下列實際造訪的景點，嚴禁虛構任何未列出的景點、店家或事件。');
+    lines.push('2. 若景點附有「我的備註」，務必自然地將備註內容寫進遊記（那是我當下的真實感受）。');
+    lines.push('3. 文風溫暖流暢、有畫面感，避免流水帳；可依造訪日期安排敘事順序。');
+    lines.push('4. 僅回傳 JSON：{"title":"遊記標題(15字內)","body":"遊記內文(300-500字，可用\\n分段)"}，不要 markdown。');
+    lines.push('');
+    lines.push(`【行程名稱】${material.tripTitle}`);
+    const pf = material.prefs || {};
+    const prefBits = [];
+    if (pf.people) prefBits.push(`同行：${pf.people}`);
+    if (pf.theme) prefBits.push(`風格：${pf.theme}`);
+    if (Array.isArray(pf.interests) && pf.interests.length) prefBits.push(`興趣：${pf.interests.join('、')}`);
+    if (prefBits.length) lines.push(`【行程背景】${prefBits.join('；')}`);
+    if (material.feedback && material.feedback.tripRating) {
+      lines.push(`【我對這趟旅程的整體評分】${material.feedback.tripRating}/5${material.feedback.comment ? `；我的心得：「${material.feedback.comment}」` : ''}`);
+    }
+    lines.push('【實際造訪紀錄】');
+    material.places.forEach((p, i) => {
+      const bits = [`${i + 1}. ${p.name}`];
+      if (p.visitDate) bits.push(`造訪日：${p.visitDate}`);
+      if (p.photoCount) bits.push(`拍了 ${p.photoCount} 張照片`);
+      if (p.note) bits.push(`我的備註：「${p.note}」`);
+      lines.push(bits.join('｜'));
+    });
+    return lines.join('\n');
+  }
+
+  async function generateTripJournal(material) {
+    const vertex = getVertexConfig();
+    let endpoint;
+    if (vertex.ready) {
+      endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
+    } else {
+      const apiKey = ensureGeminiApiKey();
+      if (!apiKey) throw new Error('尚未設定 API Key。');
+      endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    }
+    const payload = {
+      contents: [{ role: 'user', parts: [{ text: buildJournalPrompt(material) }] }],
+      generationConfig: buildGenConfig({ temperature: 0.9, maxOutputTokens: 2048 })
+    };
+    const response = await fetchReplanWithTimeout(endpoint, {
+      method: 'POST',
+      headers: await vertexAuthHeaders(),
+      body: JSON.stringify(payload)
+    }, 60000);
+    if (!response.ok) throw vertexHttpError(response.status, '遊記生成失敗');
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const parsed = safeParseJson(text);
+    if (!parsed || !parsed.body) throw new Error('AI 回傳格式不是有效遊記 JSON。');
+    return {
+      title: String(parsed.title || material.tripTitle || '我的遊記').slice(0, 40),
+      body: String(parsed.body).slice(0, 2000),
+      createdAt: Date.now()
+    };
+  }
+
+  function renderJournalOverlay(state) {
+    // state: { loading, journal, error, hasSaved }
+    let overlay = document.getElementById('journal-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'journal-overlay';
+      overlay.className = 'journal-overlay';
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) window.closeTripJournal(); });
+      document.body.appendChild(overlay);
+    }
+    const j = state.journal;
+    let inner = '';
+    if (state.loading) {
+      inner = `<div class="journal-title">📖 AI 遊記生成中…</div>
+        <div class="journal-body" style="text-align:center;padding:32px 0;">✨ 正在把你的打卡與備註寫成遊記，請稍候（約 10–20 秒）…</div>`;
+    } else if (state.error) {
+      inner = `<div class="journal-title">📖 遊記生成失敗</div>
+        <div class="journal-body">${escapeHtml(state.error)}</div>
+        <div class="journal-actions">
+          <button class="travel-btn primary" onclick="regenTripJournal()">🔁 再試一次</button>
+          <button class="travel-btn" onclick="closeTripJournal()">關閉</button>
+        </div>`;
+    } else if (j) {
+      inner = `<div class="journal-title">📖 ${escapeHtml(j.title)}</div>
+        <div class="journal-sub">${state.hasSaved ? '已儲存的遊記' : '剛出爐的遊記'}${j.createdAt ? ' · ' + new Date(j.createdAt).toLocaleDateString('zh-TW') : ''}</div>
+        <div class="journal-body">${escapeHtml(j.body).replace(/\n/g, '<br>')}</div>
+        <div class="journal-actions">
+          <button class="travel-btn" onclick="copyTripJournal()">📋 複製</button>
+          <button class="travel-btn primary" onclick="saveTripJournal()">💾 儲存</button>
+          <button class="travel-btn" onclick="regenTripJournal()" ${tripJournalGenerating ? 'disabled' : ''}>🔁 重新生成</button>
+          <button class="travel-btn" onclick="closeTripJournal()">關閉</button>
+        </div>`;
+    }
+    overlay.innerHTML = `<div class="journal-card">${inner}</div>`;
+    requestAnimationFrame(() => overlay.classList.add('open'));
+  }
+
+  let currentJournalDraft = null;
+
+  window.openTripJournal = function() {
+    const material = collectJournalMaterial();
+    if (!material.places.length) {
+      feedbackToast('這趟行程還沒有打卡紀錄，先在景點按「📌 去過了」再來生成遊記吧！', 'orange');
+      return;
+    }
+    const saved = getLocalTripJournal(currentItineraryId);
+    if (saved) {
+      currentJournalDraft = saved;
+      renderJournalOverlay({ journal: saved, hasSaved: true });
+      return;
+    }
+    window.regenTripJournal();
+  };
+
+  window.regenTripJournal = async function() {
+    if (tripJournalGenerating) return;
+    const material = collectJournalMaterial();
+    if (!material.places.length) { feedbackToast('這趟行程還沒有打卡紀錄。', 'orange'); return; }
+    tripJournalGenerating = true;
+    renderJournalOverlay({ loading: true });
+    try {
+      const journal = await generateTripJournal(material);
+      currentJournalDraft = journal;
+      tripJournalGenerating = false;
+      renderJournalOverlay({ journal, hasSaved: false });
+    } catch (e) {
+      tripJournalGenerating = false;
+      console.warn('Trip journal generation failed:', e);
+      renderJournalOverlay({ error: (e && e.message) || '生成失敗，請稍後再試。' });
+    }
+  };
+
+  window.saveTripJournal = function() {
+    if (!currentJournalDraft) return;
+    saveLocalTripJournal(currentItineraryId, currentJournalDraft);
+    feedbackToast('遊記已儲存，下次開啟直接顯示。', 'green');
+  };
+
+  window.copyTripJournal = function() {
+    if (!currentJournalDraft) return;
+    const text = `${currentJournalDraft.title}\n\n${currentJournalDraft.body}`;
+    const done = () => feedbackToast('遊記已複製到剪貼簿。', 'green');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => feedbackToast('複製失敗，請手動選取文字。', 'orange'));
+    } else {
+      feedbackToast('此瀏覽器不支援自動複製，請手動選取文字。', 'orange');
+    }
+  };
+
+  window.closeTripJournal = function() {
+    const overlay = document.getElementById('journal-overlay');
+    if (overlay) overlay.classList.remove('open');
+  };
 
   // 從本地靜態檔 window.WAI_POI_DATA（爬蟲 npm run export:local 產生）取某目的地的景點清單。
   // dest 正規化：精確鍵 → 去掉「縣/市」後綴 → 與既有鍵互相包含比對。無資料回 []。
@@ -12146,8 +12532,8 @@
     return '帳號或密碼錯誤，請確認後再試。';
   }
 
-  let emailRegistrationInProgress = false;
-  function needsEmailVerification(user) {
+  // 信箱驗證只屬於註冊流程；既有帳號登入時不再以 emailVerified 阻擋。
+  function isUnverifiedPasswordUser(user) {
     return !!user && !user.emailVerified
       && (user.providerData || []).some(p => p && p.providerId === 'password');
   }
@@ -12161,13 +12547,7 @@
     if (!email || !pwd) return feedbackToast('請填寫帳號和密碼', 'orange');
     if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
     try {
-      const userCredential = await firebaseAuth.signInWithEmailAndPassword(email, pwd);
-      if (needsEmailVerification(userCredential.user)) {
-        try { await userCredential.user.sendEmailVerification(); } catch (_e) {}
-        await firebaseAuth.signOut();
-        feedbackToast('請先到信箱完成驗證；驗證信已重新寄出。', 'orange');
-        return;
-      }
+      await firebaseAuth.signInWithEmailAndPassword(email, pwd);
       feedbackToast('👋 歡迎回來！', 'green');
       window.closeLogin();
     } catch (e) {
@@ -12186,7 +12566,6 @@
     if (!name || !email || !pwd) return feedbackToast('請填寫所有欄位', 'orange');
     if (!isValidEmail(email)) return feedbackToast('請輸入正確的電子信箱格式', 'orange');
     if (pwd.length < 8) return feedbackToast('密碼至少需要 8 個字元', 'orange');
-    emailRegistrationInProgress = true;
     try {
       const userCredential = await firebaseAuth.createUserWithEmailAndPassword(email, pwd);
       const user = userCredential.user;
@@ -12204,15 +12583,13 @@
       }
       await user.sendEmailVerification();
       await firebaseAuth.signOut();
-      feedbackToast('註冊完成！請先到信箱點擊驗證連結，再回來登入。', 'green');
+      feedbackToast('註冊完成！驗證信已寄出，請到信箱完成驗證。', 'green');
       window.closeLogin();
     } catch (e) {
-      if (firebaseAuth.currentUser && needsEmailVerification(firebaseAuth.currentUser)) {
+      if (isUnverifiedPasswordUser(firebaseAuth.currentUser)) {
         try { await firebaseAuth.signOut(); } catch (_e) {}
       }
       feedbackToast(authErrorMessage(e, 'register'), 'red');
-    } finally {
-      emailRegistrationInProgress = false;
     }
   };
 
@@ -12326,13 +12703,6 @@
     if (!firebaseEnabled || !firebaseAuth) return;
     firebaseAuth.onAuthStateChanged(async (user) => {
       if (user) {
-        if (needsEmailVerification(user)) {
-          if (!emailRegistrationInProgress) {
-            await firebaseAuth.signOut();
-            feedbackToast('請先完成電子信箱驗證後再登入。', 'orange');
-          }
-          return;
-        }
         let name = user.displayName || user.email?.split('@')[0] || '使用者';
         let emoji = '😊';
         let preferences = { interests: [], pace: '平衡', avoid: '', avoidTags: [] };
@@ -12429,3 +12799,48 @@
       initMap();
     }
   });
+
+  // ── 旅程中「該出發了」提醒：每分鐘比對排程，目前站排定結束時刻一到就提醒一次 ──
+  const _departNotifiedStops = {};
+  setInterval(() => {
+    try {
+      if (currentTripStatus !== 'ongoing' || currentStopIndex < 0) return;
+      const sched = buildReplanSchedule();
+      const cur = sched[currentStopIndex];
+      if (!cur || !Number.isFinite(cur.end) || cur.end >= 24 * 60) return; // 跨日排程（>24h）不比對
+      const now = new Date();
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      if (nowMin >= cur.end && !_departNotifiedStops[cur.id]) {
+        _departNotifiedStops[cur.id] = true;
+        const next = sched.slice(currentStopIndex + 1).find(s => s && s.name);
+        feedbackToast(next ? `⏰ 「${cur.name}」排定時間到了，該出發前往「${next.name}」囉！` : `⏰ 「${cur.name}」排定時間已結束，記得結束行程做個紀錄`, 'orange');
+      }
+    } catch (_e) {}
+  }, 60000);
+
+  // ── a11y：Esc 關閉最上層彈窗（原本所有彈窗只能點外部/右上關閉，鍵盤無法操作）──
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const visible = (el) => el && getComputedStyle(el).display !== 'none';
+    const openCls = (id) => { const el = document.getElementById(id); return el && el.classList.contains('open') ? el : null; };
+    // 由「最上層/最 modal」往下嘗試，關掉第一個開著的就停
+    if (visible(document.getElementById('imgLightbox')) && typeof closeImageLightbox === 'function') { closeImageLightbox(); return; }
+    if (visible(document.getElementById('noteModal'))) { closeNoteModal(); return; }
+    if (visible(document.getElementById('stayModal'))) { closeStayModal(); return; }
+    if (openCls('tripfb-overlay') && typeof window.closeTripFeedback === 'function') { window.closeTripFeedback(); return; }
+    if (openCls('modifyOverlay')) { closeModifyWindow(); return; }
+    if (openCls('travelToolsOverlay')) { closeTravelTools(); return; }
+    if (openCls('changePwdOverlay') && typeof closeChangePwd === 'function') { closeChangePwd(); return; }
+    if (openCls('loginOverlay') && typeof closeLogin === 'function') { closeLogin(); return; }
+  });
+  // 彈窗補 dialog 語意（螢幕報讀器才會宣告對話框情境）。
+  // 本 script 標籤位於 HTML 中段，stayModal 等彈窗標記在其後 → 需等 DOM 解析完再跑。
+  const _applyDialogRoles = () => {
+    ['modifyOverlay', 'travelToolsOverlay', 'stayModal', 'noteModal', 'imgLightbox', 'loginOverlay', 'changePwdOverlay'].forEach((id) => {
+      const ov = document.getElementById(id);
+      const modal = ov && ov.firstElementChild;
+      if (modal && !modal.hasAttribute('role')) { modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); }
+    });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _applyDialogRoles);
+  else _applyDialogRoles();

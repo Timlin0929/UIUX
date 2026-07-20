@@ -1,7 +1,7 @@
 @charset "UTF-8";
 :root{
   --bg:#f7f5f0;--surface:#fff;--surface2:#f0ede6;
-  --ink:#1a1814;--ink2:#5a5750;--ink3:#9a9590;
+  --ink:#1a1814;--ink2:#5a5750;--ink3:#767068; /* ink3 調深：原 #9a9590 白底對比僅 ~2.8:1，未達 WCAG AA */
   --accent:#2a6b5e;--accent-dark:#1f5448;--accent-light:#e8f3f0;
   --accent2:#e8733a;--accent2-light:#fdf0e8;--accent2-dark:#c45c28;
   --gold:#c9a227;--gold-light:#f5e8c0;
@@ -314,7 +314,7 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-step{border:1px solid #ddd;border-radius:12px;font-size:13px;padding:8px 6px;text-align:center;color:#666;font-weight:700;transition:all .24s ease;display:flex;flex-direction:column;align-items:center;gap:3px;}
 .step-num{font-size:17px;font-weight:900;line-height:1;}
 .step-label{font-size:12px;line-height:1.2;display:block;}
-.wizard-step.active{border-color:transparent;background:linear-gradient(135deg,#0f7c6b 0%,#1f8efa 100%);color:#fff;transform:translateY(-1px);box-shadow:0 8px 16px rgba(27,115,147,.3);}
+.wizard-step.active{border-color:transparent;background:linear-gradient(135deg,#0f7c6b 0%,#2fa08c 100%);color:#fff;transform:translateY(-1px);box-shadow:0 8px 16px rgba(17,121,107,.3);}
 .wizard-step.done{background:#ebf8f2;color:#22865d;border-color:#caefd9;}
 .wizard-form{padding:18px;flex:1;overflow-y:auto;}
 .wizard-card{background:#ffffff;border:1px solid #e6e3dc;border-radius:18px;padding:14px;animation:riseIn .34s ease;}
@@ -350,7 +350,7 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-btn{border:none;border-radius:12px;padding:11px 18px;font-size:17px;font-weight:800;cursor:pointer;transition:all .2s ease;}
 .wizard-btn.secondary{background:#edf2f7;color:#495061;}
 .wizard-btn.secondary:hover{background:#dde5f1;}
-.wizard-btn.primary{background:linear-gradient(135deg,#11796b 0%,#1176c9 100%);color:#fff;box-shadow:0 10px 24px rgba(17,118,201,.25);}
+.wizard-btn.primary{background:linear-gradient(135deg,#11796b 0%,#2fa08c 100%);color:#fff;box-shadow:0 10px 24px rgba(17,121,107,.25);}
 .wizard-btn.primary:hover{transform:translateY(-1px);}
 .wizard-flow-wrap{padding:18px;background:linear-gradient(180deg,#ffffff 0%,#f9fcff 100%);min-height:530px;overflow-y:auto;}
 .wizard-theme-note{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 12px;margin-bottom:10px;font-size:14px;font-weight:800;color:#095668;background:#dbf4f8;border:1px solid #bbe5ea;}
@@ -423,9 +423,13 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .collab-agg{font-size:13.5px;color:#46566a;line-height:1.7;}
 .collab-actions{margin-top:14px;display:flex;flex-direction:column;gap:9px;}
 .collab-primary{border:none;border-radius:11px;padding:13px;font-size:16px;font-weight:800;color:#fff;cursor:pointer;
-  background:linear-gradient(135deg,#2f6fed,#6b54d3);}
+  background:linear-gradient(135deg,#11796b,#2fa08c);}
 .collab-secondary{border:1px solid #cdd9ea;border-radius:11px;padding:11px;font-size:14px;font-weight:700;background:#fff;color:#37506e;cursor:pointer;}
 .collab-wait{text-align:center;font-size:13px;color:var(--ink3);padding:6px;}
+.collab-friend-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;}
+.collab-friend-chips .collab-mini-btn{min-height:40px;}
+/* 鍵盤焦點可見性：按鈕原本只有 hover 回饋，Tab 看不到焦點所在 */
+button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{outline:3px solid rgba(42,107,94,.45);outline-offset:2px;}
 
 /* 共編改名／加入確認的共用彈窗 */
 .wai-action-modal{position:fixed;inset:0;z-index:520;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(21,38,59,.48);}
@@ -483,9 +487,9 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wgp-step.done + .wgp-step::before{background:linear-gradient(90deg,#11796b,#1176c9);}
 .wgp-dot{width:24px;height:24px;border-radius:50%;border:2px solid #cdd8e6;background:#fff;position:relative;z-index:1;display:flex;align-items:center;justify-content:center;transition:border-color .3s,background .3s,box-shadow .3s;}
 .wgp-label{font-size:13px;font-weight:700;color:#8fa4b8;transition:color .3s;white-space:nowrap;}
-.wgp-step.active .wgp-dot{border-color:#1176c9;animation:wgpPulse 1.2s ease-in-out infinite;}
+.wgp-step.active .wgp-dot{border-color:#11796b;animation:wgpPulse 1.2s ease-in-out infinite;}
 .wgp-step.active .wgp-label{color:#1176c9;font-weight:800;}
-.wgp-step.done .wgp-dot{border-color:transparent;background:linear-gradient(135deg,#11796b 0%,#1176c9 100%);}
+.wgp-step.done .wgp-dot{border-color:transparent;background:linear-gradient(135deg,#11796b 0%,#2fa08c 100%);}
 .wgp-step.done .wgp-dot::after{content:'✓';color:#fff;font-size:16px;font-weight:900;line-height:1;}
 .wgp-step.done .wgp-label{color:#11796b;}
 .wgp-step.error .wgp-dot{border-color:#e0566f;background:#fff;}
@@ -948,7 +952,10 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   .wizard-steps{grid-template-columns:repeat(2,minmax(0,1fr));}
   .wizard-form{padding:16px;}
   .wizard-field input,.wizard-field select,.wizard-field textarea{min-height:46px;}
-  .wizard-nav{padding:14px 16px 16px;}
+  /* 手機：下一步 CTA 固定在 modal 底部（原本埋在表單與預覽之間，要捲動才找得到） */
+  .wizard-nav{padding:14px 16px calc(16px + env(safe-area-inset-bottom));position:sticky;bottom:0;z-index:5;}
+  /* 觸控 44px：興趣/節奏/風格/人數 chips 原本只在平板區放大，真手機寬度漏掉 */
+  .wizard-tag{min-height:44px;padding:10px 14px;font-size:15px;}
   .wizard-btn{min-height:46px;font-size:16px;padding:12px 16px;}
   .wizard-flow-wrap{padding:16px;min-height:auto;}
   .wizard-flow-title{font-size:26px;}
@@ -980,3 +987,31 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 @media (max-width:700px){
   .filter-bar{-webkit-mask-image:linear-gradient(90deg,#000 90%,transparent);mask-image:linear-gradient(90deg,#000 90%,transparent);}
 }
+
+/* ── F1 通知中心：鈴鐺＋徽章＋下拉面板 ── */
+.notif-wrap{position:relative;flex-shrink:0;}
+.notif-bell{position:relative;width:38px;height:38px;border-radius:50%;border:1.5px solid var(--border);background:var(--surface);font-size:17px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:border-color .2s,background .2s;}
+.notif-bell:hover{border-color:var(--accent);background:var(--accent-light);}
+.notif-badge{position:absolute;top:-4px;right:-4px;min-width:17px;height:17px;padding:0 4px;box-sizing:border-box;border-radius:9px;background:#c0392b;color:#fff;font-size:11px;font-weight:700;line-height:17px;text-align:center;}
+.notif-panel{display:none;position:absolute;right:0;top:calc(100% + 8px);width:320px;max-height:70vh;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 14px 38px rgba(26,24,20,.16);z-index:120;padding:6px;}
+.notif-panel.open{display:block;}
+.notif-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;font-size:14px;font-weight:700;color:var(--ink);border-bottom:1px solid var(--border);margin-bottom:4px;}
+.notif-mark-all{border:none;background:transparent;color:var(--accent);font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;padding:2px 4px;}
+.notif-mark-all:hover{text-decoration:underline;}
+.notif-item{display:flex;align-items:flex-start;gap:8px;width:100%;text-align:left;border:none;background:transparent;border-radius:10px;padding:9px 10px;cursor:pointer;font-family:inherit;}
+.notif-item:hover{background:var(--surface2);}
+.notif-item.unread{background:var(--accent-light);}
+.notif-item.unread:hover{background:#dcebe7;}
+.notif-item-emoji{font-size:17px;flex-shrink:0;line-height:1.4;}
+.notif-item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.notif-item-text{font-size:13.5px;color:var(--ink);line-height:1.5;overflow-wrap:anywhere;}
+.notif-item-sub{font-size:11.5px;color:var(--ink3);white-space:nowrap;}
+.notif-dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);flex-shrink:0;margin-top:6px;}
+.notif-empty{padding:26px 12px;text-align:center;font-size:13px;color:var(--ink3);}
+@media (max-width:700px){.notif-panel{position:fixed;left:10px;right:10px;top:64px;width:auto;}}
+
+/* ── F2 好友動態（沿用 .friends-row 視覺） ── */
+.friends-feed-row{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px;}
+.friends-feed-emoji{font-size:17px;flex-shrink:0;}
+.friends-feed-text{flex:1;min-width:0;font-size:13.5px;color:var(--ink);line-height:1.5;overflow-wrap:anywhere;}
+.friends-feed-time{font-size:12px;color:var(--ink3);white-space:nowrap;flex-shrink:0;}
