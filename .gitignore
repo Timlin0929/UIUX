@@ -39,3 +39,6 @@ Thumbs.db
 /.codex/
 # UI/UX 修改建議（個人清單，本機參考用）
 /uiux-recommendations.md
+
+# 測試截圖／報告（本機驗證用，不進版控）
+/test-artifacts/
