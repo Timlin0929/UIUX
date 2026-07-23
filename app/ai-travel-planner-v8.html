@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260719-f5">
+<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260723-transport1">
 <link rel="stylesheet" href="./design-tokens.css?v=20260719-p2">
 </head>
 <body>
@@ -65,7 +65,7 @@
           <button class="replan-btn primary" id="replanCompleteTripBtn" onclick="window.markTripAsCompleted()" style="display:none;">🏁 結束行程</button>
           <button class="replan-btn secondary" id="replanResetTripBtn" onclick="window.resetTripProgress()" style="display:none;">↩ 重設進度</button>
           <span id="heroMoreGroup">
-            <button class="replan-btn secondary" onclick="openFullTripNavigation()">🧭 整趟導航</button>
+            <button class="replan-btn maps-route-btn" onclick="openFullTripNavigation()" title="以 Google Maps 開啟整趟路線" aria-label="以 Google Maps 開啟整趟路線（新分頁）">🗺 Google Maps 路線 <span aria-hidden="true">↗</span></button>
             <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
             <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           </span>
@@ -90,9 +90,8 @@
           <div class="replan-list" id="replanSortableList">
           </div>
           <div class="replan-bottom-actions">
-            <button class="replan-bottom-btn" onclick="addStopFromBottom()">＋ 新增</button>
-            <button class="replan-bottom-btn" onclick="deleteStopFromBottom()">－ 刪除</button>
-            <button class="replan-bottom-btn ai" onclick="addAiSuggestionStop()">✨ AI建議</button>
+            <button class="replan-bottom-btn add" onclick="addStopFromBottom()">＋ 搜尋新增景點</button>
+            <button class="replan-bottom-btn nearby" onclick="exploreNearbyPlaces()">🧭 探索附近景點</button>
           </div>
           <div class="planning-actions">
             <button class="replan-btn primary" onclick="applyReplan()">完成重新規劃</button>
@@ -398,6 +397,44 @@
 
 </div>
 
+<div class="add-place-overlay" id="addPlaceOverlay" onclick="closeAddPlaceDialog()">
+  <div class="add-place-dialog" role="dialog" aria-modal="true" aria-labelledby="addPlaceTitle" onclick="event.stopPropagation()">
+    <div class="add-place-head">
+      <div>
+        <div class="add-place-title" id="addPlaceTitle">新增景點</div>
+        <div class="add-place-subtitle" id="addPlaceSubtitle">搜尋 Google Maps 上的景點，再加入目前行程。</div>
+      </div>
+      <button class="add-place-close" type="button" onclick="closeAddPlaceDialog()" aria-label="關閉新增景點視窗">✕</button>
+    </div>
+    <form class="add-place-search" onsubmit="event.preventDefault(); searchPlacesToAdd()">
+      <div class="add-place-day-field" id="addPlaceDayField" hidden>
+        <label class="add-place-label" for="addPlaceDaySelect">安排在哪一天</label>
+        <select id="addPlaceDaySelect" aria-label="選擇新增景點的日期"></select>
+      </div>
+      <label class="add-place-label" for="addPlaceSearchInput">景點名稱或類型</label>
+      <div class="add-place-search-row">
+        <input id="addPlaceSearchInput" type="search" autocomplete="off" placeholder="例如：台東美術館、咖啡廳">
+        <button type="submit">搜尋</button>
+      </div>
+    </form>
+    <div class="add-place-results" id="addPlaceResults" aria-live="polite">
+      <div class="add-place-empty">輸入景點名稱，搜尋後再選擇要加入的地點。</div>
+    </div>
+  </div>
+</div>
+
+<div class="delete-place-overlay" id="deletePlaceOverlay" onclick="closeDeletePlaceDialog()">
+  <div class="delete-place-dialog" role="alertdialog" aria-modal="true" aria-labelledby="deletePlaceTitle" aria-describedby="deletePlaceDescription" onclick="event.stopPropagation()">
+    <div class="delete-place-icon">🗑️</div>
+    <div class="delete-place-title" id="deletePlaceTitle">刪除這個景點？</div>
+    <div class="delete-place-description" id="deletePlaceDescription">刪除後會重新計算後續行程時間。</div>
+    <div class="delete-place-actions">
+      <button class="delete-place-cancel" type="button" onclick="closeDeletePlaceDialog()">保留景點</button>
+      <button class="delete-place-confirm" type="button" onclick="confirmRemoveStop()">確認刪除</button>
+    </div>
+  </div>
+</div>
+
 <div class="modify-overlay" id="modifyOverlay" onclick="closeModifyWindow()">
   <div class="modify-window" onclick="event.stopPropagation()">
     <div class="modify-window-head">
@@ -475,7 +512,7 @@
       </tbody>
     </table>
     <div class="driver-control-row">
-      <button class="driver-ctrl-btn primary" onclick="openFullTripNavigation()">🧭 整趟導航</button>
+      <button class="driver-ctrl-btn maps-route-btn" onclick="openFullTripNavigation()" title="以 Google Maps 開啟整趟路線" aria-label="以 Google Maps 開啟整趟路線（新分頁）">🗺 Google Maps 路線 <span aria-hidden="true">↗</span></button>
       <button class="driver-ctrl-btn primary" onclick="switchView('itinerary')">查看行程</button>
       <button class="driver-ctrl-btn warn" onclick="setRideMode('change-road')">改道路線</button>
     </div>
@@ -494,9 +531,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
-<script src="./collab.js?v=20260718-uiux"></script>
-<script src="./notifications.js?v=20260719-f1"></script>
-<script src="./ai-travel-planner-v8.js?v=20260720-auth1"></script>
+<script src="./collab.js?v=20260722-friends2"></script>
+<script src="./notifications.js?v=20260722-friends2"></script>
+<script src="./ai-travel-planner-v8.js?v=20260723-transport1"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。
