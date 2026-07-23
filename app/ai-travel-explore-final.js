@@ -3605,11 +3605,15 @@ function showMainView(view) {
   if (friendsEl) friendsEl.style.display = view==='friends' ? '' : 'none';
   document.getElementById('navExplore').classList.toggle('active', view==='explore');
   document.getElementById('navMyTrips').classList.toggle('active', view==='mytrips');
-  // UIUX#1：手機底部導覽 active 同步（好友頁時兩者皆非 active）
+  const navFriends = document.getElementById('navFriends');
+  if (navFriends) navFriends.classList.toggle('active', view==='friends');
+  // UIUX#1：手機底部導覽 active 同步
   const mbnE = document.getElementById('mbnExplore');
   const mbnM = document.getElementById('mbnMyTrips');
+  const mbnF = document.getElementById('mbnFriends');
   if (mbnE) mbnE.classList.toggle('active', view==='explore');
   if (mbnM) mbnM.classList.toggle('active', view==='mytrips');
+  if (mbnF) mbnF.classList.toggle('active', view==='friends');
   if (view==='mytrips') renderMyTrips();
   if (view==='friends') renderFriendsView();
 }
@@ -3630,7 +3634,7 @@ function renderUserMenu() {
       <div class="user-dropdown" id="userDropdown">
         <div class="user-dd-item dd-mobile-only" onclick="showMainView('explore');toggleUserDropdown()">🧭 探索</div>
         <div class="user-dd-item dd-mobile-only" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行</div>
-        <div class="user-dd-item dd-mobile-only" onclick="location.href='ai-travel-planner-v8.html'">✈️ 行程編輯</div>
+        <div class="user-dd-item dd-mobile-only" onclick="showMainView('friends');toggleUserDropdown()">👥 好友</div>
         <div class="user-dd-item dd-mobile-only" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
         <div class="user-dd-sep dd-mobile-only"></div>
         <div class="user-dd-item dd-mobile-only" onclick="openLogin();toggleUserDropdown()">👤 登入 / 註冊</div>
@@ -3651,7 +3655,7 @@ function renderUserMenu() {
         </div>
         <div class="user-dd-item dd-mobile-only" onclick="showMainView('explore');toggleUserDropdown()">🧭 探索</div>
         <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:13px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
-        <div class="user-dd-item dd-mobile-only" onclick="location.href='ai-travel-planner-v8.html'">✈️ 行程編輯</div>
+        <div class="user-dd-item dd-mobile-only" onclick="showMainView('friends');toggleUserDropdown()">👥 好友</div>
         <div class="user-dd-item" onclick="openWizard();toggleUserDropdown()">＋ 建立微旅行</div>
         <div class="user-dd-item dd-mobile-only" onclick="openJourneyJoin();toggleUserDropdown()">📱 邀請碼快速加入</div>
         <div class="user-dd-item" onclick="openInvite();toggleUserDropdown()">🔑 輸入邀請碼加入</div>

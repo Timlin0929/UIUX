@@ -316,7 +316,7 @@
   <nav class="topbar-nav">
     <a href="#" id="navExplore" class="active" onclick="showMainView('explore');return false">🧭 探索</a>
     <a href="#" id="navMyTrips" onclick="showMainView('mytrips');return false">📋 我的微旅行</a>
-    <a href="ai-travel-planner-v8.html" id="navPlan">✈️ 行程編輯</a>
+    <a href="#" id="navFriends" onclick="showMainView('friends');return false">👥 好友</a>
   </nav>
   <div class="topbar-search">
     <span class="search-icon">🔍</span>
@@ -456,10 +456,10 @@
 <nav id="mobileBottomNav" aria-label="主導覽">
   <button class="mbn-item active" id="mbnExplore" onclick="showMainView('explore')"><span class="mbn-ico" aria-hidden="true">🧭</span>探索</button>
   <button class="mbn-item" id="mbnMyTrips" onclick="showMainView('mytrips')"><span class="mbn-ico" aria-hidden="true">📋</span>我的微旅行</button>
-  <button class="mbn-item" onclick="location.href='ai-travel-planner-v8.html'"><span class="mbn-ico" aria-hidden="true">✈️</span>行程編輯</button>
+  <button class="mbn-item" id="mbnFriends" onclick="showMainView('friends')"><span class="mbn-ico" aria-hidden="true">👥</span>好友</button>
 </nav>
 
-<script src="./ai-travel-explore-final.js?v=20260722-friends3"></script>
+<script src="./ai-travel-explore-final.js?v=20260723-friends4"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
 <div id="genMiniBar" hidden onclick="reopenWizGen()">
   <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>
