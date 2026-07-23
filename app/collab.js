@@ -61,6 +61,16 @@ window.WAI_COLLAB = (function () {
   function emailKey(email) {
     return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
   }
+  // 用於文件路徑／身分隔離的無碰撞 key。emailKey 需保留給既有共編 members schema；
+  // identityKey 則以正規化 email 的 UTF-8 十六進位表示，避免 a.b 與 a_b 被壓成同一值。
+  function identityKey(email) {
+    var normalized = String(email || '').trim().toLowerCase();
+    if (!normalized) return '';
+    var bytes = new TextEncoder().encode(normalized);
+    return Array.prototype.map.call(bytes, function (b) {
+      return b.toString(16).padStart(2, '0');
+    }).join('');
+  }
 
   // ── 預算解析 / 格式化 ──
   function parseBudgetNumber(b) {
@@ -489,6 +499,7 @@ window.WAI_COLLAB = (function () {
     generateShareToken: generateShareToken,
     normalizeCode: normalizeCode,
     emailKey: emailKey,
+    identityKey: identityKey,
     parseBudgetNumber: parseBudgetNumber,
     formatBudget: formatBudget,
     majorityPace: majorityPace,

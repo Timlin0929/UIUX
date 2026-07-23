@@ -433,7 +433,9 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
 
 /* 共編改名／加入確認的共用彈窗 */
 .wai-action-modal{position:fixed;inset:0;z-index:520;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(21,38,59,.48);}
-.wai-action-card{width:min(100%,420px);background:#fff;border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(21,38,59,.28);}
+.wai-action-card{position:relative;width:min(100%,420px);background:#fff;border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(21,38,59,.28);}
+.wai-action-close{position:absolute;top:8px;right:8px;width:44px;height:44px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--ink3);font-size:28px;line-height:1;cursor:pointer;white-space:nowrap;}
+.wai-action-close:hover{background:#f0f5fc;color:var(--ink);}
 .wai-action-title{font-size:19px;font-weight:800;color:var(--ink);margin-bottom:7px;}
 .wai-action-sub{font-size:14px;color:var(--ink3);line-height:1.55;text-wrap:pretty;margin-bottom:16px;}
 .wai-action-input{width:100%;box-sizing:border-box;border:1px solid #cdd9ea;border-radius:10px;padding:11px 12px;color:var(--ink);font-size:16px;}
@@ -586,8 +588,8 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
   text-align:center;white-space:nowrap;word-break:keep-all;
 }
 .mt-action-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-light);}
-.mt-action-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
-.mt-action-btn.primary:hover{background:var(--accent-dark);border-color:var(--accent-dark);color:#fff;}
+.mt-action-btn.primary{background:rgba(255,255,255,.9);color:var(--accent);border-color:rgba(46,125,109,.42);}
+.mt-action-btn.primary:hover{background:var(--accent-light);border-color:var(--accent);color:var(--accent-dark);}
 .mt-action-btn.replan{color:#2f6f97;}
 .mt-action-btn.share{color:#434f7a;}
 .mt-action-btn.delete{flex:0 0 42px;width:42px;padding:0;color:var(--red);font-size:18px;}

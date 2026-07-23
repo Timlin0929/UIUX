@@ -2,9 +2,9 @@
  * notifications.js — WanderAI 通知中心資料層（window.WAI_NOTIFY）
  *
  * 資料模型（F1）：
- *   user_notifications/{emailKey}/items/{nid}
- *     -> { type, fromEmail, fromName, tripId, tripTitle, message, read:false, createdAt }
- *   emailKey 沿用 WAI_COLLAB.emailKey；nid 為「確定性 id」（同事件重送會撞同一 doc，
+ *   user_notifications/{identityKey}/items/{nid}
+ *     -> { type, fromEmail, toEmail, fromName, tripId, tripTitle, message, read:false, createdAt }
+ *   identityKey 使用 email 的無碰撞 UTF-8 hex；nid 為「確定性 id」（同事件重送會撞同一 doc，
  *   安全規則只允許 create，第二次寫入 permission-denied → 靜默吞掉＝天生防打擾）。
  *
  * type 白名單（與 firestore.rules 對齊）：
@@ -18,14 +18,18 @@ window.WAI_NOTIFY = (function () {
 
   // session 內去重：同一 (收件人, nid) 只嘗試寫一次，避免重複打 Firestore
   var _sessionSent = {};
+  var _sessionPending = {};
 
   function db() {
     if (typeof firebaseDb === 'undefined' || !firebaseDb) return null;
     return firebaseDb;
   }
   function ekey(email) {
-    if (window.WAI_COLLAB && typeof WAI_COLLAB.emailKey === 'function') return WAI_COLLAB.emailKey(email);
-    return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+    if (window.WAI_COLLAB && typeof WAI_COLLAB.identityKey === 'function') return WAI_COLLAB.identityKey(email);
+    var normalized = String(email || '').trim().toLowerCase();
+    if (!normalized) return '';
+    var bytes = new TextEncoder().encode(normalized);
+    return Array.prototype.map.call(bytes, function (b) { return b.toString(16).padStart(2, '0'); }).join('');
   }
   function me() {
     try {
@@ -49,12 +53,13 @@ window.WAI_NOTIFY = (function () {
       if (!dbi || !sender || !sender.email || !toEmail || !id) return false;
       if (ekey(toEmail) === ekey(sender.email)) return false; // 不通知自己
       var dedupeKey = ekey(toEmail) + '/' + id;
-      if (_sessionSent[dedupeKey]) return false;
-      _sessionSent[dedupeKey] = true;
+      if (_sessionSent[dedupeKey] || _sessionPending[dedupeKey]) return false;
+      _sessionPending[dedupeKey] = true;
       var p = payload || {};
       await dbi.collection('user_notifications').doc(ekey(toEmail)).collection('items').doc(id).set({
         type: String(p.type || ''),
         fromEmail: sender.email,
+        toEmail: String(toEmail).trim(),
         fromName: String(p.fromName || sender.name || sender.email).slice(0, 100),
         tripId: String(p.tripId || '').slice(0, 150),
         tripTitle: String(p.tripTitle || '').slice(0, 200),
@@ -62,11 +67,14 @@ window.WAI_NOTIFY = (function () {
         read: false,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
+      _sessionSent[dedupeKey] = true;
       return true;
     } catch (e) {
       // 確定性 docId 已存在（重送）或 rules 未部署 → permission-denied，一律靜默
       console.warn('[notify] push skipped:', e && e.code || e && e.message || e);
       return false;
+    } finally {
+      if (typeof dedupeKey !== 'undefined') delete _sessionPending[dedupeKey];
     }
   }
 

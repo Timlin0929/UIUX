@@ -3755,7 +3755,7 @@ function notifItemText(n) {
   const who = n.fromName || n.fromEmail || '旅伴';
   const title = n.tripTitle || '行程';
   switch (n.type) {
-    case 'collab_invite':         return `${who} 邀請你共編「${title}」`;
+    case 'collab_invite':         return `${who} 邀請你共編「${title}」${n.message ? ` · ${n.message}` : ''}`;
     case 'friend_invite':         return `${who} 邀請你成為好友`;
     case 'friend_accept':         return `${who} 接受了你的好友邀請`;
     case 'trip_renamed':          return `${who} 把共編行程改名為「${title}」`;
@@ -3833,7 +3833,11 @@ function handleNotifClick(idx) {
     // 已是成員（改名/重生成/曾受邀）→ 開共編面板；不是成員時 openCollabPanel 內部會擋
     const isMine = (myTrips || []).some(t => t.id === n.tripId);
     if (isMine) { openCollabPanel(n.tripId); return; }
-    if (n.type === 'collab_invite') { openJourneyJoin(); return; } // 尚未加入 → 引導輸入邀請碼
+    if (n.type === 'collab_invite') {
+      const codeMatch = String(n.message || '').match(/邀請碼\s*([A-Z0-9-]+)/i);
+      openJourneyJoin(codeMatch ? codeMatch[1] : '');
+      return;
+    }
     showMainView('mytrips');
     return;
   }
@@ -3861,7 +3865,7 @@ function collabInviteFriend(idx) {
     .catch(() => showToast(msg, 'green'));
   // F1：同步發站內通知（失敗靜默）
   if (window.WAI_NOTIFY && currentUser && currentUser.email) {
-    const myKey = WAI_COLLAB.emailKey(currentUser.email);
+    const myKey = WAI_COLLAB.identityKey(currentUser.email);
     WAI_NOTIFY.push(o.email, WAI_NOTIFY.nid(['collab_invite', d.id, myKey]), {
       type: 'collab_invite', tripId: d.id, tripTitle: d.title || '未命名行程',
       fromName: currentUser.name || '', message: `邀請碼 ${code}`
@@ -3872,7 +3876,7 @@ function collabInviteFriend(idx) {
 function friendOtherParty(f) {
   const myEmail = (currentUser && currentUser.email) || '';
   const other = (f.emails || []).find(e => e !== myEmail) || '';
-  const name = (f.names && f.names[WAI_COLLAB.emailKey(other)]) || other;
+  const name = (f.names && (f.names[WAI_COLLAB.identityKey(other)] || f.names[WAI_COLLAB.emailKey(other)])) || other;
   return { email: other, name };
 }
 
@@ -3891,9 +3895,8 @@ function buildFriendsFeedItems() {
   (notifItems || []).forEach(n => {
     if (!n) return;
     const who = n.fromName || n.fromEmail || '旅伴';
-    if (n.type === 'friend_accept') {
-      items.push({ ts: toMs(n.createdAt), emoji: '🎉', text: `${who} 接受了你的好友邀請` });
-    } else if (n.type === 'friend_trip_completed') {
+    // 成為好友已由 friendships.acceptedAt 呈現；不再把 friend_accept 通知重複加入動態。
+    if (n.type === 'friend_trip_completed') {
       items.push({ ts: toMs(n.createdAt), emoji: '🏁', text: `${who} 完成了行程「${n.tripTitle || '微旅行'}」` });
     }
   });
@@ -3995,28 +3998,41 @@ function openAddFriendModal() {
         resultHost.innerHTML = '<div class="friends-row-sub">搜尋中…</div>';
         try {
           const profile = await WAI_FRIENDS.findProfileByEmail(q);
-          if (!profile) { resultHost.innerHTML = ''; error.textContent = '找不到這個 email——對方需先登入過 WanderAI。'; return; }
+          if (!profile) {
+            resultHost.innerHTML = '';
+            error.textContent = '找不到這個 email。請確認拼字，或請對方在新版網站重新整理並登入一次。';
+            return;
+          }
           resultHost.innerHTML = `<div class="friends-row" style="margin-top:10px;">
             <div class="friends-row-main"><b>${profile.emoji ? escapeHtml(profile.emoji) + ' ' : ''}${escapeHtml(profile.name || profile.email)}</b><span class="friends-row-sub">${escapeHtml(profile.email)}</span></div>
             <button class="friends-mini-btn primary" data-action="invite">送出邀請</button>
           </div>`;
           resultHost.querySelector('[data-action="invite"]').onclick = async (ev) => {
-            ev.currentTarget.disabled = true;
+            // async/await 之後 Event.currentTarget 會被瀏覽器清空；先保存按鈕參照，
+            // 否則 Firestore 拒絕寫入時，錯誤處理本身會再丟出 null.disabled。
+            const inviteBtn = ev.currentTarget;
+            inviteBtn.disabled = true;
             try {
-              const _fid = await WAI_FRIENDS.sendInvite(
+              const inviteResult = await WAI_FRIENDS.sendInvite(
                 { email: currentUser.email, name: currentUser.name },
                 { email: profile.email, name: profile.name });
               closeWaiActionModal();
               showToast('✉️ 邀請已送出，等待對方確認', 'green');
               // F1：好友邀請通知（失敗靜默）
               if (window.WAI_NOTIFY) {
-                WAI_NOTIFY.push(profile.email, WAI_NOTIFY.nid(['friend_invite', _fid]), {
-                  type: 'friend_invite', fromName: currentUser.name || '', message: ''
-                });
+                try {
+                  Promise.resolve(WAI_NOTIFY.push(profile.email, WAI_NOTIFY.nid(['friend_invite', inviteResult.id, inviteResult.cycleId]), {
+                    type: 'friend_invite', fromName: currentUser.name || '', message: ''
+                  })).catch(() => {});
+                } catch (_notifyError) { /* 通知失敗不影響已成立的好友邀請 */ }
               }
             } catch (e) {
-              ev.currentTarget.disabled = false;
-              error.textContent = (e && e.message) || '送出失敗，請稍後再試。';
+              if (inviteBtn && inviteBtn.isConnected) inviteBtn.disabled = false;
+              const message = e && e.code === 'permission-denied'
+                ? '邀請未送出，好友權限尚未生效，請重新整理後再試。'
+                : ((e && e.message) || '送出失敗，請稍後再試。');
+              if (error && error.isConnected) error.textContent = message;
+              else showToast(message, 'red');
             }
           };
         } catch (e) {
@@ -4039,7 +4055,7 @@ async function friendsAcceptInvite(friendshipDocId) {
     showToast('🎉 已成為好友！', 'green');
     // F1：通知邀請人「對方接受了」（失敗靜默）
     if (window.WAI_NOTIFY && invite && invite.fromEmail) {
-      WAI_NOTIFY.push(invite.fromEmail, WAI_NOTIFY.nid(['friend_accept', friendshipDocId]), {
+      WAI_NOTIFY.push(invite.fromEmail, WAI_NOTIFY.nid(['friend_accept', friendshipDocId, invite.cycleId || 'legacy']), {
         type: 'friend_accept', fromName: (currentUser && currentUser.name) || '', message: ''
       });
     }
@@ -4681,8 +4697,8 @@ function renderMyTrips() {
           <span class="mt-chip">🕑 ${t.createdAt}</span>
         </div>
         <div class="mt-actions">
-          ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
+          ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
           <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
@@ -4691,21 +4707,33 @@ function renderMyTrips() {
     </div>`).join('');
   grid.innerHTML = cards + newCard;
 }
-function closeWaiActionModal() {
+function closeWaiActionModal({ restoreFocus = true } = {}) {
   const modal = document.getElementById('waiActionModal');
-  if (modal) modal.remove();
+  if (!modal) return;
+  const returnFocus = modal._returnFocus;
+  modal.remove();
+  if (restoreFocus && returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') {
+    returnFocus.focus();
+  }
 }
 
 function openWaiActionModal({ title, subtitle = '', body, onMount }) {
-  closeWaiActionModal();
+  const currentModal = document.getElementById('waiActionModal');
+  const activeElement = document.activeElement;
+  const returnFocus = currentModal && currentModal.contains(activeElement)
+    ? currentModal._returnFocus
+    : activeElement;
+  closeWaiActionModal({ restoreFocus: false });
   const modal = document.createElement('div');
   modal.id = 'waiActionModal';
   modal.className = 'wai-action-modal';
   modal.innerHTML = `<div class="wai-action-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+    <button type="button" class="wai-action-close" aria-label="關閉${escapeHtml(title.replace(/^\S+\s*/, ''))}視窗" onclick="closeWaiActionModal()">×</button>
     <div class="wai-action-title">${escapeHtml(title)}</div>
     ${subtitle ? `<div class="wai-action-sub">${escapeHtml(subtitle)}</div>` : ''}
     <div class="wai-action-content"></div>
   </div>`;
+  modal._returnFocus = returnFocus;
   modal.addEventListener('click', (event) => { if (event.target === modal) closeWaiActionModal(); });
   document.body.appendChild(modal);
   const content = modal.querySelector('.wai-action-content');
@@ -6647,10 +6675,10 @@ async function collabGenerate() {
   await runCollabGeneration(tripId);
 }
 
-function openJourneyJoin() {
+function openJourneyJoin(presetCode = '') {
   if (!isLoggedIn) { openLogin(); return; }
   const input = document.getElementById('journeyCodeInput');
-  if (input) input.value = ''; // 不再預填寫死的示範碼
+  if (input) input.value = presetCode ? WAI_COLLAB.formatInviteCode(presetCode) : '';
   const title = document.getElementById('journeyPreviewTitle');
   const meta = document.getElementById('journeyPreviewMeta');
   if (title) title.textContent = '加入朋友的共編行程';
@@ -6728,6 +6756,12 @@ function showToast(msg, type='') {
 // ── a11y：Esc 關閉最上層彈窗（原本所有 overlay 只能點外部/右上關閉，鍵盤無法操作）──
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  // 動態建立的共用操作彈窗不是 .overlay，需優先處理。
+  if (document.getElementById('waiActionModal')) {
+    e.preventDefault();
+    closeWaiActionModal();
+    return;
+  }
   const opens = [...document.querySelectorAll('.overlay.open')];
   if (!opens.length) return;
   // 取 z-index 最高者（login/prefWizard 是 300，一般 overlay 較低）

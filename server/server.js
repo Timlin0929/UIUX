@@ -138,18 +138,13 @@ async function requireFirebaseUser(req, res, next) {
   }
 }
 
-async function requireVerifiedFirebaseUser(req, res, next) {
-  return requireFirebaseUser(req, res, () => {
-    if (!req.user.email || req.user.email_verified !== true) {
-      return res.status(403).json({ error: 'verified email required', message: '請先完成電子信箱驗證。' });
-    }
-    return next();
-  });
-}
-
 // 邀請碼只能送到後端驗證。驗證成功後建立短效 join proof，Firestore Rules
 // 才允許該登入者讀取行程並把自己加入 memberEmails。
-app.post('/api/collab/invites/verify', collabLimiter, requireVerifiedFirebaseUser, async (req, res) => {
+app.post('/api/collab/invites/verify', collabLimiter, requireFirebaseUser, async (req, res) => {
+  // 信箱驗證只屬於註冊提示；登入後的共編功能僅要求 token 具有 email。
+  if (!req.user.email) {
+    return res.status(403).json({ error: 'email required', message: '這個登入帳號沒有可用的電子信箱。' });
+  }
   const code = normalizeInviteCode(req.body && req.body.code);
   if (code.length < 6 || code.length > 16) {
     return res.status(400).json({ error: 'invalid invite', message: '邀請碼格式不正確。' });

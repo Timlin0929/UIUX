@@ -23,6 +23,13 @@ service cloud.firestore {
       return email.lower().replace('[^a-z0-9]', '_');
     }
 
+    // 文件路徑用的無碰撞身分 key；memberKey 只保留給既有共編 members schema。
+    function identityKey(email) {
+      // Rules 的 Bytes.toHexString() 會產生大寫 A-F；Web 端固定產生小寫 hex，
+      // 因此最後必須再 lower()，否則含 a-f 的 email 幾乎都會對不到文件路徑。
+      return email.trim().lower().toUtf8().toHexString().lower();
+    }
+
     function isTripMemberOrOwner(tripId) {
       // ★Web 修正（2026-07-16）：先 exists() 再 get()——對不存在的行程 get().data 會直接
       // 讓整條規則求值錯誤（travel_sessions 事件、presence/member_prefs/feedback 子集合都會炸），
@@ -37,6 +44,15 @@ service cloud.firestore {
           || request.auth.token.email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('userEmail', null)
         ))
       );
+    }
+
+    function tripHasEmail(tripId, email) {
+      return exists(/databases/$(database)/documents/micro_trips/$(tripId))
+        && (
+          email in get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('memberEmails', [])
+          || email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('ownerEmail', null)
+          || email == get(/databases/$(database)/documents/micro_trips/$(tripId)).data.get('userEmail', null)
+        );
     }
 
     // 網頁端回饋 schema（v3 原樣保留）
@@ -69,14 +85,17 @@ service cloud.firestore {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
+    // Android 旅遊回憶：子集合規則不會繼承 users/{userId}，需明確允許本人存取。
+    match /users/{userId}/memories/{tripId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
     // ══════════ Week4 好友/群組（★schema 需與 Android 對齊，週會確認）══════════
 
-    // 最小公開檔案：好友 email 搜尋用。users/{uid} 僅本人可讀，
-    // 故另開一份「任何登入者可讀」的最小欄位鏡像（uid/email/name/emoji）。
+    // 本人完整檔案。好友搜尋另走不可列舉的最小索引。
     match /user_profiles/{userId} {
-      // 讀＝登入即可（好友搜尋 where('emailLower','==',x) 為單值等式，查詢可證明）
-      allow read: if signedIn();
-      // 寫＝只能寫自己的檔案＋欄位白名單＋email 必須==token（防冒名）
+      // 私人來源檔案：只能本人讀寫；好友搜尋改走下方不可列舉的精確索引。
+      allow read: if signedIn() && request.auth.uid == userId;
       allow create, update: if signedIn() && hasEmail()
         && request.auth.uid == userId
         && request.resource.data.keys().hasOnly(['uid', 'email', 'emailLower', 'name', 'emoji', 'updatedAt'])
@@ -88,19 +107,36 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // 好友關係：邀請(pending)→接受(accepted)。docId=兩個 emailKey 排序後 '__' 相接（防重複邀請：
+    // 好友精確搜尋索引：文件 id 是 email 的無碰撞 key。允許已登入者 get 已知 email，
+    // 但禁止 list/query，避免整批列舉所有使用者的 email/name/uid。
+    match /user_profiles_by_email/{emailId} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create, update: if hasEmail()
+        && emailId == identityKey(request.auth.token.email)
+        && request.resource.data.keys().hasOnly(['email', 'name', 'emoji', 'updatedAt'])
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.name is string && request.resource.data.name.size() <= 100
+        && request.resource.data.emoji is string && request.resource.data.emoji.size() <= 10;
+      allow delete: if false;
+    }
+
+    // 好友關係：邀請(pending)→接受(accepted)。docId=兩個 identityKey 排序後 '__' 相接（防重複邀請：
     // A→B 與 B→A 撞同一 doc）。單方刪除=刪 doc（涵蓋拒絕邀請/取消已送邀請/解除好友三種語意）。
     match /friendships/{friendId} {
       // docId 必須由 emails 兩端推導而來（client 排序後組合；規則接受兩種順序即防繞道另開 doc）
       function friendDocIdOk(data) {
-        return friendId == memberKey(data.emails[0]) + '__' + memberKey(data.emails[1])
+        return friendId == identityKey(data.emails[0]) + '__' + identityKey(data.emails[1])
+            || friendId == identityKey(data.emails[1]) + '__' + identityKey(data.emails[0])
+            // 舊版 Android／Web 相容：既有 memberKey 文件仍可讀寫。
+            || friendId == memberKey(data.emails[0]) + '__' + memberKey(data.emails[1])
             || friendId == memberKey(data.emails[1]) + '__' + memberKey(data.emails[0]);
       }
       // 讀＝當事人。列表查詢用 where('emails','array-contains',我的email) → 查詢可證明。
       allow read: if hasEmail() && request.auth.token.email in resource.data.emails;
       // create＝送出邀請：只能以自己為 fromEmail、status 必為 pending、emails 恰含雙方
       allow create: if hasEmail()
-        && request.resource.data.keys().hasOnly(['emails', 'fromEmail', 'toEmail', 'names', 'status', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['emails', 'fromEmail', 'toEmail', 'names', 'status', 'cycleId', 'createdAt'])
         && request.resource.data.emails is list && request.resource.data.emails.size() == 2
         && request.resource.data.fromEmail == request.auth.token.email
         && request.resource.data.fromEmail in request.resource.data.emails
@@ -109,6 +145,8 @@ service cloud.firestore {
         && request.resource.data.toEmail in request.resource.data.emails
         && request.resource.data.names is map
         && request.resource.data.status == 'pending'
+        && (!('cycleId' in request.resource.data)
+          || (request.resource.data.cycleId is string && request.resource.data.cycleId.size() >= 8 && request.resource.data.cycleId.size() <= 64))
         && request.resource.data.createdAt == request.time
         && friendDocIdOk(request.resource.data);
       // update＝接受邀請：只有 toEmail 本人、只能 pending→accepted、只能動 status/acceptedAt
@@ -299,7 +337,7 @@ service cloud.firestore {
             'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people', 'wizardData',
             'stops', 'status', 'currentStopIndex', 'startedAt', 'updatedAt',
             'lastEditedBy', 'lastEditedByName', 'titleVersion',
-            'aiTitle', 'aiReply', 'appDays', 'transportMode', 'imageUrl', 'editingLocks'
+            'aiTitle', 'aiReply', 'appDays', 'transportMode', 'imageUrl', 'editingLocks', 'transitMins'
           ]))
         || (isEditor(resource.data) && validRegenLockChange())
         // ★App 成員更新自己的偏好（members.{自己}.prefs 等）
@@ -499,25 +537,32 @@ service cloud.firestore {
       }
     }
 
-    // F1 通知中心：user_notifications/{emailKey}/items/{nid}
-    // - 收件人（emailKey == 自己 email 的 memberKey）可讀、可標已讀、可刪。
+    // F1 通知中心：user_notifications/{identityKey}/items/{nid}
+    // - 收件人（identityKey == 自己 email 的無碰撞 key）可讀、可標已讀、可刪。
     // - 寄件人只能 create（確定性 nid，同事件重送會撞既有 doc → 被拒＝天生防打擾），
     //   且必須「認識」收件人：同行程成員，或雙方存在 friendships 文件（pending/accepted 皆可，
     //   邀請類通知在關係成立前就要送）。
     match /user_notifications/{emailKey}/items/{nid} {
       function isRecipient() {
-        return hasEmail() && memberKey(request.auth.token.email) == emailKey;
+        return hasEmail() && identityKey(request.auth.token.email) == emailKey;
       }
       function senderKnowsRecipient(data) {
-        return (data.get('tripId', '') != '' && isTripMemberOrOwner(data.tripId))
-          || exists(/databases/$(database)/documents/friendships/$(memberKey(request.auth.token.email) + '__' + emailKey))
-          || exists(/databases/$(database)/documents/friendships/$(emailKey + '__' + memberKey(request.auth.token.email)));
+        return (data.get('tripId', '') != ''
+            && isTripMemberOrOwner(data.tripId)
+            && tripHasEmail(data.tripId, data.toEmail))
+          || exists(/databases/$(database)/documents/friendships/$(identityKey(request.auth.token.email) + '__' + identityKey(data.toEmail)))
+          || exists(/databases/$(database)/documents/friendships/$(identityKey(data.toEmail) + '__' + identityKey(request.auth.token.email)))
+          || exists(/databases/$(database)/documents/friendships/$(memberKey(request.auth.token.email) + '__' + memberKey(data.toEmail)))
+          || exists(/databases/$(database)/documents/friendships/$(memberKey(data.toEmail) + '__' + memberKey(request.auth.token.email)));
       }
       allow read: if isRecipient();
       allow create: if hasEmail()
-        && request.resource.data.keys().hasOnly(['type', 'fromEmail', 'fromName', 'tripId', 'tripTitle', 'message', 'read', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['type', 'fromEmail', 'toEmail', 'fromName', 'tripId', 'tripTitle', 'message', 'read', 'createdAt'])
         && request.resource.data.type in ['collab_invite', 'friend_invite', 'friend_accept', 'trip_renamed', 'trip_regenerated', 'friend_trip_completed']
         && request.resource.data.fromEmail == request.auth.token.email
+        && request.resource.data.toEmail is string
+        && request.resource.data.toEmail.size() <= 254
+        && identityKey(request.resource.data.toEmail) == emailKey
         && request.resource.data.fromName is string && request.resource.data.fromName.size() <= 100
         && request.resource.data.tripId is string && request.resource.data.tripId.size() <= 150
         && request.resource.data.tripTitle is string && request.resource.data.tripTitle.size() <= 200
