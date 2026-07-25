@@ -10,9 +10,22 @@
   let currentTripStatus = 'planning'; // 'planning' | 'ongoing' | 'completed'
   let currentStopIndex = -1;
   let currentTripStartedAt = null;
+  let tripLoadFailureMessage = '';
+  let parkingRecords = {};
+  let parkingDraft = null;
+  let parkingDraftStopId = '';
+  let parkingDraftAdjusted = false;
+  let parkingRequestToken = 0;
+  let parkingAdjustMap = null;
+  let parkingAdjustMarker = null;
+  let parkingMainMarker = null;
+  let lastUserLocation = null;
   let currentTripMembers = null;   // 共編成員 map（members[ekey]）
   let currentTripOwnerName = '';
   let currentTripShareToken = '';
+  let guestJoinRequestStatus = 'none';
+  let plannerNotifItems = [];
+  let plannerNotifUnsub = null;
   let currentTripDepartureDate = '';
   const isPrototypeMode = true;
   let isReplanning = false;
@@ -1057,6 +1070,7 @@
           if (!map) return;
           const p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
           const acc = Math.max(0, Number(pos.coords.accuracy) || 0);
+          lastUserLocation = { ...p, accuracy: acc };
           if (!userLocMarker) {
             userLocMarker = new google.maps.Marker({
               map, position: p, zIndex: 1500, clickable: false, title: '你在這裡',
@@ -1073,6 +1087,7 @@
             userLocCircle.setRadius(acc);
             if (!userLocCircle.getMap()) userLocCircle.setMap(map);
           }
+          updateActiveParkingDistance();
         },
         (err) => {
           if (err && err.code === 1) { // PERMISSION_DENIED → 停止監聽，全程照舊手動
@@ -1095,6 +1110,323 @@
     if (userLocMarker) userLocMarker.setMap(null);
     if (userLocCircle) userLocCircle.setMap(null);
   }
+
+  // ── 行程中停車點記錄：GPS 先定位，使用者可拖曳圖釘或點地圖修正 ──
+  function normalizeParkingRecords(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, record]) => (
+      record && Number.isFinite(Number(record.lat)) && Number.isFinite(Number(record.lng))
+    )));
+  }
+
+  function getParkingRecord(stopId) {
+    const record = parkingRecords && parkingRecords[stopId];
+    return record && !record.releasedAt ? record : null;
+  }
+
+  function getActiveParkingEntry() {
+    return Object.entries(parkingRecords || {})
+      .filter(([, record]) => record && !record.releasedAt)
+      .sort((a, b) => Number(b[1].at || 0) - Number(a[1].at || 0))[0] || null;
+  }
+
+  function getParkingTimeText(timestamp) {
+    const date = new Date(Number(timestamp) || Date.now());
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  }
+
+  function getParkingOwnerName() {
+    try {
+      const user = JSON.parse(localStorage.getItem('wai_user') || '{}');
+      return (user && user.currentUser && (user.currentUser.name || user.currentUser.email)) || '你';
+    } catch (_e) {
+      return '你';
+    }
+  }
+
+  async function persistParkingRecords() {
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+    try {
+      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const index = myTrips.findIndex((trip) => trip.id === currentItineraryId);
+      if (index >= 0) {
+        const progress = { ...(myTrips[index].tripProgress || {}), parking: parkingRecords };
+        myTrips[index] = { ...myTrips[index], parkingRecords, tripProgress: progress };
+        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+      }
+    } catch (_e) {}
+
+    const authed = firebaseEnabled && firebaseDb && firebaseAuth && firebaseAuth.currentUser;
+    if (!authed) return;
+    try {
+      await firebaseDb.collection('micro_trips').doc(currentItineraryId)
+        .set({ tripProgress: { parking: parkingRecords } }, { merge: true });
+    } catch (_e) {
+      feedbackToast('停車位置已保存在這台裝置', 'blue');
+    }
+  }
+
+  function setParkingDraft(position, { accuracy = 0, adjusted = false } = {}) {
+    if (!position || !Number.isFinite(Number(position.lat)) || !Number.isFinite(Number(position.lng))) return;
+    parkingDraft = { lat: Number(position.lat), lng: Number(position.lng), accuracy: Math.max(0, Number(accuracy) || 0) };
+    parkingDraftAdjusted = adjusted;
+    const coordinate = document.getElementById('parkingCoordinate');
+    const badge = document.getElementById('parkingAccuracyBadge');
+    const saveButton = document.getElementById('parkingSaveBtn');
+    if (coordinate) coordinate.textContent = `${parkingDraft.lat.toFixed(6)}, ${parkingDraft.lng.toFixed(6)}`;
+    if (badge) {
+      badge.className = 'parking-accuracy-badge';
+      if (adjusted) {
+        badge.textContent = '已手動調整';
+        badge.classList.add('manual');
+      } else {
+        badge.textContent = parkingDraft.accuracy > 0 ? `GPS 精度 ±${Math.round(parkingDraft.accuracy)} 公尺` : '位置待確認';
+        if (parkingDraft.accuracy > 30) badge.classList.add('weak');
+      }
+    }
+    if (saveButton) saveButton.disabled = false;
+
+    if (parkingAdjustMap && window.google && google.maps) {
+      const latLng = { lat: parkingDraft.lat, lng: parkingDraft.lng };
+      parkingAdjustMap.setCenter(latLng);
+      if (!parkingAdjustMarker) {
+        parkingAdjustMarker = new google.maps.Marker({
+          map: parkingAdjustMap,
+          position: latLng,
+          title: '停車位置',
+          draggable: true
+        });
+        parkingAdjustMarker.addListener('dragend', () => {
+          const pos = parkingAdjustMarker.getPosition();
+          setParkingDraft({ lat: pos.lat(), lng: pos.lng() }, { adjusted: true });
+        });
+      } else {
+        parkingAdjustMarker.setPosition(latLng);
+        parkingAdjustMarker.setMap(parkingAdjustMap);
+      }
+    }
+  }
+
+  function initParkingAdjustMap(position) {
+    const host = document.getElementById('parkingAdjustMap');
+    if (!position) return;
+    if (!host || !window.google || !google.maps) {
+      setParkingDraft(position, {
+        accuracy: parkingDraft ? parkingDraft.accuracy : 0,
+        adjusted: parkingDraftAdjusted
+      });
+      return;
+    }
+    parkingAdjustMap = new google.maps.Map(host, {
+      center: position,
+      zoom: 18,
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false,
+      clickableIcons: false,
+      gestureHandling: 'greedy'
+    });
+    parkingAdjustMap.addListener('click', (event) => {
+      if (!event.latLng) return;
+      setParkingDraft({ lat: event.latLng.lat(), lng: event.latLng.lng() }, { adjusted: true });
+    });
+    parkingAdjustMarker = null;
+    setParkingDraft(position, {
+      accuracy: parkingDraft ? parkingDraft.accuracy : 0,
+      adjusted: parkingDraftAdjusted
+    });
+  }
+
+  window.openParkingRecordSheet = async function(stopId, editExisting = false) {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法記錄停車位置', 'orange');
+    const stop = replanStops.find((item) => item.id === stopId);
+    if (!stop) return;
+    const overlay = document.getElementById('parkingRecordOverlay');
+    const subtitle = document.getElementById('parkingRecordSubtitle');
+    const noteInput = document.getElementById('parkingNoteInput');
+    const saveButton = document.getElementById('parkingSaveBtn');
+    const releaseButton = document.getElementById('parkingReleaseSheetBtn');
+    const existing = getParkingRecord(stopId);
+    const token = ++parkingRequestToken;
+    parkingDraftStopId = stopId;
+    parkingDraft = null;
+    parkingDraftAdjusted = false;
+    parkingAdjustMap = null;
+    parkingAdjustMarker = null;
+    if (overlay) overlay.classList.add('open');
+    document.body.classList.add('parking-sheet-open');
+    if (noteInput) noteInput.value = existing ? (existing.note || '') : '';
+    if (releaseButton) releaseButton.hidden = !existing;
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = existing ? '儲存停車位置' : '確認停在這裡';
+    }
+
+    if (existing && editExisting) {
+      if (subtitle) subtitle.textContent = '可拖曳圖釘或點地圖調整停車位置。';
+      parkingDraft = { lat: Number(existing.lat), lng: Number(existing.lng), accuracy: Number(existing.accuracy) || 0 };
+      parkingDraftAdjusted = Boolean(existing.adjusted);
+      initParkingAdjustMap(parkingDraft);
+      return;
+    }
+
+    if (subtitle) subtitle.textContent = '正在取得目前 GPS 位置…';
+    const position = await getCurrentPositionOnce(10000);
+    if (token !== parkingRequestToken || !overlay || !overlay.classList.contains('open')) return;
+    if (position.ok) {
+      parkingDraft = { lat: position.lat, lng: position.lng, accuracy: position.accuracy };
+      if (subtitle) {
+        subtitle.textContent = position.accuracy > 30
+          ? '定位誤差較大，建議拖曳圖釘或點地圖修正。'
+          : '請確認位置；若不準，可拖曳圖釘或點地圖修正。';
+      }
+      initParkingAdjustMap(parkingDraft);
+      return;
+    }
+
+    const fallback = getStopLatLng(stop) || lastUserLocation;
+    if (!fallback) {
+      if (subtitle) subtitle.textContent = '無法取得定位，也沒有可用的景點座標。';
+      const badge = document.getElementById('parkingAccuracyBadge');
+      if (badge) {
+        badge.className = 'parking-accuracy-badge weak';
+        badge.textContent = '無法定位';
+      }
+      return;
+    }
+    parkingDraft = { lat: Number(fallback.lat), lng: Number(fallback.lng), accuracy: 0 };
+    parkingDraftAdjusted = true;
+    if (subtitle) subtitle.textContent = '未取得 GPS，請在地圖上手動確認停車位置。';
+    initParkingAdjustMap(parkingDraft);
+  };
+
+  window.closeParkingRecordSheet = function() {
+    parkingRequestToken++;
+    const overlay = document.getElementById('parkingRecordOverlay');
+    if (overlay) overlay.classList.remove('open');
+    document.body.classList.remove('parking-sheet-open');
+    parkingDraft = null;
+    parkingDraftStopId = '';
+  };
+
+  window.appendParkingNote = function(text) {
+    const input = document.getElementById('parkingNoteInput');
+    if (!input) return;
+    const parts = input.value.trim() ? input.value.trim().split(/\s+/) : [];
+    if (!parts.includes(text)) parts.push(text);
+    input.value = parts.join(' ').slice(0, 60);
+    input.focus();
+  };
+
+  window.saveParkingRecord = async function() {
+    if (!parkingDraft || !parkingDraftStopId) return;
+    const previous = getParkingRecord(parkingDraftStopId);
+    const noteInput = document.getElementById('parkingNoteInput');
+    const savedAt = Date.now();
+    Object.entries(parkingRecords).forEach(([stopId, record]) => {
+      if (stopId !== parkingDraftStopId && record && !record.releasedAt) {
+        parkingRecords[stopId] = { ...record, releasedAt: savedAt };
+      }
+    });
+    parkingRecords[parkingDraftStopId] = {
+      lat: parkingDraft.lat,
+      lng: parkingDraft.lng,
+      accuracy: parkingDraft.accuracy,
+      note: noteInput ? noteInput.value.trim() : '',
+      at: previous ? previous.at : savedAt,
+      updatedAt: savedAt,
+      uid: firebaseAuth && firebaseAuth.currentUser ? firebaseAuth.currentUser.uid : '',
+      displayName: getParkingOwnerName(),
+      adjusted: parkingDraftAdjusted,
+      releasedAt: 0
+    };
+    window.closeParkingRecordSheet();
+    renderActiveParkingUI();
+    renderItineraryDisplay();
+    await persistParkingRecords();
+    feedbackToast('🅿️ 停車位置已記錄', 'green');
+  };
+
+  window.releaseActiveParking = async function() {
+    const active = getActiveParkingEntry();
+    if (!active) return;
+    parkingRecords[active[0]] = { ...active[1], releasedAt: Date.now() };
+    window.closeParkingRecordSheet();
+    renderActiveParkingUI();
+    renderItineraryDisplay();
+    await persistParkingRecords();
+    feedbackToast('🚗 已清除目前停車位置', 'blue');
+  };
+
+  window.openActiveParkingDetails = function() {
+    const active = getActiveParkingEntry();
+    if (active) window.openParkingRecordSheet(active[0], true);
+  };
+
+  window.navigateToActiveParking = function() {
+    const active = getActiveParkingEntry();
+    if (!active) return;
+    const record = active[1];
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${record.lat},${record.lng}&travelmode=walking`;
+    window.open(url, '_blank', 'noopener');
+  };
+
+  function updateActiveParkingDistance() {
+    const active = getActiveParkingEntry();
+    const distance = document.getElementById('findCarDistance');
+    if (!active || !distance) return;
+    const meters = lastUserLocation ? measureDistanceMeters(lastUserLocation, active[1]) : Number.NaN;
+    distance.textContent = Number.isFinite(meters)
+      ? `你的車在 ${formatDistanceZh(meters)}外`
+      : '已記錄停車位置';
+  }
+
+  function renderActiveParkingUI() {
+    const active = getActiveParkingEntry();
+    const bar = document.getElementById('findCarBar');
+    if (bar) bar.hidden = !active;
+    if (!active) {
+      if (parkingMainMarker) parkingMainMarker.setMap(null);
+      return;
+    }
+    const record = active[1];
+    const meta = document.getElementById('findCarMeta');
+    if (meta) {
+      const note = record.note ? `${record.note} · ` : '';
+      meta.textContent = `${note}${getParkingTimeText(record.at)} 由 ${record.displayName || '你'}停放`;
+    }
+    updateActiveParkingDistance();
+    if (map && window.google && google.maps) {
+      const position = { lat: Number(record.lat), lng: Number(record.lng) };
+      if (!parkingMainMarker) {
+        parkingMainMarker = new google.maps.Marker({
+          map,
+          position,
+          title: '我的停車點',
+          zIndex: 1600,
+          label: { text: 'P', color: '#ffffff', fontWeight: '800' },
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 17,
+            fillColor: '#1d4ed8',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 3
+          }
+        });
+        parkingMainMarker.addListener('click', () => window.openActiveParkingDetails());
+      } else {
+        parkingMainMarker.setPosition(position);
+        parkingMainMarker.setMap(map);
+      }
+    }
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && document.getElementById('parkingRecordOverlay')?.classList.contains('open')) {
+      window.closeParkingRecordSheet();
+    }
+  });
 
   // ── C4 導航按鈕：跳轉 Google Maps 外部導航（前往指定站）──
   function openExternalNavigation(stopId) {
@@ -1882,12 +2214,17 @@
       const tripId = explicitTripId || fallbackTripId;
       if (tripId) {
         let trip = myTrips.find(t => t.id === tripId);
+        let directLoadError = null;
 
         // 訪客連結只走後端：後端核對 shareToken 並回傳去敏資料，絕不直接讀 micro_trips。
         if (isGuestView) {
           try {
             if (!window.WAI_COLLAB) throw new Error('分享服務尚未載入。');
-            trip = await WAI_COLLAB.loadGuestTrip(tripId, params.get('token') || '');
+            currentTripShareToken = params.get('token') || '';
+            trip = await WAI_COLLAB.loadGuestTrip(tripId, currentTripShareToken);
+            collabRole = 'guest';
+            collabReadOnly = true;
+            showCollabReadOnlyBanner('guest');
           } catch (err) {
             document.body.innerHTML = '<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#37506e;">'
               + '<div style="font-size:40px;margin-bottom:12px;">🔒</div>'
@@ -1907,8 +2244,20 @@
                trip = trip ? { ...trip, ...fresh } : fresh;
              }
            } catch (err) {
-             console.warn('Failed to fetch trip from Firebase:', err);
+             directLoadError = err;
            }
+        }
+
+        if (explicitTripId && !trip && !isGuestView) {
+          const permissionDenied = directLoadError && (
+            directLoadError.code === 'permission-denied'
+            || /permission|權限/i.test(String(directLoadError.message || ''))
+          );
+          tripLoadFailureMessage = permissionDenied
+            ? '這個連結只有行程擁有者或已加入的成員可以開啟。請分享者重新按「分享」，取得新的唯讀分享連結；若要共同編輯，請改用邀請碼加入。'
+            : '找不到這份行程，可能已被刪除，或分享連結不完整。請向分享者索取新的唯讀分享連結。';
+          const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
+          if (heroTitleEl) heroTitleEl.textContent = '無法載入分享行程';
         }
 
         // 多人共作：依角色決定唯讀。訪客一律唯讀；登入者非 owner/editor 也唯讀。
@@ -1926,19 +2275,23 @@
           currentTripIsCollab = true;
           currentTripMembers = trip.members || null;
           currentTripOwnerName = trip.ownerName || trip.organizer || '';
-          currentTripShareToken = trip.shareToken || '';
+          currentTripShareToken = isGuestView ? (params.get('token') || '') : (trip.shareToken || '');
           currentTripDepartureDate = (trip.wizardData && trip.wizardData.departureDate) || trip.departureDate || '';
           // 多人即時同步：訂閱這份共編行程，任一成員（owner/editor）改動後所有人立即重繪
           if (!isGuestView) startCollabTripLiveSync(trip.id || tripId);
         }
 
         if (trip) {
+          tripLoadFailureMessage = '';
           localStorage.setItem(ACTIVE_TRIP_LOCAL_KEY, trip.id);
           currentItineraryId = trip.id;
           currentTripTitle = trip.title || trip.aiTitle || '微旅行';
           currentTripStatus = trip.status || 'planning';
           currentStopIndex = Number.isInteger(trip.currentStopIndex) ? trip.currentStopIndex : -1;
           currentTripStartedAt = trip.startedAt || null;
+          parkingRecords = normalizeParkingRecords(
+            (trip.tripProgress && trip.tripProgress.parking) || trip.parkingRecords || {}
+          );
           tripSessionId = `${currentItineraryId}-${Date.now()}`;
           if (trip.inviteCode) currentInviteCode = trip.inviteCode;
           
@@ -5476,14 +5829,88 @@
     if (document.getElementById('collabRoBanner')) return;
     const bar = document.createElement('div');
     bar.id = 'collabRoBanner';
-    bar.textContent = role === 'guest'
-      ? '👁 訪客唯讀檢視：你可以瀏覽這份共編行程，但無法編輯或儲存。'
-      : '👁 唯讀模式：你目前是「唯讀」角色，變更不會被儲存。請擁有者把你調為「可編輯」。';
-    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#37506e;color:#fff;'
-      + 'font-size:13px;text-align:center;padding:8px 12px;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.18);';
+    bar.className = 'collab-ro-banner';
+    if (role === 'guest') {
+      bar.innerHTML = '<span class="collab-ro-banner-text">👁 訪客唯讀檢視：你可以瀏覽這份分享行程，但無法編輯或儲存。</span>'
+        + '<button type="button" class="collab-join-btn" id="guestJoinRequestBtn" onclick="requestJoinCurrentTrip()">登入後申請加入</button>';
+    } else {
+      bar.innerHTML = '<span class="collab-ro-banner-text">👁 唯讀模式：你目前是「唯讀」角色，變更不會被儲存。請擁有者把你調為「可編輯」。</span>';
+    }
     document.body.appendChild(bar);
-    document.body.style.paddingTop = '38px';
+    requestAnimationFrame(() => {
+      document.body.style.paddingTop = `${Math.ceil(bar.getBoundingClientRect().height)}px`;
+      if (role === 'guest') refreshGuestJoinRequestStatus();
+    });
   }
+
+  function updateGuestJoinRequestButton(status) {
+    guestJoinRequestStatus = status || 'none';
+    const btn = document.getElementById('guestJoinRequestBtn');
+    if (!btn) return;
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    btn.disabled = false;
+    if (!user) {
+      btn.textContent = '登入後申請加入';
+      return;
+    }
+    if (guestJoinRequestStatus === 'pending') {
+      btn.textContent = '等待擁有者審核';
+      btn.disabled = true;
+    } else if (guestJoinRequestStatus === 'accepted') {
+      btn.textContent = '已加入，開啟成員行程';
+    } else if (guestJoinRequestStatus === 'owner') {
+      btn.textContent = '你是行程擁有者';
+      btn.disabled = true;
+    } else if (guestJoinRequestStatus === 'rejected') {
+      btn.textContent = '再次申請加入';
+    } else {
+      btn.textContent = '申請加入行程';
+    }
+  }
+
+  async function refreshGuestJoinRequestStatus() {
+    if (collabRole !== 'guest' || !currentItineraryId || !currentTripShareToken) return;
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!user) {
+      updateGuestJoinRequestButton('none');
+      return;
+    }
+    try {
+      const result = await WAI_COLLAB.getTripJoinRequestStatus(currentItineraryId, currentTripShareToken);
+      updateGuestJoinRequestButton(result.status);
+    } catch (_e) {
+      updateGuestJoinRequestButton('none');
+    }
+  }
+
+  window.requestJoinCurrentTrip = async function() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!user) {
+      openLogin();
+      return;
+    }
+    if (guestJoinRequestStatus === 'accepted') {
+      window.location.href = `${window.location.pathname}?id=${encodeURIComponent(currentItineraryId)}`;
+      return;
+    }
+    if (!window.WAI_COLLAB || !currentTripShareToken) {
+      feedbackToast('分享連結不完整，無法提出申請', 'orange');
+      return;
+    }
+    const btn = document.getElementById('guestJoinRequestBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '送出申請中…';
+    }
+    try {
+      const result = await WAI_COLLAB.requestTripJoin(currentItineraryId, currentTripShareToken);
+      updateGuestJoinRequestButton(result.status || 'pending');
+      feedbackToast(result.alreadyMember ? '你已經是這份行程的成員' : '已送出加入申請', 'green');
+    } catch (error) {
+      updateGuestJoinRequestButton(guestJoinRequestStatus);
+      feedbackToast((error && error.message) || '送出加入申請失敗', 'red');
+    }
+  };
 
   // ── 共編行程即時同步（多人同看一份，別人改了立刻重繪）──
   // 訂閱 micro_trips/{id}：收到遠端 stops 變更時，用「已存的驗證座標」輕量重建 replanStops
@@ -5585,6 +6012,13 @@
     if (data.startedAt !== undefined && data.startedAt !== currentTripStartedAt) {
       currentTripStartedAt = data.startedAt;
       updateLocalTripField(currentItineraryId, 'startedAt', currentTripStartedAt);
+    }
+    const remoteParking = normalizeParkingRecords(data.tripProgress && data.tripProgress.parking);
+    if (JSON.stringify(remoteParking) !== JSON.stringify(parkingRecords)) {
+      parkingRecords = remoteParking;
+      updateLocalTripField(currentItineraryId, 'parkingRecords', parkingRecords);
+      updateLocalTripField(currentItineraryId, 'tripProgress', data.tripProgress || { parking: parkingRecords });
+      hasStatusOrIndexChange = true;
     }
 
     if (data.title && data.title !== currentTripTitle) {
@@ -6416,6 +6850,20 @@
 
     const schedule = buildReplanSchedule();
     if (!schedule || schedule.length === 0) {
+      if (tripLoadFailureMessage) {
+        plannedBlock.innerHTML = `
+          <div class="voice-guide-card trip-load-error" role="alert">
+            <div class="voice-guide-meta">
+              <div class="voice-guide-title">🔒 無法開啟這份行程</div>
+              <div class="voice-guide-sub" id="voiceGuideStatus">${escapeHtml(tripLoadFailureMessage)}</div>
+            </div>
+            <div class="voice-guide-actions">
+              <button class="voice-btn play" onclick="window.location='ai-travel-explore-final.html'">返回首頁</button>
+            </div>
+          </div>
+        `;
+        return;
+      }
       plannedBlock.innerHTML = `
         <div class="voice-guide-card">
           <div class="voice-guide-meta">
@@ -6503,6 +6951,20 @@
         }
       }
 
+      const parkingRecord = getParkingRecord(stop.id);
+      const incomingMode = index > 0 ? normalizeTransitMode(schedule[index - 1].transitMode) : '';
+      const canRecordParking = currentTripStatus === 'ongoing'
+        && index === currentStopIndex
+        && !isEndpointStop
+        && !collabReadOnly
+        && (incomingMode === 'car' || incomingMode === 'scooter');
+      const parkingButtonHtml = canRecordParking
+        ? `<button class="stay-edit-btn parking-stop-action" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', ${parkingRecord ? 'true' : 'false'})">🅿️ ${parkingRecord ? '修改停車點' : '我停在這'}</button>`
+        : '';
+      const parkingInlineHtml = parkingRecord
+        ? `<div class="parking-inline-record"><span>🅿️ ${getParkingTimeText(parkingRecord.at)} 停車${parkingRecord.note ? ` · ${escapeHtml(parkingRecord.note)}` : ''}</span>${collabReadOnly ? '' : `<button type="button" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', true)">查看</button>`}</div>`
+        : '';
+
       let actionButtonsHtml = '';
       let itemClasses = 'timeline-item';
       if (currentTripStatus === 'ongoing') {
@@ -6523,19 +6985,23 @@
             actionButtonsHtml = stayTagHtml + navBtnHtml + `<span class="tag" style="background:#fef3c7;color:#d97706;font-weight:700;">⚡ 目前站 (唯讀)</span>`;
           } else {
             const checkinLabel = stop.type === 'start' ? '🚗 出發' : stop.type === 'end' ? '🏁 抵達終點' : '✅ 到達打卡';
-            actionButtonsHtml = stayTagHtml + navBtnHtml + `<button class="checkin-btn" onclick="event.stopPropagation(); checkInCurrentStop('${stop.id}', event)">${checkinLabel}</button>`;
+            actionButtonsHtml = stayTagHtml + navBtnHtml + parkingButtonHtml + `<button class="checkin-btn" onclick="event.stopPropagation(); checkInCurrentStop('${stop.id}', event)">${checkinLabel}</button>`;
           }
         } else {
           actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#f3f4f6;color:#6b7280;">⏳ 未到</span>`;
         }
       } else {
         // Normal planning/completed mode buttons
-        actionButtonsHtml = isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
+        actionButtonsHtml = collabReadOnly
+          ? (isEndpointStop
+            ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>`
+            : (stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>` : ''))
+          : (isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
           <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
           <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
           <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" title="只會記錄在你的帳號" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 我已去過' : '📌 我去過了'}</button>
           ${(!collabReadOnly && stop.altNearby && stop.altNearby.length) ? `<button class="stay-edit-btn swap-btn" onclick="event.stopPropagation(); openSwapPanel('${stop.id}')">🔄 替換</button>` : ''}
-        ` : '');
+        ` : ''));
       }
 
       const endpointTagHtml = (isEndpointStop && currentTripStatus === 'ongoing') ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);margin-right:6px;">${endpointLabel}</span>` : '';
@@ -6555,6 +7021,7 @@
                 <div class="spot-name">${stop.name}</div>
                 ${stop.isMergedAttraction && stop.mergedSubSpots && stop.mergedSubSpots.length ? `<div class="merged-subspots-row" style="font-size:12px;color:var(--ink3);margin:2px 0;">🧩 含 ${stop.mergedSubSpots.join('、')}</div>` : ''}
                 <div class="spot-tags">${endpointTagHtml}${actionButtonsHtml}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
+                ${parkingInlineHtml}
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, getStopServiceDate(stop)) : ''}</div>` : ''}
                 ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
@@ -6635,6 +7102,7 @@
     `;
 
     plannedBlock.innerHTML = html;
+    renderActiveParkingUI();
 
     // 重繪卡片後，先用已快取的廁所資料還原每站文字（避免切換交通工具等重繪時，
     // 廁所行被重置成「搜尋中…」後因為沒有作用中階段而停在載入狀態）。
@@ -12396,6 +12864,7 @@
 
     directionsService = new google.maps.DirectionsService();
     renderMapMarkersFromCurrentLocations();
+    renderActiveParkingUI();
     // 繪製階段性路線 (利用 Directions API)
     calculateAndDisplayRoute(buildRouteLocationsFromStops(), { recalculateTransport });
   }
@@ -13092,6 +13561,181 @@
     }
   }
 
+  const PLANNER_NOTIF_META = {
+    collab_invite: { emoji: '🎒', label: '共編邀請' },
+    friend_invite: { emoji: '✉️', label: '好友邀請' },
+    friend_accept: { emoji: '🎉', label: '好友成立' },
+    trip_renamed: { emoji: '✏️', label: '行程改名' },
+    trip_regenerated: { emoji: '🔄', label: '行程重生成' },
+    friend_trip_completed: { emoji: '🏁', label: '好友完成行程' },
+    trip_join_request: { emoji: '🙋', label: '加入申請' },
+    trip_join_accepted: { emoji: '✅', label: '申請已接受' },
+    trip_join_rejected: { emoji: '↩', label: '申請結果' }
+  };
+
+  function plannerNotifText(item) {
+    const who = item.fromName || item.fromEmail || '旅伴';
+    const title = item.tripTitle || '行程';
+    if (item.type === 'trip_join_request') {
+      if (item.requestStatus === 'accepted') return `已接受 ${who} 加入「${title}」`;
+      if (item.requestStatus === 'rejected') return `已拒絕 ${who} 加入「${title}」`;
+      return `${who} 申請加入「${title}」`;
+    }
+    if (item.type === 'trip_join_accepted') return `${who} 已接受你加入「${title}」`;
+    if (item.type === 'trip_join_rejected') return `${who} 未接受你加入「${title}」`;
+    if (item.type === 'collab_invite') return `${who} 邀請你加入「${title}」`;
+    if (item.type === 'friend_invite') return `${who} 想加你為好友`;
+    if (item.type === 'friend_accept') return `${who} 已接受你的好友邀請`;
+    if (item.type === 'trip_renamed') return `${who} 更新了行程名稱「${title}」`;
+    if (item.type === 'trip_regenerated') return `${who} 重新規劃了「${title}」`;
+    if (item.type === 'friend_trip_completed') return `${who} 完成了「${title}」`;
+    return item.message || '新通知';
+  }
+
+  function plannerNotifTime(value) {
+    try {
+      const date = value && typeof value.toDate === 'function' ? value.toDate() : new Date(value);
+      const diff = Date.now() - date.getTime();
+      if (!Number.isFinite(diff)) return '';
+      if (diff < 60000) return '剛剛';
+      if (diff < 3600000) return `${Math.floor(diff / 60000)} 分鐘前`;
+      if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小時前`;
+      return `${date.getMonth() + 1}/${date.getDate()}`;
+    } catch (_e) {
+      return '';
+    }
+  }
+
+  function updatePlannerNotifBadge() {
+    const badge = document.getElementById('notifBadge');
+    if (!badge) return;
+    const unread = plannerNotifItems.filter((item) => item && !item.read).length;
+    badge.style.display = unread ? '' : 'none';
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+  }
+
+  function renderPlannerNotifPanel() {
+    const panel = document.getElementById('notifPanel');
+    if (!panel) return;
+    const unread = plannerNotifItems.filter((item) => item && !item.read).length;
+    const rows = plannerNotifItems.map((item, index) => {
+      const meta = PLANNER_NOTIF_META[item.type] || { emoji: '🔔', label: '通知' };
+      const time = plannerNotifTime(item.createdAt);
+      const content = `<div class="notif-item${item.read ? '' : ' unread'}">
+        <span class="notif-item-emoji">${meta.emoji}</span>
+        <span class="notif-item-main">
+          <span class="notif-item-text">${escapeHtml(plannerNotifText(item))}</span>
+          <span class="notif-item-sub">${escapeHtml(meta.label)}${time ? ` · ${escapeHtml(time)}` : ''}</span>
+        </span>
+        ${item.read ? '' : '<span class="notif-dot"></span>'}
+      </div>`;
+      if (item.type === 'trip_join_request' && (!item.requestStatus || item.requestStatus === 'pending')) {
+        return `<div class="notif-request-row">${content}<div class="notif-request-actions">
+          <button type="button" class="notif-request-btn accept" onclick="resolvePlannerJoinRequest(${index},'accept',event)">接受</button>
+          <button type="button" class="notif-request-btn" onclick="resolvePlannerJoinRequest(${index},'reject',event)">拒絕</button>
+        </div></div>`;
+      }
+      return `<button type="button" class="notif-item${item.read ? '' : ' unread'}" onclick="handlePlannerNotifClick(${index})">
+        <span class="notif-item-emoji">${meta.emoji}</span>
+        <span class="notif-item-main">
+          <span class="notif-item-text">${escapeHtml(plannerNotifText(item))}</span>
+          <span class="notif-item-sub">${escapeHtml(meta.label)}${time ? ` · ${escapeHtml(time)}` : ''}</span>
+        </span>
+        ${item.read ? '' : '<span class="notif-dot"></span>'}
+      </button>`;
+    }).join('');
+    panel.innerHTML = `<div class="notif-panel-head"><span>🔔 通知</span>
+      ${unread ? '<button type="button" class="notif-mark-all" onclick="plannerNotifMarkAllRead()">全部標為已讀</button>' : ''}
+    </div>${rows || '<div class="notif-empty">目前沒有通知</div>'}`;
+  }
+
+  window.toggleNotifPanel = function() {
+    const panel = document.getElementById('notifPanel');
+    if (!panel) return;
+    const willOpen = !panel.classList.contains('open');
+    panel.classList.toggle('open', willOpen);
+    if (willOpen) renderPlannerNotifPanel();
+  };
+
+  window.plannerNotifMarkAllRead = function() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!user || !window.WAI_NOTIFY) return;
+    WAI_NOTIFY.markAllRead(user.email, plannerNotifItems);
+    plannerNotifItems = plannerNotifItems.map((item) => ({ ...item, read: true }));
+    updatePlannerNotifBadge();
+    renderPlannerNotifPanel();
+  };
+
+  window.handlePlannerNotifClick = function(index) {
+    const item = plannerNotifItems[index];
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!item || !user) return;
+    if (!item.read && window.WAI_NOTIFY) WAI_NOTIFY.markRead(user.email, item.id);
+    const panel = document.getElementById('notifPanel');
+    if (panel) panel.classList.remove('open');
+    // 導頁行為對齊 explore 的 handleNotifClick：行程類開該行程，好友類回 explore 好友頁。
+    // planner 沒有共編面板／我的行程列表，行程類一律以 ?id= 開啟該行程。
+    const tripTypes = ['trip_join_accepted', 'trip_join_request', 'collab_invite', 'trip_renamed', 'trip_regenerated'];
+    if (item.tripId && tripTypes.includes(item.type)) {
+      window.location.href = `${window.location.pathname}?id=${encodeURIComponent(item.tripId)}`;
+      return;
+    }
+    if (['friend_invite', 'friend_accept', 'friend_trip_completed'].includes(item.type)) {
+      window.location.href = 'ai-travel-explore-final.html?view=friends';
+      return;
+    }
+    if (item.tripId && item.type === 'trip_join_rejected') {
+      window.location.href = 'ai-travel-explore-final.html';
+    }
+  };
+
+  window.resolvePlannerJoinRequest = async function(index, decision, event) {
+    if (event) event.stopPropagation();
+    const item = plannerNotifItems[index];
+    if (!item || !item.tripId || !item.requesterUid) return;
+    const row = event && event.currentTarget && event.currentTarget.closest('.notif-request-actions');
+    if (row) row.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+    try {
+      await WAI_COLLAB.resolveTripJoinRequest(item.tripId, item.requesterUid, decision);
+      feedbackToast(decision === 'accept' ? '已接受加入申請' : '已拒絕加入申請', 'green');
+    } catch (error) {
+      if (row) row.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+      feedbackToast((error && error.message) || '處理加入申請失敗', 'red');
+    }
+  };
+
+  function startPlannerNotifSubscription(email) {
+    stopPlannerNotifSubscription();
+    if (!window.WAI_NOTIFY || !email) return;
+    const wrap = document.getElementById('notifWrap');
+    if (wrap) wrap.style.display = '';
+    plannerNotifUnsub = WAI_NOTIFY.subscribe(email, (items) => {
+      plannerNotifItems = items;
+      updatePlannerNotifBadge();
+      if (collabRole === 'guest' && currentItineraryId) {
+        const joinResult = items.find((item) => item
+          && item.tripId === currentItineraryId
+          && (item.type === 'trip_join_accepted' || item.type === 'trip_join_rejected'));
+        if (joinResult) {
+          updateGuestJoinRequestButton(
+            joinResult.type === 'trip_join_accepted' ? 'accepted' : 'rejected'
+          );
+        }
+      }
+      const panel = document.getElementById('notifPanel');
+      if (panel && panel.classList.contains('open')) renderPlannerNotifPanel();
+    }, () => {});
+  }
+
+  function stopPlannerNotifSubscription() {
+    if (plannerNotifUnsub) plannerNotifUnsub();
+    plannerNotifUnsub = null;
+    plannerNotifItems = [];
+    const wrap = document.getElementById('notifWrap');
+    if (wrap) wrap.style.display = 'none';
+    updatePlannerNotifBadge();
+  }
+
   function setupAuthListener() {
     if (!firebaseEnabled || !firebaseAuth) return;
     firebaseAuth.onAuthStateChanged(async (user) => {
@@ -13142,9 +13786,13 @@
         const currentUserObj = { uid: user.uid, email: user.email, name, emoji, preferences, visitedSpots };
         localStorage.setItem('wai_user', JSON.stringify({ isLoggedIn: true, currentUser: currentUserObj }));
         renderUserMenuWithData(name, emoji, user.email);
+        startPlannerNotifSubscription(user.email);
+        refreshGuestJoinRequestStatus();
       } else {
         localStorage.removeItem('wai_user');
         renderUserMenuWithData('', '', '');
+        stopPlannerNotifSubscription();
+        refreshGuestJoinRequestStatus();
       }
     });
   }
@@ -13154,6 +13802,11 @@
     if (wrap && !wrap.contains(e.target)) {
       const dd = document.getElementById('userDropdown');
       if (dd) dd.classList.remove('open');
+    }
+    const notifWrap = document.getElementById('notifWrap');
+    if (notifWrap && !notifWrap.contains(e.target)) {
+      const panel = document.getElementById('notifPanel');
+      if (panel) panel.classList.remove('open');
     }
   });
 

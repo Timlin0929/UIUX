@@ -196,6 +196,64 @@ window.WAI_COLLAB = (function () {
   }
   function serverTs() { return firebase.firestore.FieldValue.serverTimestamp(); }
 
+  // 個人行程分享也必須使用不可猜的 token。只有 owner 能寫入自己的 micro_trip；
+  // 若行程尚未同步到 Firestore，順便補上唯讀頁面所需的核心欄位。
+  async function ensureTripShareToken(trip) {
+    if (!trip || !trip.id) throw new Error('找不到要分享的行程。');
+    var current = firebase.auth().currentUser;
+    if (!current || !current.email) throw new Error('請先登入後再分享行程。');
+    var token = String(trip.shareToken || '');
+    if (token.length < 16) token = generateShareToken();
+
+    var tripRef = db().collection('micro_trips').doc(trip.id);
+    // 不可先 get()：文件不存在時 rules 沒有 resource.data 可驗證身分，讀取會直接
+    // permission-denied，補建分支永遠到不了（與 friends.js sendInvite 是同一類錯誤）。
+    // 改為先試 update——只碰 shareToken，不會覆蓋 Firestore 上較新的 stops／title。
+    try {
+      await tripRef.update({ shareToken: token, updatedAt: serverTs() });
+      return token;
+    } catch (updateError) {
+      var code = updateError && updateError.code;
+      // not-found＝文件不存在；permission-denied＝不存在（無 resource.data）或本人非 owner。
+      // 兩者都往下走建檔，真的無權限時由建檔的錯誤處理給明確訊息。
+      if (code !== 'not-found' && code !== 'permission-denied') throw updateError;
+    }
+
+    // 建檔必須帶齊 owner 身分欄位：read 規則要 ownerUid／ownerEmail／userEmail 其一，
+    // 只寫 shareToken 會產生一份任何人都讀不到的孤兒文件。
+    try {
+      await tripRef.set({
+        id: trip.id,
+        title: trip.title || trip.aiTitle || '未命名行程',
+        customTitle: !!trip.customTitle,
+        emoji: trip.emoji || '🗺️',
+        days: trip.days || '',
+        region: trip.region || '',
+        budget: trip.budget || '',
+        people: trip.people || '',
+        wizardData: trip.wizardData || {},
+        stops: Array.isArray(trip.stops) ? trip.stops : [],
+        status: trip.status || 'planning',
+        currentStopIndex: Number.isInteger(trip.currentStopIndex) ? trip.currentStopIndex : -1,
+        startedAt: trip.startedAt || null,
+        userEmail: current.email,
+        ownerUid: current.uid,
+        ownerEmail: current.email,
+        ownerName: current.displayName || current.email.split('@')[0],
+        collab: false,
+        shareToken: token,
+        createdAt: serverTs(),
+        updatedAt: serverTs()
+      }, { merge: true });
+    } catch (createError) {
+      if (createError && createError.code === 'permission-denied') {
+        throw new Error('只有行程擁有者可以建立分享連結。');
+      }
+      throw createError;
+    }
+    return token;
+  }
+
   async function collabApi(path, options) {
     var current = firebase.auth().currentUser;
     var headers = Object.assign({ 'Content-Type': 'application/json' }, (options && options.headers) || {});
@@ -468,6 +526,34 @@ window.WAI_COLLAB = (function () {
     return body.trip;
   }
 
+  async function requestTripJoin(tripId, token) {
+    if (!tripId || !token) throw new Error('分享連結不完整。');
+    return collabApi('join-requests', {
+      method: 'POST',
+      body: JSON.stringify({ tripId: tripId, token: token })
+    });
+  }
+
+  async function getTripJoinRequestStatus(tripId, token) {
+    if (!tripId || !token) return { status: 'none' };
+    var query = 'join-requests/status?tripId=' + encodeURIComponent(tripId) + '&token=' + encodeURIComponent(token);
+    return collabApi(query, { method: 'GET' });
+  }
+
+  async function resolveTripJoinRequest(tripId, requesterUid, decision) {
+    if (!tripId || !requesterUid || ['accept', 'reject'].indexOf(decision) === -1) {
+      throw new Error('加入申請資料不完整。');
+    }
+    return collabApi('join-requests/resolve', {
+      method: 'POST',
+      body: JSON.stringify({
+        tripId: tripId,
+        requesterUid: requesterUid,
+        decision: decision
+      })
+    });
+  }
+
   function buildShareLink(tripId, shareToken, baseHref) {
     var base = baseHref || 'ai-travel-planner-v8.html';
     var relative = base + '?sharedId=' + encodeURIComponent(tripId) + '&token=' + encodeURIComponent(shareToken || '') + '&guest=1';
@@ -528,6 +614,10 @@ window.WAI_COLLAB = (function () {
     releaseRegenLock: releaseRegenLock,
     fetchMyCollabTrips: fetchMyCollabTrips,
     subscribeMyCollabTrips: subscribeMyCollabTrips,
-    loadGuestTrip: loadGuestTrip
+    ensureTripShareToken: ensureTripShareToken,
+    loadGuestTrip: loadGuestTrip,
+    requestTripJoin: requestTripJoin,
+    getTripJoinRequestStatus: getTripJoinRequestStatus,
+    resolveTripJoinRequest: resolveTripJoinRequest
   };
 })();

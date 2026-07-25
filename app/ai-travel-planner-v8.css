@@ -3961,6 +3961,526 @@ button:focus-visible,.nav-pill:focus-visible,.tool-btn:focus-visible{outline:3px
   .mobile-role-switch{left:12px;right:12px;bottom:66px;padding:6px;gap:6px;}
 }
 
+/* ── 行程中停車點記錄 ── */
+.parking-record-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 520;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(34, 32, 29, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+}
+.parking-record-overlay.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+.parking-record-sheet {
+  width: min(480px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+}
+.parking-record-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid var(--border);
+}
+.parking-record-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  color: var(--ink);
+}
+.parking-record-subtitle {
+  margin-top: 4px;
+  color: var(--ink2);
+  font-size: 13px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.parking-record-close {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink2);
+  font-size: 18px;
+  cursor: pointer;
+}
+.parking-adjust-map {
+  height: 280px;
+  margin: 16px 20px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface2);
+}
+.parking-location-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 20px 0;
+}
+.parking-accuracy-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--accent-light);
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.parking-accuracy-badge.weak {
+  background: #fff7e6;
+  color: #9a5b00;
+}
+.parking-accuracy-badge.manual {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+.parking-coordinate {
+  min-width: 0;
+  color: var(--ink3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.parking-note-label {
+  display: block;
+  padding: 16px 20px 7px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+}
+.parking-note-input {
+  display: block;
+  width: calc(100% - 40px);
+  height: 46px;
+  margin: 0 20px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.parking-note-input:focus {
+  outline: 3px solid rgba(46, 125, 109, 0.18);
+  border-color: var(--accent);
+}
+.parking-note-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px 20px 0;
+}
+.parking-note-chips button {
+  min-height: 36px;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface2);
+  color: var(--ink2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.parking-record-actions {
+  display: flex;
+  gap: 10px;
+  padding: 18px 20px 20px;
+}
+.parking-save-btn,
+.parking-release-sheet-btn {
+  min-height: 46px;
+  border-radius: 8px;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.parking-save-btn {
+  flex: 1;
+  background: var(--accent);
+  color: #fff;
+}
+.parking-save-btn:disabled {
+  background: #b6c9c4;
+  cursor: wait;
+}
+.parking-release-sheet-btn {
+  flex: 0 0 auto;
+  border-color: var(--border);
+  background: var(--surface2);
+  color: var(--ink2);
+}
+.parking-stop-action {
+  border-style: solid !important;
+  border-color: rgba(46, 125, 109, 0.35) !important;
+  background: var(--accent-light) !important;
+  color: var(--accent-dark) !important;
+  white-space: nowrap;
+}
+
+/* 共用通知中心：探索頁與行程內各分頁維持相同操作。 */
+.notif-wrap { position: relative; flex-shrink: 0; }
+.notif-bell {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  font-size: 17px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.notif-bell:hover { border-color: var(--accent); background: var(--accent-light); }
+.notif-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: #c0392b;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+.notif-panel {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(26, 24, 20, .16);
+  z-index: 10020;
+  padding: 6px;
+}
+.notif-panel.open { display: block; }
+.notif-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.notif-mark-all {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.notif-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-family: inherit;
+}
+button.notif-item { cursor: pointer; }
+.notif-item:hover { background: var(--surface2); }
+.notif-item.unread { background: var(--accent-light); }
+.notif-item-emoji { flex-shrink: 0; font-size: 17px; line-height: 1.4; }
+.notif-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.notif-item-text { color: var(--ink); font-size: 13.5px; line-height: 1.5; text-wrap: pretty; }
+.notif-item-sub { color: var(--ink3); font-size: 11.5px; white-space: nowrap; }
+.notif-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent2);
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+.notif-request-actions { display: flex; gap: 6px; padding: 2px 10px 10px 35px; }
+.notif-request-btn {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink2);
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.notif-request-btn.accept { border-color: var(--accent); background: var(--accent); color: #fff; }
+.notif-request-btn:disabled { cursor: wait; opacity: .6; }
+.notif-empty { padding: 26px 12px; text-align: center; font-size: 13px; color: var(--ink3); }
+
+.collab-ro-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 6px 12px;
+  box-sizing: border-box;
+  background: #37506e;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .18);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.collab-ro-banner-text { min-width: 0; text-wrap: pretty; }
+.collab-join-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, .5);
+  border-radius: 7px;
+  background: #fff;
+  color: #27445f;
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.collab-join-btn:disabled { cursor: default; opacity: .72; }
+
+@media (max-width: 700px) {
+  .notif-panel { position: fixed; left: 10px; right: 10px; top: 64px; width: auto; }
+  .collab-ro-banner { align-items: stretch; flex-direction: column; gap: 5px; text-align: center; }
+  .collab-join-btn { align-self: center; }
+}
+.parking-inline-record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.parking-inline-record button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink2);
+  font-family: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.find-car-bar {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 270;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(460px, calc(100vw - 36px));
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(46, 125, 109, 0.35);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.find-car-bar[hidden] {
+  display: none;
+}
+.find-car-icon {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent-light);
+  font-size: 20px;
+}
+.find-car-copy {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+.find-car-copy strong,
+.find-car-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.find-car-copy strong {
+  font-size: 13px;
+  color: var(--ink);
+}
+.find-car-copy span {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--ink2);
+}
+.find-car-nav {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.find-car-more {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--ink2);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+@media (max-width: 1024px) {
+  .find-car-bar {
+    left: 12px;
+    right: 12px;
+    bottom: 82px;
+    width: auto;
+  }
+  body.mobile-role-driver .find-car-bar {
+    bottom: calc(var(--mobile-driver-panel-clearance, 240px) + 12px);
+  }
+}
+
+@media (max-width: 640px) {
+  .parking-record-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .parking-record-sheet {
+    width: 100%;
+    max-height: min(86vh, 760px);
+    border-width: 1px 0 0;
+    border-radius: 18px 18px 0 0;
+  }
+  .parking-record-head {
+    padding: 16px 16px 12px;
+  }
+  .parking-record-title {
+    font-size: 18px;
+  }
+  .parking-adjust-map {
+    height: clamp(210px, 32vh, 280px);
+    margin: 14px 16px 0;
+  }
+  .parking-location-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    padding: 10px 16px 0;
+  }
+  .parking-note-label {
+    padding: 14px 16px 6px;
+  }
+  .parking-note-input {
+    width: calc(100% - 32px);
+    margin: 0 16px;
+  }
+  .parking-note-chips {
+    padding: 9px 16px 0;
+  }
+  .parking-record-actions {
+    padding: 16px;
+  }
+  .find-car-bar {
+    gap: 7px;
+    padding: 8px;
+  }
+  .find-car-icon,
+  .find-car-more {
+    display: none;
+  }
+  .find-car-nav {
+    min-height: 42px;
+  }
+  .parking-inline-record {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
 /* #6 手機操作列分層：桌機維持原樣（更多鈕隱藏、兩鈕直出） */
 #heroMoreBtn{display:none;}
 @media (max-width:1024px){

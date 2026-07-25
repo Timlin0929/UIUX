@@ -94,6 +94,49 @@ function sameSecret(a, b) {
   return left.length === right.length && left.length >= 16 && crypto.timingSafeEqual(left, right);
 }
 
+function emailIdentityKey(email) {
+  return Buffer.from(String(email || '').trim().toLowerCase(), 'utf8').toString('hex');
+}
+
+function legacyMemberKey(email) {
+  return String(email || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+}
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function tripOwnerEmail(data) {
+  return String(data.ownerEmail || data.userEmail || '').trim();
+}
+
+function isTripOwner(user, data) {
+  const ownerEmail = normalizeEmail(tripOwnerEmail(data));
+  return Boolean(
+    (data.ownerUid && user.uid === data.ownerUid)
+    || (user.email && ownerEmail && normalizeEmail(user.email) === ownerEmail)
+  );
+}
+
+function generateServerInviteCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(8);
+  let code = '';
+  for (let i = 0; i < bytes.length; i += 1) code += alphabet[bytes[i] % alphabet.length];
+  return code;
+}
+
+function generateServerShareToken() {
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+function notificationRef(email, id) {
+  return adminDb.collection('user_notifications')
+    .doc(emailIdentityKey(email))
+    .collection('items')
+    .doc(String(id).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 300));
+}
+
 function publicTripData(tripId, data) {
   const allowed = [
     'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people',
@@ -217,6 +260,295 @@ app.get('/api/collab/public-trip', publicTripLimiter, async (req, res) => {
   } catch (err) {
     console.error('[proxy] public trip failed:', err && err.message);
     return res.status(500).json({ error: 'public trip failed', message: '目前無法讀取分享行程，請稍後再試。' });
+  }
+});
+
+// 唯讀分享頁的加入申請。分享權杖只允許提出申請，不會直接賦予成員權限。
+app.post('/api/collab/join-requests', collabLimiter, requireFirebaseUser, async (req, res) => {
+  if (!req.user.email) {
+    return res.status(403).json({ error: 'email required', message: '此帳號缺少 Email，無法申請加入。' });
+  }
+  const tripId = String(req.body && req.body.tripId || '');
+  const token = String(req.body && req.body.token || '');
+  if (!/^[A-Za-z0-9_-]{3,150}$/.test(tripId) || token.length > 200) {
+    return res.status(400).json({ error: 'invalid share link', message: '分享連結格式不正確。' });
+  }
+
+  try {
+    const tripRef = adminDb.collection('micro_trips').doc(tripId);
+    const requestRef = tripRef.collection('join_requests').doc(req.user.uid);
+    const result = await adminDb.runTransaction(async (tx) => {
+      const [tripSnap, requestSnap] = await Promise.all([tx.get(tripRef), tx.get(requestRef)]);
+      if (!tripSnap.exists) {
+        const err = new Error('找不到這份行程。');
+        err.status = 404;
+        throw err;
+      }
+      const trip = tripSnap.data();
+      if (!sameSecret(token, trip.shareToken)) {
+        const err = new Error('分享連結已失效，請向擁有者索取新連結。');
+        err.status = 404;
+        throw err;
+      }
+      if (isTripOwner(req.user, trip)) {
+        const err = new Error('你已經是這份行程的擁有者。');
+        err.status = 409;
+        throw err;
+      }
+      const memberEmails = Array.isArray(trip.memberEmails) ? trip.memberEmails : [];
+      if (memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(req.user.email))) {
+        return { status: 'accepted', alreadyMember: true };
+      }
+      const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
+      // ⚠️ 已知風險（2026-07-26 Codex 審查 #3）：此處只算既有 memberEmails，
+      // 但 resolve 接受時會先把 owner 補進陣列再判斷上限。若 memberEmails 有
+      // maxMembers-1 人「且不含 owner」，申請會通過變 pending，owner 按接受卻拿到 409，
+      // 申請永久卡住。預設 maxMembers=10 且個人行程 memberEmails 多為空，暫不處理。
+      // 要修的話：兩處統一改成「memberEmails ∪ {owner} 去重後的人數」。
+      if (memberEmails.length >= maxMembers) {
+        const err = new Error(`這份行程的成員已達上限（${maxMembers} 人）。`);
+        err.status = 409;
+        throw err;
+      }
+      const previous = requestSnap.exists ? requestSnap.data() : null;
+      if (previous && previous.status === 'pending') return { status: 'pending', alreadyMember: false };
+      if (previous && previous.status === 'accepted') return { status: 'accepted', alreadyMember: true };
+
+      const ownerEmail = tripOwnerEmail(trip);
+      if (!ownerEmail) {
+        const err = new Error('這份行程缺少擁有者資料，暫時無法申請加入。');
+        err.status = 409;
+        throw err;
+      }
+      const now = Timestamp.now();
+      const requesterName = String(req.user.name || req.user.email.split('@')[0] || '旅伴').slice(0, 100);
+      const requestData = {
+        requesterUid: req.user.uid,
+        requesterEmail: req.user.email,
+        requesterName,
+        status: 'pending',
+        requestedAt: now,
+        updatedAt: now
+      };
+      tx.set(requestRef, requestData, { merge: true });
+      tx.set(notificationRef(ownerEmail, `trip_join_request__${tripId}__${req.user.uid}`), {
+        type: 'trip_join_request',
+        fromEmail: req.user.email,
+        toEmail: ownerEmail,
+        fromName: requesterName,
+        tripId,
+        tripTitle: String(trip.title || trip.aiTitle || '微旅行').slice(0, 200),
+        message: '申請加入你的行程',
+        requesterUid: req.user.uid,
+        requestStatus: 'pending',
+        read: false,
+        createdAt: now
+      }, { merge: true });
+      return { status: 'pending', alreadyMember: false };
+    });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[proxy] join request failed:', err && err.message);
+    return res.status(err.status || 500).json({
+      error: 'join request failed',
+      message: err.status ? err.message : '送出加入申請失敗，請稍後再試。'
+    });
+  }
+});
+
+app.get('/api/collab/join-requests/status', collabLimiter, requireFirebaseUser, async (req, res) => {
+  const tripId = String(req.query.tripId || '');
+  const token = String(req.query.token || '');
+  if (!/^[A-Za-z0-9_-]{3,150}$/.test(tripId) || token.length > 200) {
+    return res.status(400).json({ error: 'invalid share link', message: '分享連結格式不正確。' });
+  }
+  try {
+    const tripRef = adminDb.collection('micro_trips').doc(tripId);
+    const [tripSnap, requestSnap] = await Promise.all([
+      tripRef.get(),
+      tripRef.collection('join_requests').doc(req.user.uid).get()
+    ]);
+    const trip = tripSnap.exists ? tripSnap.data() : null;
+    if (!trip || !sameSecret(token, trip.shareToken)) {
+      return res.status(404).json({ error: 'invalid share link', message: '分享連結已失效。' });
+    }
+    if (isTripOwner(req.user, trip)) return res.json({ ok: true, status: 'owner' });
+    const members = Array.isArray(trip.memberEmails) ? trip.memberEmails : [];
+    if (req.user.email && members.some((email) => normalizeEmail(email) === normalizeEmail(req.user.email))) {
+      return res.json({ ok: true, status: 'accepted' });
+    }
+    return res.json({ ok: true, status: requestSnap.exists ? requestSnap.get('status') || 'none' : 'none' });
+  } catch (err) {
+    console.error('[proxy] join request status failed:', err && err.message);
+    return res.status(500).json({ error: 'status failed', message: '無法取得申請狀態。' });
+  }
+});
+
+// 擁有者核准時，以同一筆 transaction 完成「個人行程轉多人」與加入 viewer。
+app.post('/api/collab/join-requests/resolve', collabLimiter, requireFirebaseUser, async (req, res) => {
+  const tripId = String(req.body && req.body.tripId || '');
+  const requesterUid = String(req.body && req.body.requesterUid || '');
+  const decision = String(req.body && req.body.decision || '');
+  if (!/^[A-Za-z0-9_-]{3,150}$/.test(tripId) || !requesterUid || !['accept', 'reject'].includes(decision)) {
+    return res.status(400).json({ error: 'invalid request', message: '申請資料不完整。' });
+  }
+  try {
+    const tripRef = adminDb.collection('micro_trips').doc(tripId);
+    const requestRef = tripRef.collection('join_requests').doc(requesterUid);
+    const result = await adminDb.runTransaction(async (tx) => {
+      const [tripSnap, requestSnap] = await Promise.all([tx.get(tripRef), tx.get(requestRef)]);
+      if (!tripSnap.exists || !requestSnap.exists) {
+        const err = new Error('找不到這筆加入申請。');
+        err.status = 404;
+        throw err;
+      }
+      const trip = tripSnap.data();
+      const joinRequest = requestSnap.data();
+      if (!isTripOwner(req.user, trip)) {
+        const err = new Error('只有行程擁有者可以處理加入申請。');
+        err.status = 403;
+        throw err;
+      }
+      if (joinRequest.status !== 'pending') {
+        return { status: joinRequest.status, collab: Boolean(trip.collab) };
+      }
+
+      const now = Timestamp.now();
+      const ownerEmail = tripOwnerEmail(trip) || req.user.email;
+      const ownerName = String(trip.ownerName || req.user.name || ownerEmail.split('@')[0] || '擁有者').slice(0, 100);
+      const requesterEmail = String(joinRequest.requesterEmail || '').trim();
+      const requesterName = String(joinRequest.requesterName || requesterEmail.split('@')[0] || '旅伴').slice(0, 100);
+      const ownerNotification = notificationRef(ownerEmail, `trip_join_request__${tripId}__${requesterUid}`);
+
+      if (decision === 'reject') {
+        tx.set(requestRef, {
+          status: 'rejected',
+          resolvedAt: now,
+          resolvedBy: req.user.uid,
+          updatedAt: now
+        }, { merge: true });
+        tx.set(ownerNotification, { requestStatus: 'rejected', read: true }, { merge: true });
+        tx.set(notificationRef(requesterEmail, `trip_join_rejected__${tripId}__${requesterUid}`), {
+          type: 'trip_join_rejected',
+          fromEmail: ownerEmail,
+          toEmail: requesterEmail,
+          fromName: ownerName,
+          tripId,
+          tripTitle: String(trip.title || trip.aiTitle || '微旅行').slice(0, 200),
+          message: '擁有者未接受這次加入申請',
+          read: false,
+          createdAt: now
+        }, { merge: true });
+        return { status: 'rejected', collab: Boolean(trip.collab) };
+      }
+
+      const memberEmails = Array.isArray(trip.memberEmails) ? trip.memberEmails.slice() : [];
+      if (!memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(ownerEmail))) {
+        memberEmails.push(ownerEmail);
+      }
+      const alreadyMember = memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(requesterEmail));
+      const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
+      if (!alreadyMember && memberEmails.length >= maxMembers) {
+        const err = new Error(`這份行程的成員已達上限（${maxMembers} 人）。`);
+        err.status = 409;
+        throw err;
+      }
+      if (!alreadyMember) memberEmails.push(requesterEmail);
+
+      // ⚠️ 已知風險（2026-07-26 Codex 審查 #4）：legacyMemberKey 把標點一律換成底線，
+      // a.b@x.com 與 a_b@x.com 會壓成同一個 key，理論上 requester 可覆蓋 owner 那筆。
+      // 這是既有 members schema 的沿襲問題（前端與 firestore.rules 目前都靠這個 key 對成員），
+      // 不是本次新引入；要根治得連同 rules 與前端一起遷移到 identityKey，故本批不動。
+      const members = trip.members && typeof trip.members === 'object' ? { ...trip.members } : {};
+      const ownerKey = legacyMemberKey(ownerEmail);
+      members[ownerKey] = {
+        ...(members[ownerKey] || {}),
+        email: ownerEmail,
+        name: ownerName,
+        role: 'owner',
+        ready: true,
+        prefs: (members[ownerKey] && members[ownerKey].prefs) || {},
+        joinedAt: (members[ownerKey] && members[ownerKey].joinedAt) || Date.now()
+      };
+      const requesterKey = legacyMemberKey(requesterEmail);
+      members[requesterKey] = {
+        ...(members[requesterKey] || {}),
+        email: requesterEmail,
+        name: requesterName,
+        role: 'viewer',
+        ready: false,
+        prefs: (members[requesterKey] && members[requesterKey].prefs) || {},
+        joinedAt: (members[requesterKey] && members[requesterKey].joinedAt) || Date.now()
+      };
+
+      let inviteCode = normalizeInviteCode(trip.inviteCode);
+      let inviteRef = inviteCode ? adminDb.collection('invites').doc(inviteCode) : null;
+      if (!inviteCode) {
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const candidate = generateServerInviteCode();
+          const candidateRef = adminDb.collection('invites').doc(candidate);
+          const candidateSnap = await tx.get(candidateRef);
+          if (!candidateSnap.exists || candidateSnap.get('tripId') === tripId) {
+            inviteCode = candidate;
+            inviteRef = candidateRef;
+            break;
+          }
+        }
+        if (!inviteCode || !inviteRef) {
+          const err = new Error('暫時無法建立行程邀請碼，請再試一次。');
+          err.status = 503;
+          throw err;
+        }
+      }
+      const shareToken = String(trip.shareToken || '').length >= 16 ? trip.shareToken : generateServerShareToken();
+      tx.set(tripRef, {
+        collab: true,
+        ownerUid: trip.ownerUid || req.user.uid,
+        ownerEmail,
+        ownerName,
+        userEmail: trip.userEmail || ownerEmail,
+        inviteCode,
+        shareToken,
+        maxMembers,
+        memberEmails,
+        editorEmails: Array.isArray(trip.editorEmails) ? trip.editorEmails : [],
+        members,
+        collabCreatedAt: trip.collabCreatedAt || now,
+        updatedAt: now
+      }, { merge: true });
+      tx.set(inviteRef, {
+        tripId,
+        active: true,
+        createdBy: ownerEmail,
+        createdAt: now
+      }, { merge: true });
+      tx.set(requestRef, {
+        status: 'accepted',
+        resolvedAt: now,
+        resolvedBy: req.user.uid,
+        updatedAt: now
+      }, { merge: true });
+      tx.set(ownerNotification, { requestStatus: 'accepted', read: true }, { merge: true });
+      tx.set(notificationRef(requesterEmail, `trip_join_accepted__${tripId}__${requesterUid}`), {
+        type: 'trip_join_accepted',
+        fromEmail: ownerEmail,
+        toEmail: requesterEmail,
+        fromName: ownerName,
+        tripId,
+        tripTitle: String(trip.title || trip.aiTitle || '微旅行').slice(0, 200),
+        message: '已接受你的加入申請，你目前是唯讀成員',
+        read: false,
+        createdAt: now
+      }, { merge: true });
+      return { status: 'accepted', collab: true, inviteCode, shareToken };
+    });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[proxy] resolve join request failed:', err && err.message);
+    return res.status(err.status || 500).json({
+      error: 'resolve failed',
+      message: err.status ? err.message : '處理加入申請失敗，請稍後再試。'
+    });
   }
 });
 

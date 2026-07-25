@@ -107,6 +107,12 @@ let wizardPreviewDebounceTimer = null;
   initFirebaseIfConfigured();
   await loadState();
 
+  // ?view=friends|mytrips|explore：讓別頁（planner 通知中心）能直接深連結到指定分頁。
+  const _viewParam = new URLSearchParams(window.location.search).get('view');
+  if (_viewParam && ['explore', 'mytrips', 'friends'].includes(_viewParam)) {
+    showMainView(_viewParam);
+  }
+
   // Check if openPref=1 parameter is present in URL
   if (new URLSearchParams(window.location.search).get('openPref')) {
     setTimeout(() => {
@@ -3752,13 +3758,22 @@ const NOTIF_TYPE_META = {
   friend_accept:         { emoji: '🎉', label: '好友成立' },
   trip_renamed:          { emoji: '✏️', label: '行程改名' },
   trip_regenerated:      { emoji: '🔄', label: '行程重生成' },
-  friend_trip_completed: { emoji: '🏁', label: '好友完成行程' }
+  friend_trip_completed: { emoji: '🏁', label: '好友完成行程' },
+  trip_join_request:     { emoji: '🙋', label: '加入申請' },
+  trip_join_accepted:    { emoji: '✅', label: '申請已接受' },
+  trip_join_rejected:    { emoji: '↩', label: '申請結果' }
 };
 
 function notifItemText(n) {
   const who = n.fromName || n.fromEmail || '旅伴';
   const title = n.tripTitle || '行程';
   switch (n.type) {
+    case 'trip_join_request':
+      if (n.requestStatus === 'accepted') return `已接受 ${who} 加入「${title}」`;
+      if (n.requestStatus === 'rejected') return `已拒絕 ${who} 加入「${title}」`;
+      return `${who} 申請加入「${title}」`;
+    case 'trip_join_accepted':    return `${who} 已接受你加入「${title}」`;
+    case 'trip_join_rejected':    return `${who} 未接受你加入「${title}」`;
     case 'collab_invite':         return `${who} 邀請你共編「${title}」${n.message ? ` · ${n.message}` : ''}`;
     case 'friend_invite':         return `${who} 邀請你成為好友`;
     case 'friend_accept':         return `${who} 接受了你的好友邀請`;
@@ -3795,13 +3810,23 @@ function renderNotifPanel() {
   const unread = notifItems.filter(n => n && !n.read).length;
   const rows = notifItems.map((n, i) => {
     const meta = NOTIF_TYPE_META[n.type] || { emoji: '🔔', label: '通知' };
-    return `<button class="notif-item${n.read ? '' : ' unread'}" onclick="handleNotifClick(${i})">
-      <span class="notif-item-emoji">${meta.emoji}</span>
+    const content = `<span class="notif-item-emoji">${meta.emoji}</span>
       <span class="notif-item-main">
         <span class="notif-item-text">${escapeHtml(notifItemText(n))}</span>
         <span class="notif-item-sub">${escapeHtml(meta.label)}${notifTimeText(n.createdAt) ? ' · ' + escapeHtml(notifTimeText(n.createdAt)) : ''}</span>
       </span>
-      ${n.read ? '' : '<span class="notif-dot"></span>'}
+      ${n.read ? '' : '<span class="notif-dot"></span>'}`;
+    if (n.type === 'trip_join_request' && (!n.requestStatus || n.requestStatus === 'pending')) {
+      return `<div class="notif-request-row">
+        <div class="notif-item${n.read ? '' : ' unread'}">${content}</div>
+        <div class="notif-request-actions">
+          <button type="button" class="notif-request-btn accept" onclick="resolveNotifJoinRequest(${i},'accept',event)">接受</button>
+          <button type="button" class="notif-request-btn" onclick="resolveNotifJoinRequest(${i},'reject',event)">拒絕</button>
+        </div>
+      </div>`;
+    }
+    return `<button type="button" class="notif-item${n.read ? '' : ' unread'}" onclick="handleNotifClick(${i})">
+      ${content}
     </button>`;
   }).join('');
   panel.innerHTML = `
@@ -3810,6 +3835,21 @@ function renderNotifPanel() {
       ${unread ? `<button class="notif-mark-all" onclick="notifMarkAllRead()">全部標為已讀</button>` : ''}
     </div>
     ${rows || '<div class="notif-empty">目前沒有通知</div>'}`;
+}
+
+async function resolveNotifJoinRequest(idx, decision, event) {
+  if (event) event.stopPropagation();
+  const n = notifItems[idx];
+  if (!n || !n.tripId || !n.requesterUid || !window.WAI_COLLAB) return;
+  const actions = event && event.currentTarget && event.currentTarget.closest('.notif-request-actions');
+  if (actions) actions.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+  try {
+    await WAI_COLLAB.resolveTripJoinRequest(n.tripId, n.requesterUid, decision);
+    showToast(decision === 'accept' ? '已接受加入申請' : '已拒絕加入申請', 'green');
+  } catch (error) {
+    if (actions) actions.querySelectorAll('button').forEach(btn => { btn.disabled = false; });
+    showToast((error && error.message) || '處理加入申請失敗', 'red');
+  }
 }
 
 function notifMarkAllRead() {
@@ -3833,7 +3873,14 @@ function handleNotifClick(idx) {
   const panel = document.getElementById('notifPanel');
   if (panel) panel.classList.remove('open');
   // 依類型導頁
-  if ((n.type === 'collab_invite' || n.type === 'trip_renamed' || n.type === 'trip_regenerated') && n.tripId) {
+  if (n.type === 'trip_join_accepted' && n.tripId) {
+    location.href = `ai-travel-planner-v8.html?id=${encodeURIComponent(n.tripId)}`;
+    return;
+  }
+  // trip_join_request 已處理完（accepted/rejected）時也會走到這裡——它帶 tripId，
+  // 屬行程類通知，不該掉到最後的「回好友頁」。
+  if ((n.type === 'collab_invite' || n.type === 'trip_renamed' || n.type === 'trip_regenerated'
+    || n.type === 'trip_join_request') && n.tripId) {
     // 已是成員（改名/重生成/曾受邀）→ 開共編面板；不是成員時 openCollabPanel 內部會擋
     const isMine = (myTrips || []).some(t => t.id === n.tripId);
     if (isMine) { openCollabPanel(n.tripId); return; }
@@ -4883,11 +4930,11 @@ async function deleteMyTrip(id) {
   }
   showToast(t && t.collab && t.role !== 'owner' ? '👋 已離開共編行程' : '🗑 已刪除行程', 'red');
 }
-// B2：深度連結 / URL 邀請強化。
-// collab 行程 → 訪客唯讀分享連結（含 shareToken）；個人行程 → 開啟該行程的深連結。
+// B2：所有對外分享都使用含 shareToken 的訪客唯讀連結；
+// 單純 ?id=... 只供本人／已加入成員開啟，不具備跨帳號分享權限。
 function buildTripDeepLink(t) {
   let path;
-  if (t && t.collab && t.shareToken && window.WAI_COLLAB) {
+  if (t && t.shareToken && window.WAI_COLLAB) {
     path = WAI_COLLAB.buildShareLink(t.id, t.shareToken); // ...planner.html?sharedId=..&token=..&guest=1
   } else {
     path = 'ai-travel-planner-v8.html?id=' + encodeURIComponent(t.id);
@@ -4918,10 +4965,28 @@ async function copyTextToClipboard(text) {
 async function shareTrip(id) {
   const t = (typeof myTrips !== 'undefined' ? myTrips : []).find(x => x.id === id);
   if (!t) { showToast('找不到這份行程', 'red'); return; }
+  if (!t.shareToken) {
+    if (t.collab) {
+      showToast('這份共編行程缺少分享權杖，請由行程擁有者重新開啟共編設定。', 'red');
+      return;
+    }
+    if (!window.WAI_COLLAB || typeof WAI_COLLAB.ensureTripShareToken !== 'function') {
+      showToast('分享服務尚未載入，請重新整理後再試。', 'red');
+      return;
+    }
+    try {
+      showToast('正在建立安全的唯讀分享連結…', 'blue');
+      t.shareToken = await WAI_COLLAB.ensureTripShareToken(t);
+      saveState();
+    } catch (error) {
+      showToast((error && error.message) || '目前無法建立分享連結，請稍後再試。', 'red');
+      return;
+    }
+  }
   const link = buildTripDeepLink(t);
   const ok = await copyTextToClipboard(link);
   if (ok) {
-    showToast(t.collab ? '🔗 唯讀分享連結已複製！' : '🔗 行程連結已複製！', 'green');
+    showToast('🔗 唯讀分享連結已複製！', 'green');
     return;
   }
   // 複製失敗（例如無使用者手勢或瀏覽器阻擋）→ 用 prompt 讓使用者手動複製；
