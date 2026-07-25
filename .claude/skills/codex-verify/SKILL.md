@@ -47,18 +47,25 @@ Codex 用使用者的 ChatGPT 帳號（`codex login status` 可查），不需�
 3. **執行 Codex**（用 Bash tool；可能跑數分鐘，timeout 給滿 600000，或 run_in_background）：
    ```bash
    codex exec --sandbox read-only -C "C:/Users/USER/Desktop/UIUX" \
+     -c model_reasoning_effort="high" \
      -o <scratchpad>/codex-final.md \
      "$(cat <prompt檔>)" > <scratchpad>/codex-out.txt 2>&1
    ```
    - `--sandbox read-only`：只給讀權限，Codex 不能改 repo。
+   - `-c model_reasoning_effort="high"`：只覆蓋這次叫用（全域 config 仍是 medium）。
+     審查要的是找得到真 bug，值得多花一點；嫌慢或想省額度就把這行拿掉。
+   - 模型不指定，沿用 `~/.codex/config.toml` 的 `model`（目前 `gpt-5.6-terra`）。
    - `-o codex-final.md`：**只存最終答覆**（乾淨 UTF-8）。完整 transcript（codex-out.txt）僅供除錯——
      裡面 Codex 自己的中間指令回顯可能有編碼亂碼，屬顯示雜訊，忽略即可，以 codex-final.md 為準。
    - 若 `codex exec` 回錯（未登入等），把錯誤原樣回報給使用者，不要重試超過一次。
 
 4. **產出報告**：以 `codex-final.md` 為內容整理存到 repo 根目錄 `codex-review.md`（已 gitignore），
-   開頭附：日期、range、commit 清單、tokens used（在 codex-out.txt 尾端）。然後在對話中用繁中摘要：
-   整體結論、FAIL/存疑項、bug 清單。
+   開頭附：日期、range、commit 清單、tokens used（在 codex-out.txt 尾端）。
+   報告長度配合實際發現量——沒發現問題就寫短，不要補湊背景說明、重複摘要之類的填充段落。
+   然後在對話中用繁中摘要，只講：整體結論、FAIL/存疑項、bug 清單；細節留在報告裡不要複述。
 
 ## 注意
-- Codex 的發現是「線索」不是「判決」——每個 FAIL/bug 你要自己對照程式碼確認後再轉述，標明「已確認」或「Codex 認為但我查證後不成立（原因）」。確認成立的，能便宜修就直接修並驗證。
+- Codex 的發現是「線索」不是「判決」——每個 FAIL/bug 你要自己對照程式碼確認後再轉述，標明「已確認」或「Codex 認為但我查證後不成立（原因）」。
+- **本 skill 的產出是報告，不是修復**：確認成立的 bug 列進報告等使用者決定，除非使用者在這次叫用裡明講要順便修。
+- 這是單一指令的任務，自己跑完即可；不要為了審查、複核或分頭讀 diff 另開 subagent。
 - 不要把任何 secrets（server/.env、serviceAccount.json 內容）寫進 prompt。
