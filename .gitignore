@@ -46,3 +46,6 @@ Thumbs.db
 # Python 編譯快取（跑 skill 腳本時產生）
 __pycache__/
 *.pyc
+
+# 安全性驗證頁（含攻擊探測，僅本機／展示用，不公開進版控）
+/app/security-audit.html
