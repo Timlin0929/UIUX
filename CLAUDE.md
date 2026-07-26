@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A **static HTML prototype playground** for an AI travel‑planning app ("WanderAI"). There is **no build step, no framework, no bundler**. Prototypes run directly from the filesystem (`file://`) or any static server. The most current / main flow is [ai-travel-planner-v8.html](app/ai-travel-planner-v8.html); the explore + login + onboarding flow is [ai-travel-explore-final.html](app/ai-travel-explore-final.html).
+A **static HTML prototype playground** for an AI travel‑planning app ("TravelLinkAI", renamed from "WanderAI" on 2026-07-26). There is **no build step, no framework, no bundler**. Prototypes run directly from the filesystem (`file://`) or any static server. The most current / main flow is [ai-travel-planner-v8.html](app/ai-travel-planner-v8.html); the explore + login + onboarding flow is [ai-travel-explore-final.html](app/ai-travel-explore-final.html); [intro.html](app/intro.html) is the marketing / onboarding landing page for new users.
 
 **Read [AGENTS.md](AGENTS.md) before any task** — it holds the authoritative working rules and a required post-change user-flow testing protocol (see below).
 
@@ -12,7 +12,8 @@ A **static HTML prototype playground** for an AI travel‑planning app ("WanderA
 
 ```
 app/        ← all web-app runtime files (HTML, CSS, JS, data, config)
-archive/    ← retired inline prototypes (no longer active)
+archive/    ← currently empty (its last file moved to app/intro.html)
+prototypes/ ← standalone design mockups, not wired to any service or served by nginx
 tools/      ← one-off utility scripts (patch_gen_overlay.py, nginx-blocklist.conf)
 crawler/    ← Node.js data pipeline (npm project, run from that folder)
 server/     ← Node.js backend proxy for Vertex/Gemini (keeps the API key server-side; see DEPLOY.md)
@@ -41,7 +42,7 @@ A Windows scheduled task **`WanderAI Food Crawl`** runs `crawl:food` biweekly vi
 
 ### Prototype file-split convention (important)
 - All app files live in [app/](app/). `ai-travel-planner-v8.html` and `ai-travel-explore-final.html` load **sibling external `.css`/`.js`** (e.g. [app/ai-travel-planner-v8.js](app/ai-travel-planner-v8.js), [app/ai-travel-explore-final.js](app/ai-travel-explore-final.js)). **Put logic/style changes in those files**; the `.html` keeps only markup, CDN/`weather.env.js` script tags, and the Google Maps loader. They are plain `<script src>` (not ES modules) so `file://` works.
-- Retired prototypes (e.g. [archive/ai-travel-planner.html](archive/ai-travel-planner.html)) keep everything **inline**.
+- [app/intro.html](app/intro.html) (the landing page) and the mockups under [prototypes/](prototypes/) keep CSS/JS **inline** — they are self-contained single files, so the split convention above does not apply to them. `intro.html` still needs to live in `app/` because it loads `weather.env.js` and links to the two main pages as siblings.
 - Keep changes local to the target prototype; only backport across variants when explicitly asked.
 
 ### Runtime config & external services
