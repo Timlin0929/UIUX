@@ -42,3 +42,7 @@ Thumbs.db
 
 # 測試截圖／報告（本機驗證用，不進版控）
 /test-artifacts/
+
+# Python 編譯快取（跑 skill 腳本時產生）
+__pycache__/
+*.pyc
