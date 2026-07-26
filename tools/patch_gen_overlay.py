@@ -53,7 +53,7 @@ html_lines = [
     '        <span class="gen-dot gen-dot-r"></span>',
     '        <span class="gen-dot gen-dot-y"></span>',
     '        <span class="gen-dot gen-dot-g"></span>',
-    '        <span class="gen-terminal-label">WanderAI \xb7 行程生成</span>',
+    '        <span class="gen-terminal-label">TravelLinkAI \xb7 行程生成</span>',
     '      </div>',
     '      <div class="gen-output" id="genOutput"></div>',
     '      <div class="gen-cursor-row" id="genCursor">◌</div>',
@@ -96,7 +96,7 @@ new_code = (
     L("  const cur = document.getElementById('genCursor');") +
     L("  if (cur) cur.style.display = '';") +
     L("  ov.style.display = 'flex';") +
-    L("  addGenLine('$ WanderAI --generate --dest ' + title, 'info');") +
+    L("  addGenLine('$ TravelLinkAI --generate --dest ' + title, 'info');") +
     L("}") +
     L("function hideGenPanel() {") +
     L("  const ov = document.getElementById('genOverlay');") +

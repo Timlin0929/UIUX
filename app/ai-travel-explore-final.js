@@ -3726,8 +3726,12 @@ function startNotifSubscription(myEmail) {
   notifUnsub = WAI_NOTIFY.subscribe(myEmail, (list) => {
     notifItems = list;
     updateNotifBadge();
+    // 大視窗開啟時小面板必定是關的（openNotifFullView 會移除 .open），
+    // 只判斷 .open 會讓大視窗收不到推播——接受/拒絕後按鈕會永久卡在 disabled。
     const panel = document.getElementById('notifPanel');
-    if (panel && panel.classList.contains('open')) renderNotifPanel();
+    if ((panel && panel.classList.contains('open')) || document.getElementById('notifFullOverlay')) {
+      renderNotifPanel(); // 內部會連帶刷新大視窗
+    }
     // F2 好友動態：動態流吃 notifItems，好友頁顯示中就即時重繪
     const view = document.getElementById('friendsView');
     if (view && view.style.display !== 'none') renderFriendsView();
@@ -3804,11 +3808,10 @@ function toggleNotifPanel() {
   if (willOpen) renderNotifPanel();
 }
 
-function renderNotifPanel() {
-  const panel = document.getElementById('notifPanel');
-  if (!panel) return;
-  const unread = notifItems.filter(n => n && !n.read).length;
-  const rows = notifItems.map((n, i) => {
+// 通知列 HTML：小面板與展開大視窗共用同一份，避免兩邊行為分歧。
+function buildNotifRowsHtml(expanded) {
+  const itemCls = expanded ? 'notif-item notif-item-expanded' : 'notif-item';
+  return notifItems.map((n, i) => {
     const meta = NOTIF_TYPE_META[n.type] || { emoji: '🔔', label: '通知' };
     const content = `<span class="notif-item-emoji">${meta.emoji}</span>
       <span class="notif-item-main">
@@ -3818,23 +3821,69 @@ function renderNotifPanel() {
       ${n.read ? '' : '<span class="notif-dot"></span>'}`;
     if (n.type === 'trip_join_request' && (!n.requestStatus || n.requestStatus === 'pending')) {
       return `<div class="notif-request-row">
-        <div class="notif-item${n.read ? '' : ' unread'}">${content}</div>
+        <div class="${itemCls}${n.read ? '' : ' unread'}">${content}</div>
         <div class="notif-request-actions">
           <button type="button" class="notif-request-btn accept" onclick="resolveNotifJoinRequest(${i},'accept',event)">接受</button>
           <button type="button" class="notif-request-btn" onclick="resolveNotifJoinRequest(${i},'reject',event)">拒絕</button>
         </div>
       </div>`;
     }
-    return `<button type="button" class="notif-item${n.read ? '' : ' unread'}" onclick="handleNotifClick(${i})">
+    // 大視窗裡點通知要先關掉視窗，否則導頁後彈窗殘留在下一頁的 DOM 上。
+    const act = expanded ? `closeNotifFullView();handleNotifClick(${i})` : `handleNotifClick(${i})`;
+    return `<button type="button" class="${itemCls}${n.read ? '' : ' unread'}" onclick="${act}">
       ${content}
     </button>`;
   }).join('');
+}
+
+function renderNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  if (!panel) return;
+  const unread = notifItems.filter(n => n && !n.read).length;
   panel.innerHTML = `
     <div class="notif-panel-head">
-      <span>🔔 通知</span>
+      <button type="button" class="notif-head-expand" onclick="openNotifFullView()" aria-label="展開完整通知列表">🔔 通知 <span class="notif-head-chevron" aria-hidden="true">⤢</span></button>
       ${unread ? `<button class="notif-mark-all" onclick="notifMarkAllRead()">全部標為已讀</button>` : ''}
     </div>
-    ${rows || '<div class="notif-empty">目前沒有通知</div>'}`;
+    ${buildNotifRowsHtml(false) || '<div class="notif-empty">目前沒有通知</div>'}`;
+  // 大視窗開著時一併刷新（接受/拒絕、標已讀後列表會變）
+  if (document.getElementById('notifFullOverlay')) renderNotifFullView();
+}
+
+function openNotifFullView() {
+  const panel = document.getElementById('notifPanel');
+  if (panel) panel.classList.remove('open');
+  if (!document.getElementById('notifFullOverlay')) {
+    const overlay = document.createElement('div');
+    overlay.id = 'notifFullOverlay';
+    overlay.className = 'notif-full-overlay';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeNotifFullView(); });
+    document.body.appendChild(overlay);
+  }
+  renderNotifFullView();
+}
+
+function renderNotifFullView() {
+  const overlay = document.getElementById('notifFullOverlay');
+  if (!overlay) return;
+  const unread = notifItems.filter(n => n && !n.read).length;
+  overlay.innerHTML = `<section class="notif-full-card" role="dialog" aria-modal="true" aria-label="全部通知">
+    <header class="notif-full-head">
+      <div class="notif-full-title">🔔 全部通知${unread ? ` <span class="notif-full-count">${unread}</span>` : ''}</div>
+      <div class="notif-full-actions">
+        ${unread ? `<button type="button" class="notif-mark-all" onclick="notifMarkAllRead()">全部標為已讀</button>` : ''}
+        <button type="button" class="notif-full-close" onclick="closeNotifFullView()" aria-label="關閉通知列表">✕</button>
+      </div>
+    </header>
+    <div class="notif-full-body">
+      ${buildNotifRowsHtml(true) || '<div class="notif-empty">目前沒有通知</div>'}
+    </div>
+  </section>`;
+}
+
+function closeNotifFullView() {
+  const overlay = document.getElementById('notifFullOverlay');
+  if (overlay) overlay.remove();
 }
 
 async function resolveNotifJoinRequest(idx, decision, event) {
@@ -3873,14 +3922,13 @@ function handleNotifClick(idx) {
   const panel = document.getElementById('notifPanel');
   if (panel) panel.classList.remove('open');
   // 依類型導頁
-  if (n.type === 'trip_join_accepted' && n.tripId) {
+  // 加入申請相關（自己被接受、或自己已處理完別人的申請）→ 直接開那份行程的畫面。
+  // 這類通知的重點是「行程可以看了」，不是成員名單，故不走共編面板。
+  if ((n.type === 'trip_join_accepted' || n.type === 'trip_join_request') && n.tripId) {
     location.href = `ai-travel-planner-v8.html?id=${encodeURIComponent(n.tripId)}`;
     return;
   }
-  // trip_join_request 已處理完（accepted/rejected）時也會走到這裡——它帶 tripId，
-  // 屬行程類通知，不該掉到最後的「回好友頁」。
-  if ((n.type === 'collab_invite' || n.type === 'trip_renamed' || n.type === 'trip_regenerated'
-    || n.type === 'trip_join_request') && n.tripId) {
+  if ((n.type === 'collab_invite' || n.type === 'trip_renamed' || n.type === 'trip_regenerated') && n.tripId) {
     // 已是成員（改名/重生成/曾受邀）→ 開共編面板；不是成員時 openCollabPanel 內部會擋
     const isMine = (myTrips || []).some(t => t.id === n.tripId);
     if (isMine) { openCollabPanel(n.tripId); return; }
@@ -4017,7 +4065,7 @@ function renderFriendsView() {
           <div class="friends-empty-title">邀請旅伴，一起規劃共編行程</div>
           <ol class="friends-empty-steps">
             <li>輸入旅伴的 email 送出邀請</li>
-            <li>對方登入 WanderAI 按「接受」</li>
+            <li>對方登入 TravelLinkAI 按「接受」</li>
             <li>建立共編行程，用邀請碼把好友拉進來</li>
           </ol>
           <button class="wai-action-btn primary" onclick="openAddFriendModal()">➕ 加好友</button>
@@ -4029,7 +4077,7 @@ function openAddFriendModal() {
   if (!isLoggedIn) { openLogin(); return; }
   openWaiActionModal({
     title: '➕ 加好友',
-    subtitle: '輸入對方的 email（對方需登入過 WanderAI 才能被搜尋到）。',
+    subtitle: '輸入對方的 email（對方需登入過 TravelLinkAI 才能被搜尋到）。',
     body(content) {
       content.innerHTML = `
         <div style="display:flex;gap:8px;">
@@ -5882,7 +5930,7 @@ function showGenPanel(title) {
   const cur = document.getElementById('genCursor');
   if (cur) cur.style.display = '';
   ov.style.display = 'flex';
-  addGenLine('$ WanderAI --generate --dest ' + title, 'info');
+  addGenLine('$ TravelLinkAI --generate --dest ' + title, 'info');
 }
 function hideGenPanel() {
   const ov = document.getElementById('genOverlay');
@@ -6825,7 +6873,12 @@ function showToast(msg, type='') {
 // ── a11y：Esc 關閉最上層彈窗（原本所有 overlay 只能點外部/右上關閉，鍵盤無法操作）──
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  // 動態建立的共用操作彈窗不是 .overlay，需優先處理。
+  // 動態建立的彈窗不是 .overlay，需優先處理（通知大視窗疊在最上層，先關它）。
+  if (document.getElementById('notifFullOverlay')) {
+    e.preventDefault();
+    closeNotifFullView();
+    return;
+  }
   if (document.getElementById('waiActionModal')) {
     e.preventDefault();
     closeWaiActionModal();

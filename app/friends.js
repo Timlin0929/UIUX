@@ -1,5 +1,5 @@
 /**
- * friends.js — WanderAI 好友模組（window.WAI_FRIENDS）
+ * friends.js — TravelLinkAI 好友模組（window.WAI_FRIENDS）
  *
  * 範圍（Week4 D1；群組功能已於 UIUX 調整時移除）：
  *   - 好友：邀請(pending)→接受(accepted)；單方刪除=拒絕/取消/解除三合一。
@@ -78,7 +78,7 @@ window.WAI_FRIENDS = (function () {
     return { profileSynced: true, searchIndexSynced: true };
   }
 
-  // 以 email 精確查公開檔案（找不到回 null——對方需登入過 WanderAI 才有檔案）
+  // 以 email 精確查公開檔案（找不到回 null——對方需登入過 TravelLinkAI 才有檔案）
   async function findProfileByEmail(email) {
     var q = String(email || '').trim().toLowerCase();
     if (!q) return null;

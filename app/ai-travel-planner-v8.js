@@ -1423,7 +1423,13 @@
   }
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && document.getElementById('parkingRecordOverlay')?.classList.contains('open')) {
+    if (event.key !== 'Escape') return;
+    // 通知大視窗疊在最上層，優先關它
+    if (document.getElementById('notifFullOverlay')) {
+      window.closeNotifFullView();
+      return;
+    }
+    if (document.getElementById('parkingRecordOverlay')?.classList.contains('open')) {
       window.closeParkingRecordSheet();
     }
   });
@@ -3294,7 +3300,7 @@
       ? `${currentTripWindow.start} – ${currentTripWindow.end}`
       : '待設定';
     const stopSummary = schedule.map((stop) => `${minutesToClock(stop.start)} ${stop.name}`).join('\n');
-    return `嗨！我用 WanderAI 規劃了「${tripTitle}」✨\n\n邀請碼【 ${inviteCode} 】\n時間：${timeRange}\n\n行程摘要：\n${stopSummary || '目前尚未加入任何停靠點'}\n\n加入後可以一起共編、匯入網址與分享行程圖。`;
+    return `嗨！我用 TravelLinkAI 規劃了「${tripTitle}」✨\n\n邀請碼【 ${inviteCode} 】\n時間：${timeRange}\n\n行程摘要：\n${stopSummary || '目前尚未加入任何停靠點'}\n\n加入後可以一起共編、匯入網址與分享行程圖。`;
   }
 
   function parseImportWindow(text) {
@@ -3444,7 +3450,7 @@
           </linearGradient>
         </defs>
         <rect width="1200" height="${height}" rx="36" fill="url(#bg)"/>
-        <text x="80" y="100" font-size="30" font-weight="800" fill="#2e7d6d">WanderAI 行程圖</text>
+        <text x="80" y="100" font-size="30" font-weight="800" fill="#2e7d6d">TravelLinkAI 行程圖</text>
         <text x="80" y="144" font-size="52" font-weight="700" fill="#22201d">${escapeXml(currentTripTitle)}</text>
         <text x="80" y="188" font-size="18" fill="#6b6760">${escapeXml((currentTripWindow.start && currentTripWindow.end) ? `${currentTripWindow.start} - ${currentTripWindow.end}` : '待設定')} · 邀請碼 ${escapeXml(currentInviteCode || '尚未建立')}</text>
         <rect x="84" y="208" rx="22" ry="22" width="1032" height="42" fill="#edf6f4" stroke="#cce5de"/>
@@ -9462,7 +9468,7 @@
     if (_rgOutput) _rgOutput.innerHTML = '';
     if (_rgOverlay) _rgOverlay.style.display = 'flex';
     if (_rgPhase) _rgPhase.textContent = '查詢景點中…';
-    _addRgLine('$ WanderAI --replan --dest ' + dest, 'info');
+    _addRgLine('$ TravelLinkAI --replan --dest ' + dest, 'info');
 
     try {
       _genPerf.start();
@@ -13313,7 +13319,7 @@
   // ── 透過 LINE 分享行程邏輯 ──
   function shareViaLine() {
     const shareText = buildShareText();
-    const shareTitle = `${currentTripTitle || '未命名行程'} · WanderAI`;
+    const shareTitle = `${currentTripTitle || '未命名行程'} · TravelLinkAI`;
     
     // 優先使用系統原生分享選單 (Mobile 體驗最佳)
     if (navigator.share) {
@@ -13480,7 +13486,7 @@
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
           });
-          feedbackToast('🎉 歡迎首次登入 WanderAI！', 'green');
+          feedbackToast('🎉 歡迎首次登入 TravelLinkAI！', 'green');
         } else {
           feedbackToast(`👋 歡迎回來，${user.displayName || '使用者'}！`, 'green');
         }
@@ -13614,40 +13620,80 @@
     badge.textContent = unread > 9 ? '9+' : String(unread);
   }
 
-  function renderPlannerNotifPanel() {
-    const panel = document.getElementById('notifPanel');
-    if (!panel) return;
-    const unread = plannerNotifItems.filter((item) => item && !item.read).length;
-    const rows = plannerNotifItems.map((item, index) => {
+  // 通知列 HTML：小面板與展開大視窗共用同一份，避免兩邊行為分歧。
+  function buildPlannerNotifRows(expanded) {
+    const itemCls = expanded ? 'notif-item notif-item-expanded' : 'notif-item';
+    return plannerNotifItems.map((item, index) => {
       const meta = PLANNER_NOTIF_META[item.type] || { emoji: '🔔', label: '通知' };
       const time = plannerNotifTime(item.createdAt);
-      const content = `<div class="notif-item${item.read ? '' : ' unread'}">
-        <span class="notif-item-emoji">${meta.emoji}</span>
+      const inner = `<span class="notif-item-emoji">${meta.emoji}</span>
         <span class="notif-item-main">
           <span class="notif-item-text">${escapeHtml(plannerNotifText(item))}</span>
           <span class="notif-item-sub">${escapeHtml(meta.label)}${time ? ` · ${escapeHtml(time)}` : ''}</span>
         </span>
-        ${item.read ? '' : '<span class="notif-dot"></span>'}
-      </div>`;
+        ${item.read ? '' : '<span class="notif-dot"></span>'}`;
       if (item.type === 'trip_join_request' && (!item.requestStatus || item.requestStatus === 'pending')) {
-        return `<div class="notif-request-row">${content}<div class="notif-request-actions">
+        return `<div class="notif-request-row"><div class="${itemCls}${item.read ? '' : ' unread'}">${inner}</div>
+        <div class="notif-request-actions">
           <button type="button" class="notif-request-btn accept" onclick="resolvePlannerJoinRequest(${index},'accept',event)">接受</button>
           <button type="button" class="notif-request-btn" onclick="resolvePlannerJoinRequest(${index},'reject',event)">拒絕</button>
         </div></div>`;
       }
-      return `<button type="button" class="notif-item${item.read ? '' : ' unread'}" onclick="handlePlannerNotifClick(${index})">
-        <span class="notif-item-emoji">${meta.emoji}</span>
-        <span class="notif-item-main">
-          <span class="notif-item-text">${escapeHtml(plannerNotifText(item))}</span>
-          <span class="notif-item-sub">${escapeHtml(meta.label)}${time ? ` · ${escapeHtml(time)}` : ''}</span>
-        </span>
-        ${item.read ? '' : '<span class="notif-dot"></span>'}
+      // 大視窗裡點通知要先關掉視窗，否則導頁後彈窗殘留在下一頁的 DOM 上。
+      const act = expanded ? `closeNotifFullView();handlePlannerNotifClick(${index})` : `handlePlannerNotifClick(${index})`;
+      return `<button type="button" class="${itemCls}${item.read ? '' : ' unread'}" onclick="${act}">
+        ${inner}
       </button>`;
     }).join('');
-    panel.innerHTML = `<div class="notif-panel-head"><span>🔔 通知</span>
-      ${unread ? '<button type="button" class="notif-mark-all" onclick="plannerNotifMarkAllRead()">全部標為已讀</button>' : ''}
-    </div>${rows || '<div class="notif-empty">目前沒有通知</div>'}`;
   }
+
+  function renderPlannerNotifPanel() {
+    const panel = document.getElementById('notifPanel');
+    if (!panel) return;
+    const unread = plannerNotifItems.filter((item) => item && !item.read).length;
+    panel.innerHTML = `<div class="notif-panel-head">
+      <button type="button" class="notif-head-expand" onclick="openNotifFullView()" aria-label="展開完整通知列表">🔔 通知 <span class="notif-head-chevron" aria-hidden="true">⤢</span></button>
+      ${unread ? '<button type="button" class="notif-mark-all" onclick="plannerNotifMarkAllRead()">全部標為已讀</button>' : ''}
+    </div>${buildPlannerNotifRows(false) || '<div class="notif-empty">目前沒有通知</div>'}`;
+    // 大視窗開著時一併刷新（接受/拒絕、標已讀後列表會變）
+    if (document.getElementById('notifFullOverlay')) renderNotifFullView();
+  }
+
+  window.openNotifFullView = function() {
+    const panel = document.getElementById('notifPanel');
+    if (panel) panel.classList.remove('open');
+    if (!document.getElementById('notifFullOverlay')) {
+      const overlay = document.createElement('div');
+      overlay.id = 'notifFullOverlay';
+      overlay.className = 'notif-full-overlay';
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeNotifFullView(); });
+      document.body.appendChild(overlay);
+    }
+    renderNotifFullView();
+  };
+
+  function renderNotifFullView() {
+    const overlay = document.getElementById('notifFullOverlay');
+    if (!overlay) return;
+    const unread = plannerNotifItems.filter((item) => item && !item.read).length;
+    overlay.innerHTML = `<section class="notif-full-card" role="dialog" aria-modal="true" aria-label="全部通知">
+      <header class="notif-full-head">
+        <div class="notif-full-title">🔔 全部通知${unread ? ` <span class="notif-full-count">${unread}</span>` : ''}</div>
+        <div class="notif-full-actions">
+          ${unread ? '<button type="button" class="notif-mark-all" onclick="plannerNotifMarkAllRead()">全部標為已讀</button>' : ''}
+          <button type="button" class="notif-full-close" onclick="closeNotifFullView()" aria-label="關閉通知列表">✕</button>
+        </div>
+      </header>
+      <div class="notif-full-body">
+        ${buildPlannerNotifRows(true) || '<div class="notif-empty">目前沒有通知</div>'}
+      </div>
+    </section>`;
+  }
+
+  window.closeNotifFullView = function() {
+    const overlay = document.getElementById('notifFullOverlay');
+    if (overlay) overlay.remove();
+  };
 
   window.toggleNotifPanel = function() {
     const panel = document.getElementById('notifPanel');
@@ -13722,8 +13768,12 @@
           );
         }
       }
+      // 大視窗開啟時小面板必定是關的（openNotifFullView 會移除 .open），
+      // 只判斷 .open 會讓大視窗收不到推播——接受/拒絕後按鈕會永久卡在 disabled。
       const panel = document.getElementById('notifPanel');
-      if (panel && panel.classList.contains('open')) renderPlannerNotifPanel();
+      if ((panel && panel.classList.contains('open')) || document.getElementById('notifFullOverlay')) {
+        renderPlannerNotifPanel(); // 內部會連帶刷新大視窗
+      }
     }, () => {});
   }
 

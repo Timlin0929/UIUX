@@ -1,5 +1,5 @@
 /**
- * notifications.js — WanderAI 通知中心資料層（window.WAI_NOTIFY）
+ * notifications.js — TravelLinkAI 通知中心資料層（window.WAI_NOTIFY）
  *
  * 資料模型（F1）：
  *   user_notifications/{identityKey}/items/{nid}

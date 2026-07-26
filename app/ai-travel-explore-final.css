@@ -1017,6 +1017,31 @@ button.notif-item{cursor:pointer;}
 .notif-empty{padding:26px 12px;text-align:center;font-size:13px;color:var(--ink3);}
 @media (max-width:700px){.notif-panel{position:fixed;left:10px;right:10px;top:64px;width:auto;}}
 
+/* 通知標題可點 → 展開成大視窗完整列表（小面板只有 320px，長標題會被擠壓） */
+.notif-head-expand{display:inline-flex;align-items:center;gap:6px;border:none;background:transparent;padding:4px 6px;margin:-4px -6px;border-radius:8px;font-family:inherit;font-size:14px;font-weight:700;color:var(--ink);cursor:pointer;white-space:nowrap;}
+.notif-head-expand:hover{background:var(--accent-light);color:var(--accent);}
+.notif-head-chevron{font-size:12px;opacity:.55;}
+.notif-full-overlay{position:fixed;inset:0;z-index:600;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(26,24,20,.5);}
+.notif-full-card{width:min(100%,640px);max-height:min(80vh,720px);display:flex;flex-direction:column;background:var(--surface);border-radius:18px;box-shadow:0 24px 64px rgba(26,24,20,.28);overflow:hidden;}
+.notif-full-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 12px 14px 20px;border-bottom:1px solid var(--border);}
+.notif-full-title{display:flex;align-items:center;gap:8px;font-size:18px;font-weight:800;color:var(--ink);white-space:nowrap;}
+.notif-full-count{background:var(--accent2);color:#fff;font-size:12.5px;font-weight:700;padding:1px 8px;border-radius:9px;}
+.notif-full-actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+.notif-full-close{width:44px;height:44px;display:grid;place-items:center;border:none;border-radius:50%;background:transparent;color:var(--ink3);font-size:20px;line-height:1;cursor:pointer;font-family:inherit;}
+.notif-full-close:hover{background:var(--surface2);color:var(--ink);}
+.notif-full-body{flex:1;overflow-y:auto;padding:8px;}
+/* 展開版：文字完整換行不裁切、命中區加大 */
+.notif-item-expanded{padding:13px 14px;gap:11px;}
+.notif-item-expanded .notif-item-emoji{font-size:20px;}
+.notif-item-expanded .notif-item-text{font-size:15.5px;line-height:1.6;text-wrap:pretty;}
+.notif-item-expanded .notif-item-sub{font-size:12.5px;}
+@media (max-width:700px){
+  .notif-full-overlay{padding:12px;}
+  .notif-full-card{max-height:88vh;}
+  .notif-full-head{padding:12px 8px 12px 16px;}
+  .notif-full-title{font-size:16px;}
+}
+
 /* ── F2 好友動態（沿用 .friends-row 視覺） ── */
 .friends-feed-row{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px;}
 .friends-feed-emoji{font-size:17px;flex-shrink:0;}

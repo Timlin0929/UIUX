@@ -1,5 +1,5 @@
 /**
- * collab.js — WanderAI 多人共同建立行程模組（window.WAI_COLLAB）
+ * collab.js — TravelLinkAI 多人共同建立行程模組（window.WAI_COLLAB）
  *
  * 範圍（依產品決策）：
  *   - 同看一份 + 團體生成 + 成員清單（暫不做即時逐欄共編）。

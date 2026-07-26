@@ -1,5 +1,5 @@
 /* ══════════════════════════════════════════════════
-   WanderAI 共用設計 token
+   TravelLinkAI 共用設計 token
    兩頁（explore / planner）原本各自宣告一份 :root，同名變數色值不同步
    （--accent #2a6b5e vs #2e7d6d、--bg #f7f5f0 vs #faf9f6…），
    造成跨頁品牌色有溫差。此檔在各頁主 CSS「之後」載入，
