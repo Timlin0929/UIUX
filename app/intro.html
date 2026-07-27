@@ -16,7 +16,9 @@
     --surface2: #f0ede6;
     --ink: #1a1814;
     --ink2: #5a5750;
-    --ink3: #9a9590;
+    /* 原為 #9a9590，在 --bg(#f7f5f0) 上對比僅約 2.4:1，未達 WCAG AA 4.5:1。
+       改用與 design-tokens.css 一致的已校正值。 */
+    --ink3: #767068;
     --accent: #2a6b5e;
     --accent-light: #e8f3f0;
     --accent2: #e8733a;
@@ -28,6 +30,31 @@
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html { scroll-behavior: smooth; }
+
+  /* 鍵盤焦點：本頁原本多處 input 帶 inline style 的 outline:none，
+     inline style 權重高於任何非 !important 的樣式表規則，會把焦點環整個吃掉，
+     因此那 7 處 outline:none 已直接移除（而不是在這裡加 !important——
+     用 !important 壓 inline style 會讓之後任何想覆蓋焦點樣式的規則都更難寫）。
+     本頁是自足單檔、不載 design-tokens.css，故在此重複一份。
+     :focus-visible 只在鍵盤操作時顯示，滑鼠點擊仍乾淨。 */
+  input:focus-visible, select:focus-visible, textarea:focus-visible,
+  button:focus-visible, a:focus-visible, summary:focus-visible,
+  [tabindex]:focus-visible, [role="button"]:focus-visible {
+    outline: 3px solid rgba(42,107,94,.55);
+    outline-offset: 2px;
+  }
+
+  /* 減少動態效果：本頁有 scroll-behavior:smooth、typing dots 無限跳動、
+     hero 進場動畫等，對前庭敏感使用者不友善。
+     用 0.01ms 而非 0s，animationend 仍會觸發，靠它收尾的邏輯不會卡住。 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
   body {
     font-family: 'Noto Sans TC', sans-serif;
     background: var(--bg);
@@ -243,7 +270,7 @@
   .chat-input {
     flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 24px;
     padding: 10px 18px; font-size: 14px; font-family: inherit; color: var(--ink);
-    outline: none; transition: border-color 0.2s;
+    transition: border-color 0.2s;
   }
   .chat-input:focus { border-color: var(--accent); }
   .send-btn {
@@ -621,7 +648,7 @@
     <div style="font-size:48px;margin-bottom:12px;">🔑</div>
     <h3 style="font-family:'DM Serif Display',serif;font-size:24px;color:var(--ink);margin-bottom:8px;">加入共編行程</h3>
     <p style="font-size:14px;color:var(--ink2);margin-bottom:24px;line-height:1.6;">輸入朋友分享的 8 碼邀請碼，<br>即可加入他們的微旅行，一起填偏好、共同編輯。</p>
-    <input id="joinCodeInput" type="text" placeholder="輸入邀請碼" maxlength="10" style="width:100%;padding:16px;font-size:22px;letter-spacing:4px;text-align:center;text-transform:uppercase;font-family:monospace;border:2px dashed var(--accent);border-radius:16px;margin-bottom:24px;outline:none;background:var(--accent-light);color:var(--accent-dark);font-weight:700;transition:border-color 0.2s;">
+    <input id="joinCodeInput" type="text" placeholder="輸入邀請碼" maxlength="10" style="width:100%;padding:16px;font-size:22px;letter-spacing:4px;text-align:center;text-transform:uppercase;font-family:monospace;border:2px dashed var(--accent);border-radius:16px;margin-bottom:24px;background:var(--accent-light);color:var(--accent-dark);font-weight:700;transition:border-color 0.2s;">
     <button onclick="processJoinCode()" style="width:100%;padding:14px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:500;cursor:pointer;transition:all 0.2s;">驗證並加入</button>
   </div>
 </div>
@@ -640,10 +667,10 @@
       <div id="formLogin">
         <div style="display:flex;flex-direction:column;gap:12px;">
           <label style="font-size:12px;font-weight:500;color:#5a5750;">電子郵件
-            <input id="loginEmail" type="email" placeholder="你的 Email" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;">
+            <input id="loginEmail" type="email" placeholder="你的 Email" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;">
           </label>
           <label style="font-size:12px;font-weight:500;color:#5a5750;">密碼
-            <input id="loginPw" type="password" placeholder="••••••••" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;">
+            <input id="loginPw" type="password" placeholder="••••••••" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;">
           </label>
           <button onclick="doLogin()" style="width:100%;padding:12px;background:#2a6b5e;color:#fff;border:none;border-radius:9px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;margin-top:4px;">登入並繼續</button>
           <div style="text-align:center;font-size:13px;color:#9a9590;">或</div>
@@ -658,13 +685,13 @@
       </div>
       <div id="formReg" style="display:none;flex-direction:column;gap:12px;">
         <label style="font-size:12px;font-weight:500;color:#5a5750;">暱稱
-          <input id="regName" type="text" placeholder="你的旅遊暱稱" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;">
+          <input id="regName" type="text" placeholder="你的旅遊暱稱" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;">
         </label>
         <label style="font-size:12px;font-weight:500;color:#5a5750;">電子郵件
-          <input id="regEmail" type="email" placeholder="你的 Email" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;">
+          <input id="regEmail" type="email" placeholder="你的 Email" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;">
         </label>
         <label style="font-size:12px;font-weight:500;color:#5a5750;">密碼
-          <input id="regPw" type="password" placeholder="至少 6 個字元" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;outline:none;box-sizing:border-box;">
+          <input id="regPw" type="password" placeholder="至少 6 個字元" style="display:block;margin-top:5px;width:100%;padding:10px 13px;border:1.5px solid #e2ddd6;border-radius:9px;font-size:14px;font-family:inherit;box-sizing:border-box;">
         </label>
         <button onclick="doRegister()" style="width:100%;padding:12px;background:#2a6b5e;color:#fff;border:none;border-radius:9px;font-size:14px;font-family:inherit;cursor:pointer;font-weight:500;margin-top:4px;">建立帳號並繼續</button>
         <div style="display:flex;gap:9px;">

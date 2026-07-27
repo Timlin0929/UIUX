@@ -30,6 +30,8 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
   border: none;
   border-radius: 10px;
   padding: 8px 10px;
+  /* UIUX P0-1：與 .mobile-switch-btn 同理，8px padding 只到約 34px */
+  min-height: 44px;
   font-size: 12px;
   font-weight: 700;
   color: var(--ink2);
@@ -1306,8 +1308,13 @@ body.prototype-mode .prototype-id-chip {
   color: var(--ink);
 }
 
-.modify-time-input:focus {
+/* :focus:not(:focus-visible)＝只在滑鼠點擊時消掉外框；鍵盤 Tab 進來仍走
+   design-tokens.css 的全域焦點環。原本寫 .modify-time-input:focus (0,2,0)
+   會壓過全域規則 (0,1,1)，鍵盤使用者看不到焦點。 */
+.modify-time-input:focus:not(:focus-visible) {
   outline: none;
+}
+.modify-time-input:focus {
   border-color: var(--accent);
 }
 
@@ -2122,6 +2129,9 @@ body.prototype-mode .prototype-id-chip {
   border: none;
   border-radius: 999px;
   padding: 11px 14px;
+  /* UIUX P0-1 觸控目標：原本 padding 只撐到 42px，差 2px 未達 44。
+     用 min-height 保底，不動 padding 以免文字位置跑掉。 */
+  min-height: 44px;
   font-size: 13px;
   font-weight: 800;
   cursor: pointer;
@@ -2390,7 +2400,8 @@ body.prototype-mode .prototype-id-chip {
 }
 .receipt-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px dashed var(--border); padding-bottom: 16px; margin-bottom: 16px; }
 .receipt-day { font-size: 18px; font-weight: 700; color: var(--ink); }
-.receipt-total { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--accent2); }
+/* UIUX#10：收據金額在卡片內且僅 20px，改用內文字體（展示字體只留給品牌名與 24px 以上大標） */
+.receipt-total { font-size: 20px; color: var(--accent2); }
 .receipt-item { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 12px; color: var(--ink2); }
 .receipt-item:last-child { margin-bottom: 0; }
 .receipt-item-name { display: flex; align-items: center; gap: 8px; }
@@ -3456,7 +3467,9 @@ body.prototype-mode .prototype-id-chip {
   border: 1px solid var(--border, #e6e2da); border-radius: 10px; padding: 10px 12px;
   font-family: inherit; font-size: 14px; color: var(--ink, #22201d); background: #fff;
 }
-.tripfb-textarea:focus { outline: none; border-color: var(--accent, #2e7d6d); }
+/* 同 .modify-time-input：滑鼠點擊不顯外框，鍵盤 Tab 仍保留全域焦點環 */
+.tripfb-textarea:focus:not(:focus-visible) { outline: none; }
+.tripfb-textarea:focus { border-color: var(--accent, #2e7d6d); }
 .tripfb-summary {
   display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink2, #6b6760);
   background: var(--accent-light, #edf6f4); border-radius: 10px; padding: 10px 12px; margin-bottom: 18px;
@@ -4539,3 +4552,258 @@ button.notif-item { cursor: pointer; }
 
 /* F4 預算硬約束：超支警示列 */
 .budget-overrun-warn { margin: 12px 16px 0; padding: 10px 14px; background: #fdecec; border: 1px solid #f2b8b5; border-radius: 12px; color: #a4231b; font-size: 13px; font-weight: 700; line-height: 1.6; }
+
+/* ══════════════════════════════════════════════════
+   手機字級下限（UIUX 建議 P0-2）
+   桌面沿用原字級不動——這裡只在 ≤700px 提高，避免影響桌面既有版面。
+   分三層，對應建議書的「正文 ≥14 / 交通時間狀態 16 / 11–12 僅留給輔助標籤」：
+     A. 16px：行程主軸的交通與時間，旅途中單手看最重要
+     B. 14px：卡片正文、清單項目、表單說明
+     C. 不動：純數字徽章（.notif-badge / .swap-badge / .travellog-gps-badge 等）
+        與原型展示區（.screen-* / .timeline-mini-* / .prototype-* 為靜態 mockup），
+        它們不是閱讀內容，放大只會擠壞版面。
+   line-height 一併給 1.5，中文小字放大後行距不足會更難讀。
+   ══════════════════════════════════════════════════ */
+@media (max-width: 700px) {
+  /* A. 交通／時間／狀態 —— 建議書指定 16px */
+  .transit-block,
+  .mobile-route-item-time,
+  .mobile-route-item-name,
+  .stop-hours-row,
+  .map-time-banner-duration,
+  .map-time-banner-warn {
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  /* B. 正文下限 14px */
+  .spot-detail-status,
+  .spot-detail-distance,
+  .spot-detail-card-title,
+  .spot-action-label,
+  .replan-spot-meta,
+  .replan-transit-select,
+  .replan-hours-warn,
+  .travellog-spot-meta,
+  .modify-spot-detail-section-title,
+  .modify-spot-detail-section-content,
+  .modify-spot-detail-notice-title,
+  .modify-spot-detail-notice-text,
+  .modify-spot-name,
+  .modify-spot-desc,
+  .modify-time-label,
+  .modify-time-hint,
+  .modify-window-sub,
+  .add-place-subtitle,
+  .add-place-label,
+  .add-place-empty,
+  .add-place-result-address,
+  .add-place-result-meta,
+  .add-place-result-action,
+  .delete-place-description,
+  .travel-tools-subtitle,
+  .travel-tools-tab,
+  .travel-panel-subtitle,
+  .travel-btn,
+  .travel-kv-label,
+  .travel-kv-value,
+  .travel-compat,
+  .travel-hint,
+  .stop-fee-row,
+  .transit-mode-wrap,
+  .transit-mode-select,
+  .trip-vehicle-wrap,
+  .trip-vehicle-select,
+  .mobile-route-title,
+  .mobile-route-sub,
+  .mobile-route-item-meta,
+  .stay-time-tag,
+  .stay-edit-btn,
+  .bp-label,
+  .tag,
+  .notif-item-sub,
+  .tripfb-sub,
+  .tripfb-summary,
+  .tripfb-scalehint,
+  .planning-headline-sub,
+  .voice-guide-sub,
+  .budget-overrun-warn {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+}
+
+/* ══════════════════════════════════════════════════
+   UIUX#7 行程卡瘦身：⋯ 更多選單
+   卡面只留「調整」＋「⋯」；低頻的「我去過了／替換」收進浮出選單。
+   ══════════════════════════════════════════════════ */
+.stop-visited-tag {
+  background: #e0f2fe;
+  color: #0369a1;
+  font-weight: 700;
+}
+.stop-visited-tag.is-hidden { display: none; }
+
+.stop-more-wrap { position: relative; display: inline-flex; }
+
+/* ⋯ 鈕沿用 .stay-edit-btn 外觀，只把命中區撐到 44px（觸控目標，UIUX P0-1）。
+   用 ::before 撐而非加 padding：加 padding 會把它撐得比同列其他標籤高，破壞對齊。 */
+.stop-more-btn { min-width: 26px; text-align: center; letter-spacing: 1px; }
+.stop-more-btn::before {
+  content: '';
+  position: absolute;
+  inset: -11px -9px;
+}
+
+.stop-more-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 132px;
+  padding: 6px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d7e0dd);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(21,38,59,.16);
+}
+.stop-more-wrap.open .stop-more-menu { display: flex; }
+
+.stop-more-item {
+  display: block;
+  width: 100%;
+  min-height: 40px;          /* 選單項目本身就是主要觸控目標 */
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink2);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: nowrap;        /* 選單有自己的寬度，不需要斷行 */
+  cursor: pointer;
+}
+.stop-more-item:hover { background: var(--accent-light); color: var(--accent-dark); }
+.stop-more-item.visited { color: var(--accent-dark); font-weight: 700; }
+
+/* ══════════════════════════════════════════════════
+   UIUX#6 交通路段資訊層級
+   .transit-block 是 flex 橫排（主行 ⟷ 交通工具下拉），新增的子步驟／抵達時間
+   用 flex-basis:100% 強制各自成為一列，維持
+   「方式・時間・距離 → 停車/取車子步驟 → 抵達時間 → 警告」的固定順序。
+   ══════════════════════════════════════════════════ */
+.transit-substeps,
+.transit-arrival,
+.transit-parking-warn { flex-basis: 100%; }
+
+.transit-block-main { font-weight: 600; color: var(--ink); }
+
+/* 子步驟：中性色＋左側細線，視覺上明確從屬於主行，不與主要交通爭焦點 */
+.transit-substeps {
+  margin: 6px 0 0;
+  padding: 0 0 0 10px;
+  list-style: none;
+  border-left: 2px solid var(--border);
+}
+.transit-substeps li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink2);
+}
+
+.transit-arrival {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ink2);
+}
+
+/* 警告：僅用於使用者需要手動處理的狀況（找不到停車場／時間衝突／資料不完整）。
+   樣式集中在這裡，取代原本寫在 JS 模板裡的行內 style。 */
+.transit-parking-warn {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #C2410C;
+  background: #FFF4ED;
+  border: 1px solid #FED7AA;
+  border-radius: 8px;
+}
+
+@media (max-width: 700px) {
+  /* 交通是旅途中最常看的資訊，主行拉到建議書指定的 16px */
+  .transit-block-main { font-size: 16px; }
+  .transit-substeps li,
+  .transit-arrival,
+  .transit-parking-warn { font-size: 14px; }
+}
+
+/* ══════════════════════════════════════════════════
+   UIUX#9 協作同步狀態晶片
+   建議書要求「關閉顏色辨識後仍能理解狀態」：所以圖示＋文字才是主要載體，
+   顏色只是加速辨識的輔助。三種狀態的圖示與文字彼此可區分，不依賴色相。
+   ══════════════════════════════════════════════════ */
+.collab-sync-chip {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 8px 22px rgba(21,38,59,.16);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink2);
+}
+.collab-sync-icon { font-size: 15px; line-height: 1; }
+
+.collab-sync-chip.syncing { color: var(--ink2); }
+.collab-sync-chip.syncing .collab-sync-icon {
+  display: inline-block;
+  animation: wai-spin 1s linear infinite;   /* 重用 design-tokens 的旋轉動畫 */
+}
+.collab-sync-chip.saved {
+  color: var(--accent-dark, #1f5448);
+  border-color: var(--accent);
+}
+.collab-sync-chip.error {
+  color: #a4231b;
+  background: #fdecec;
+  border-color: #f2b8b5;
+}
+
+.collab-sync-retry {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.collab-sync-retry:hover { background: rgba(0,0,0,.05); }
+
+/* 手機：底部有導覽/切換列，晶片往上讓開，避免互相遮擋 */
+@media (max-width: 1024px) {
+  .collab-sync-chip { bottom: 140px; right: 12px; left: auto; }
+
+  /* 司機模式的 driver panel 從 bottom:146px 往上展開，且會蓋滿下半部；
+     晶片留在底部會壓在面板內容上。改掛到頂部（此模式下切換列已隱藏，頂部是空的）。 */
+  body.mobile-role-driver .collab-sync-chip {
+    bottom: auto;
+    top: calc(var(--mobile-header-height, 132px) + 10px);
+  }
+}

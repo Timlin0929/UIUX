@@ -79,7 +79,8 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 
 /* ─── NEWS SECTION ─── */
 .news-section { padding: 24px 28px 0; max-width: 1400px; margin: 0 auto; }
-.news-title { font-family: 'DM Serif Display', serif; font-size: 24px; margin-bottom: 16px; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+/* UIUX#10：區塊卡片標題改內文字體（展示字體保留給頁面級大標與品牌名） */
+.news-title { font-size: 24px; font-weight: 700; margin-bottom: 16px; color: var(--ink); display: flex; align-items: center; gap: 8px; }
 .news-grid { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 12px; scrollbar-width: none; }
 .news-grid::-webkit-scrollbar { display: none; }
 .news-card {
@@ -116,7 +117,8 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .tc-tag.gold{background:var(--gold-light);color:#7a5e10;}
 .tc-tag.p{background:#ede8fb;color:#5a3aaa;}
 .tc-tag.copied{background:var(--gold-light);color:#7a5e10;}
-.tc-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--ink);line-height:1.25;margin-bottom:6px;}
+/* UIUX#10：行程卡標題屬「卡片」且僅 20px，改內文字體，卡片內不再混排兩種字體 */
+.tc-title{font-size:20px;color:var(--ink);line-height:1.25;margin-bottom:6px;}
 .tc-meta{font-size:14px;color:var(--ink3);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .tc-author-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);}
 .tc-ava{width:26px;height:26px;border-radius:50%;background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
@@ -134,7 +136,8 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .trending-item{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(226,221,214,.5);cursor:pointer;}
 .trending-item:last-child{border-bottom:none;}
 .trending-item:hover .tr-name{color:var(--accent);}
-.tr-rank{font-family:'DM Serif Display',serif;font-size:22px;color:var(--border);width:20px;text-align:center;flex-shrink:0;}
+/* UIUX#10：排行序號位於側欄卡片內，改內文字體 */
+.tr-rank{font-size:22px;font-weight:800;color:var(--border);width:20px;text-align:center;flex-shrink:0;}
 .tr-rank.hot{color:var(--accent2);}
 .tr-name{font-size:16px;font-weight:500;color:var(--ink);transition:color .15s;}
 .tr-meta{font-size:13px;color:var(--ink3);}
@@ -541,7 +544,10 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
 .mt-search-clear:hover{background:var(--surface2);color:var(--ink);}
 .mt-sort{display:flex;align-items:center;gap:8px;flex-shrink:0;}
 .mt-sort .sort-label{font-size:15px;color:var(--ink3);}
-.mt-sort .sort-select{padding:9px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;font-family:inherit;background:rgba(255,255,255,.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:var(--ink);cursor:pointer;outline:none;}
+.mt-sort .sort-select{padding:9px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;font-family:inherit;background:rgba(255,255,255,.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:var(--ink);cursor:pointer;}
+/* 這條選擇器是 (0,2,0)，若把 outline:none 留在上面會壓過 design-tokens.css 的
+   全域焦點環 (0,1,1)；改成只在滑鼠點擊時取消。 */
+.mt-sort .sort-select:focus:not(:focus-visible){outline:none;}
 .mt-sort .sort-select:focus{border-color:var(--accent);}
 
 .my-trips-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;}
@@ -1047,3 +1053,21 @@ button.notif-item{cursor:pointer;}
 .friends-feed-emoji{font-size:17px;flex-shrink:0;}
 .friends-feed-text{flex:1;min-width:0;font-size:13.5px;color:var(--ink);line-height:1.5;overflow-wrap:anywhere;}
 .friends-feed-time{font-size:12px;color:var(--ink3);white-space:nowrap;flex-shrink:0;}
+
+/* ══════════════════════════════════════════════════
+   手機字級下限（UIUX 建議 P0-2）
+   explore 的小字遠少於 planner（僅 3 處 <12px），主要問題在 12–13px 的
+   卡片 meta 與通知內文。同樣只在 ≤700px 提高，桌面不動。
+   .notif-badge（純數字紅點）與 .mbn-item（底部導覽標籤，字放大會換行撞圖示）
+   維持原字級——不是閱讀內容。
+   ══════════════════════════════════════════════════ */
+@media (max-width:700px){
+  .tc-meta,.tc-author,.tc-tag,.tc-copy-badge,
+  .notif-item-sub,
+  .friends-empty,
+  .lm-field label,
+  .filter-tab,.sort-select{
+    font-size:14px;
+    line-height:1.5;
+  }
+}

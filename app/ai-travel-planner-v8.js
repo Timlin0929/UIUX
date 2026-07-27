@@ -26,6 +26,10 @@
   let guestJoinRequestStatus = 'none';
   let plannerNotifItems = [];
   let plannerNotifUnsub = null;
+  // UIUX#8：與 explore 同一套——大視窗的「全部／未讀」篩選，以及
+  // 「還在載入」與「真的沒通知」的區分（兩者都是空陣列，該顯示的東西不同）。
+  let plannerNotifFilter = 'all';
+  let plannerNotifLoaded = false;
   let currentTripDepartureDate = '';
   const isPrototypeMode = true;
   let isReplanning = false;
@@ -3843,6 +3847,76 @@
     }
   });
 
+  // ══════════════════════════════════════════════════
+  // UIUX#7 行程卡瘦身：表面只留「調整」，低頻的「我去過了／替換」收進 ⋯ 更多
+  // ══════════════════════════════════════════════════
+  // 「我去過了」被收進選單後，狀態就從卡面消失了——所以已去過時仍在表面留一個
+  // ✓ 去過 小標籤。可見的是「狀態」，選單裡的是「動作」，兩者不同。
+  // stop.id 目前都由本地樣板產生（`stop-return-…`、`imported-…`），不含引號；
+  // 但共編行程的 stops 來自 Firestore，理論上可被夾帶引號。插進 attribute
+  // 與 inline onclick 是兩個不同的轉義情境，必須分開處理：
+  //   attribute → escapeHtml；JS 字串字面值 → 先跳脫反斜線與單引號，再 escapeHtml
+  //   （因為整段 onclick 本身還在一個 HTML 屬性裡）。
+  function jsAttrStr(v) {
+    return escapeHtml(String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+  }
+
+  function buildStopMoreMenu(stop) {
+    const visited = isPlaceVisited(stop.name);
+    const idAttr = escapeHtml(String(stop.id == null ? '' : stop.id));
+    const idJs = jsAttrStr(stop.id);
+    const canSwap = !collabReadOnly && stop.altNearby && stop.altNearby.length;
+    // 標籤恆常產生、用 class 控制顯示：handleToggleVisited 才能靠 data-stop-id
+    // 找到它並即時切換，不必整段重繪行程卡。
+    const visitedTag = `<span class="tag stop-visited-tag${visited ? '' : ' is-hidden'}"
+      data-stop-id="${idAttr}" title="只會記錄在你的帳號">✓ 去過</span>`;
+    // 沒有任何可收納的動作時不要生一顆空的 ⋯（唯讀成員走不到這裡，但防禦性保留）
+    if (collabReadOnly) return visitedTag;
+    return visitedTag + `
+      <span class="stop-more-wrap">
+        <button class="stay-edit-btn stop-more-btn" aria-label="更多操作" aria-expanded="false"
+          onclick="event.stopPropagation(); toggleStopMore(this)">⋯</button>
+        <span class="stop-more-menu">
+          <button class="stop-more-item visited-toggle-btn ${visited ? 'visited' : ''}"
+            title="只會記錄在你的帳號" data-stop-id="${idAttr}"
+            onclick="event.stopPropagation(); closeAllStopMore(); handleToggleVisited('${idJs}', this)"
+          >${visited ? '✓ 我已去過' : '📌 我去過了'}</button>
+          ${canSwap ? `<button class="stop-more-item swap-btn"
+            onclick="event.stopPropagation(); closeAllStopMore(); openSwapPanel('${idJs}')"
+          >🔄 替換景點</button>` : ''}
+        </span>
+      </span>`;
+  }
+
+  function closeAllStopMore() {
+    document.querySelectorAll('.stop-more-wrap.open').forEach(w => {
+      w.classList.remove('open');
+      const b = w.querySelector('.stop-more-btn');
+      if (b) b.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function toggleStopMore(btn) {
+    const wrap = btn.closest('.stop-more-wrap');
+    if (!wrap) return;
+    const willOpen = !wrap.classList.contains('open');
+    closeAllStopMore(); // 同時只開一個，避免多站選單疊在一起
+    if (willOpen) {
+      wrap.classList.add('open');
+      btn.setAttribute('aria-expanded', 'true');
+    }
+  }
+  window.toggleStopMore = toggleStopMore;
+  window.closeAllStopMore = closeAllStopMore;
+
+  // 點外面／按 Esc 關閉（比照 heroMoreGroup 的慣例）
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest || !e.target.closest('.stop-more-wrap')) closeAllStopMore();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAllStopMore();
+  });
+
   // ── 旅程拼貼（把一趟旅程的照片合成一張大圖，分享/下載）──
 
   function renderCollageBar() {
@@ -5063,6 +5137,20 @@
     feedbackToast(`已刪除「${targetName}」`, 'blue');
   }
 
+  // 一個景點「去過了」狀態的畫面同步：切換鈕文字／樣式，以及 UIUX#7 新增的
+  // 卡面「✓ 去過」標籤。有兩條路徑會改變 visited（單站切換、整趟標記完成），
+  // 抽成共用函式，避免只更新其中一邊造成畫面與資料不一致。
+  function syncVisitedUi(stopId, visited) {
+    const label = visited ? '✓ 我已去過' : '📌 我去過了';
+    document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stopId}"]`).forEach((b) => {
+      b.textContent = label;
+      b.classList.toggle('visited', visited);
+    });
+    document.querySelectorAll(`.stop-visited-tag[data-stop-id="${stopId}"]`).forEach((t) => {
+      t.classList.toggle('is-hidden', !visited);
+    });
+  }
+
   function handleToggleVisited(stopId, btn) {
     const stop = replanStops.find(s => s.id === stopId);
     if (!stop) return;
@@ -5077,6 +5165,7 @@
       btn.textContent = label;
       btn.classList.toggle('visited', nowVisited);
     }
+    syncVisitedUi(stopId, nowVisited);
     showVisitedToast(nowVisited ? `${stop.name} 已加入旅遊紀錄` : `${stop.name} 已從旅遊紀錄移除`);
     const travellogList = document.getElementById('travellog-list');
     if (travellogList) renderTravelLog();
@@ -5116,11 +5205,8 @@
         if (!isPlaceVisited(stop.name)) {
           toggleVisitedPlace(stop);
           addedCount++;
-          // 更新畫面按鈕
-          document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stop.id}"]`).forEach(b => {
-            b.textContent = '✓ 我已去過';
-            b.classList.add('visited');
-          });
+          // 走共用函式，才會連 UIUX#7 的卡面「✓ 去過」標籤一起更新
+          syncVisitedUi(stop.id, true);
         }
       }
     });
@@ -5352,7 +5438,9 @@
     const host = document.getElementById('tripfb-others');
     if (!host) return;
     if (!(firebaseEnabled && firebaseDb && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY')) { host.innerHTML = ''; return; }
-    host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">載入大家的回饋中…</div>';
+    // UIUX#11：純文字「載入中…」看起來像靜止的錯誤訊息，補骨架列讓人知道在跑
+    host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">載入大家的回饋中…</div>'
+      + (window.waiSkeletonRows ? waiSkeletonRows(2) : '');
     try {
       const snap = await firebaseDb.collection('micro_trips').doc(currentItineraryId)
         .collection('feedback').get();
@@ -5829,6 +5917,66 @@
       }
     }
   }
+
+  // ══════════════════════════════════════════════════
+  // UIUX#9 協作同步狀態（同步中／已同步／同步失敗＋重試）
+  // 原本 Firestore 寫入失敗只有 console.warn，使用者完全不知道自己的編輯沒存上去，
+  // 會以為改好了就關掉分頁。這裡把狀態浮上檯面，並提供重試。
+  // 三種狀態一律「圖示＋文字＋顏色」三者並用——建議書要求關掉顏色辨識後仍能理解，
+  // 所以顏色只是輔助，文字才是主要載體。
+  // ══════════════════════════════════════════════════
+  const COLLAB_SYNC_META = {
+    syncing:  { icon: '↻', text: '同步中…', cls: 'syncing' },
+    saved:    { icon: '✓', text: '已同步',   cls: 'saved' },
+    error:    { icon: '⚠', text: '同步失敗', cls: 'error' },
+    // 權限在編輯途中被撤銷：重試沒有意義，要說清楚原因而不是讓人一直按
+    readonly: { icon: '👁', text: '目前為唯讀，變更不會同步', cls: 'error' }
+  };
+  let collabSyncHideTimer = null;
+
+  function setCollabSyncState(state) {
+    const meta = COLLAB_SYNC_META[state];
+    let chip = document.getElementById('collabSyncChip');
+    if (!meta) { if (chip) chip.remove(); return; }
+
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.id = 'collabSyncChip';
+      // role=status + aria-live：狀態變化會被螢幕閱讀器讀出（建議書要求）
+      chip.setAttribute('role', 'status');
+      chip.setAttribute('aria-live', 'polite');
+      document.body.appendChild(chip);
+    }
+    chip.className = 'collab-sync-chip ' + meta.cls;
+    chip.innerHTML = `<span class="collab-sync-icon" aria-hidden="true">${meta.icon}</span>`
+      + `<span class="collab-sync-text">${meta.text}</span>`
+      // 只有「可重試」的失敗才給重試鈕；唯讀是權限問題，按幾次都一樣
+      + (state === 'error'
+        ? '<button type="button" class="collab-sync-retry" onclick="retryCollabSync()">重試</button>'
+        : '');
+
+    clearTimeout(collabSyncHideTimer);
+    // 「已同步」是好消息，看一眼就夠，2.5 秒後自動收起；
+    // 「同步失敗」必須留著直到使用者處理，不自動消失。
+    if (state === 'saved') {
+      collabSyncHideTimer = setTimeout(() => {
+        const c = document.getElementById('collabSyncChip');
+        if (c && c.classList.contains('saved')) c.remove();
+      }, 2500);
+    }
+  }
+
+  window.retryCollabSync = function() {
+    // persistCurrentTripStops 開頭就會因 collabReadOnly 直接 return，
+    // 若這裡先設成 syncing，晶片會永遠停在「同步中…」。
+    // 這個情境是真實的：編輯者在寫入失敗後被擁有者降為唯讀。
+    if (collabReadOnly) {
+      setCollabSyncState('readonly');
+      return;
+    }
+    setCollabSyncState('syncing');
+    schedulePersistTrip();
+  };
 
   // 多人共作唯讀提示橫幅（viewer / 訪客）
   function showCollabReadOnlyBanner(role) {
@@ -6326,6 +6474,9 @@
           fbPatch.wizardData = { ...(fbPatch.wizardData || {}), transportMode: vehiclePref };
         }
         const tripRef = firebaseDb.collection('micro_trips').doc(currentItineraryId);
+        // UIUX#9：只在共編行程顯示同步狀態——個人行程以 localStorage 為準，
+        // 就算 Firestore 寫入失敗也不影響使用者手上的資料，跳警示只會製造焦慮。
+        if (currentTripIsCollab) setCollabSyncState('syncing');
         if (currentTripIsCollab) {
           let committedStops = stopsSnapshot;
           let committedVehicle = '';
@@ -6370,8 +6521,12 @@
         } else {
           await tripRef.set(fbPatch, { merge: true });
         }
+        if (currentTripIsCollab) setCollabSyncState('saved');
       } catch (e) {
         console.warn('Failed to persist trip stops to Firebase:', e);
+        // UIUX#9：原本只有 console.warn，使用者會以為改好了就關掉分頁，
+        // 實際上編輯根本沒同步出去。改為顯示可重試的失敗狀態。
+        if (currentTripIsCollab) setCollabSyncState('error');
       }
     }
     } finally {
@@ -7005,8 +7160,7 @@
           : (isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
           <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
           <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
-          <button class="stay-edit-btn visited-toggle-btn ${isPlaceVisited(stop.name) ? 'visited' : ''}" title="只會記錄在你的帳號" data-stop-id="${stop.id}" onclick="event.stopPropagation(); handleToggleVisited('${stop.id}', this)">${isPlaceVisited(stop.name) ? '✓ 我已去過' : '📌 我去過了'}</button>
-          ${(!collabReadOnly && stop.altNearby && stop.altNearby.length) ? `<button class="stay-edit-btn swap-btn" onclick="event.stopPropagation(); openSwapPanel('${stop.id}')">🔄 替換</button>` : ''}
+          ${buildStopMoreMenu(stop)}
         ` : ''));
       }
 
@@ -7051,41 +7205,56 @@
         const parkWalkMin = (isDriveSeg && Number(nextStop.parkWalkMin) > 0) ? Number(nextStop.parkWalkMin) : 0;
         const departWalkMin = (isDriveSeg && Number(stop.parkWalkMin) > 0) ? Number(stop.parkWalkMin) : 0;
         const driveMin = Math.max(0, transitMin - parkWalkMin - departWalkMin);
-        let transitText = '';
-        if (departWalkMin > 0) {
-          transitText += `🚶 步行回停車場取車約 ${departWalkMin} 分鐘 ＋ `;
+        // ── UIUX#6 交通資訊層級 ────────────────────────────
+        // 原本把「步行取車＋主要交通＋停車後步行＋距離＋抵達」全部串成一長句，
+        // 手機上會變成三四行不好掃讀。改成固定層級：
+        //   主行（方式・時間・距離）→ 停車/取車子步驟 → 抵達時間 → 警告（若有）
+        // 順序與建議書一致，且步行段獨立成子步驟，不再混在「開車約 N 分鐘」裡。
+        const routeInfo = getRouteStageBySourceStopIndex(index);
+
+        // 主行：方式＋時間，接上距離
+        let primaryText = getTransitSummaryText(transitMode, driveMin);
+        if (routeInfo && routeInfo.distance && !isDistanceAbnormallySmall(routeInfo.distance)) {
+          primaryText += ` · ${routeInfo.distance}`;
         }
-        transitText += getTransitSummaryText(transitMode, driveMin);
-        if (parkWalkMin > 0) {
-          transitText += ` ＋ 🅿️ 停車後步行約 ${parkWalkMin} 分鐘`;
-        }
+        // 示範行程的情境描述（僅特定 demo stop id 會命中）
         if (transitMin > 0) {
-          // 添加停靠点间的描述
           if (stop.id === 'luggage' && nextStop.id === 'cafe') {
-            transitText += '穿過站前廣場';
+            primaryText += ' · 穿過站前廣場';
           } else if (stop.id === 'cafe' && nextStop.id === 'shop') {
-            transitText += '，轉個彎就到';
+            primaryText += ' · 轉個彎就到';
           } else if (stop.id === 'shop') {
-            transitText += '慢慢散步回車站，順便買伴手禮';
+            primaryText += ' · 慢慢散步回車站，順便買伴手禮';
           }
         }
-        // 如果有路線距離資訊，一併顯示
-        const routeInfo = getRouteStageBySourceStopIndex(index);
-        if (routeInfo && routeInfo.distance && !isDistanceAbnormallySmall(routeInfo.distance)) {
-          transitText += ` · 距離 ${routeInfo.distance}`;
-        }
-        if (routeInfo && getRouteStageTimeText(routeInfo)) {
-          transitText += ` · ${getRouteStageTimeText(routeInfo)}`;
-        }
+
+        // 子步驟：取車／停車的步行段，各自一行
+        const subSteps = [];
+        if (departWalkMin > 0) subSteps.push(`🚶 步行回停車場取車 約 ${departWalkMin} 分鐘`);
+        if (parkWalkMin > 0) subSteps.push(`🅿️ 停車後步行至景點 約 ${parkWalkMin} 分鐘`);
+        const subStepsHtml = subSteps.length
+          ? `<ul class="transit-substeps">${subSteps.map(s => `<li>${s}</li>`).join('')}</ul>`
+          : '';
+
+        // 抵達時間單獨一行（建議書指定放在最後）
+        const arrivalText = routeInfo ? getRouteStageTimeText(routeInfo) : '';
+        const arrivalHtml = arrivalText
+          ? `<div class="transit-arrival">🕐 ${arrivalText}</div>`
+          : '';
         // 下拉只提供：所選交通工具 + 走路（並保留目前值以相容舊行程）
         const allowedModes = new Set(['walk', getPreferredVehicleMode(), transitMode]);
         const segmentModeOptions = TRANSIT_MODE_OPTIONS.filter((modeOption) => allowedModes.has(modeOption.value));
         // 開車段但目的地找不到鄰近停車場 → 提醒使用者（停車狀態於畫路線時寫入 routeStageCache）
+        // 警告色只留給「使用者需要手動處理」的狀況（建議書 UIUX#6）——
+        // 找不到停車場屬於這一類；一般交通資訊走中性色，避免整條時間軸看起來都像出錯。
+        // 樣式從行內搬進 .transit-parking-warn（CSS），行內只留下語意。
         const noParkingWarn = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
-          ? `<div class="transit-parking-warn" style="margin-top:6px;font-size:12px;line-height:1.45;color:#C2410C;background:#FFF4ED;border:1px solid #FED7AA;border-radius:8px;padding:6px 8px;">⚠️ 此段目的地找不到鄰近停車場，請預留路邊或付費停車的時間。</div>`
+          ? `<div class="transit-parking-warn">⚠️ 此段目的地找不到鄰近停車場，請預留路邊或付費停車的時間。</div>`
           : '';
         html += `<div class="transit-block">
-          <div class="transit-block-main">${transitText}</div>
+          <div class="transit-block-main">${primaryText}</div>
+          ${subStepsHtml}
+          ${arrivalHtml}
           <label class="transit-mode-wrap">交通工具
             <select class="transit-mode-select" onchange="setSegmentTransitMode('${stop.id}', this.value)" onclick="event.stopPropagation()">
               ${segmentModeOptions.map((modeOption) => `<option value="${modeOption.value}" ${transitMode === modeOption.value ? 'selected' : ''}>${modeOption.icon} ${modeOption.label}</option>`).join('')}
@@ -7203,7 +7372,7 @@
         ? `${location.origin}${location.pathname}?sharedId=${encodeURIComponent(currentItineraryId)}&token=${encodeURIComponent(currentTripShareToken)}&guest=1`
         : (currentInviteCode || '');
       qrEl.innerHTML = share
-        ? `<img alt="邀請 QR" style="width:100%;height:100%;border-radius:10px;object-fit:contain;" src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(share)}">`
+        ? `<img alt="邀請 QR" loading="lazy" style="width:100%;height:100%;border-radius:10px;object-fit:contain;" src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(share)}">`
         : '邀請碼產生中…';
       if (hintEl) hintEl.textContent = share ? '讓朋友掃描 QR，或輸入上方邀請碼即可加入' : '邀請碼產生中…';
     }
@@ -7890,11 +8059,32 @@
     updateMobileDriverPanelLayout();
   }
 
+  // UIUX#5：手機切到「行程」再切回「地圖」時，要保留使用者原本的地圖中心與縮放。
+  // 離開地圖模式前把視角存進這裡，回到地圖時由 refreshMobileMapLayout 優先還原
+  // （用完即清），沒有存檔時才退回 fitBounds 整條路線。
+  // 宣告刻意放在第一個使用點（setMobileMode）之前：refreshMobileMapLayout 在檔案
+  // 一萬多行之後，若把 let 留在那裡，任何在中間執行的初始化呼叫都會踩到 TDZ。
+  let pendingMobileMapView = null;
+
   function setMobileMode(mode) {
     const showMap = mode === 'map';
     const isCurrSpot = mode === 'current-spot';
+
+    // UIUX#5：離開地圖前先記住視角，回來時由 refreshMobileMapLayout 還原。
+    // 判斷「原本在地圖模式」必須在下面 toggle class 之前做，否則狀態已經被覆蓋。
+    const leavingMap = !showMap && !isCurrSpot
+      && document.body.classList.contains('mobile-mode-map');
+    if (leavingMap && map && window.google && google.maps) {
+      try {
+        const c = map.getCenter();
+        if (c) pendingMobileMapView = { center: { lat: c.lat(), lng: c.lng() }, zoom: map.getZoom() };
+      } catch (error) {
+        pendingMobileMapView = null;
+      }
+    }
+
     updateMobileViewportMetrics();
-    
+
     if (isCurrSpot) {
       // 進入現在景點時，移除view mode classes
       document.body.classList.remove('mobile-mode-map');
@@ -12830,9 +13020,21 @@
     updateMobileViewportMetrics();
     applyMobileMapHeight();
     updateMobileDriverPanelLayout();
+    // 立刻取走待還原的視角，不要等到 80ms 後的 callback 才讀——
+    // 那 80ms 內若有其他程式觸發了新的路段聚焦（fitBounds），
+    // callback 才讀取的話會用舊視角把剛聚焦的結果蓋回去。
+    const saved = pendingMobileMapView;
+    pendingMobileMapView = null;
     window.setTimeout(() => {
       google.maps.event.trigger(map, 'resize');
-      if (currentRouteFocusBounds || currentRouteBounds) {
+      if (saved) {
+        try {
+          map.setCenter(saved.center);
+          map.setZoom(saved.zoom);
+        } catch (error) {
+          // 還原失敗就讓它維持 resize 後的預設視角，不要中斷後續的摘要渲染
+        }
+      } else if (currentRouteFocusBounds || currentRouteBounds) {
         try {
           map.fitBounds(currentRouteFocusBounds || currentRouteBounds);
         } catch (error) {
@@ -13621,9 +13823,15 @@
   }
 
   // 通知列 HTML：小面板與展開大視窗共用同一份，避免兩邊行為分歧。
-  function buildPlannerNotifRows(expanded) {
+  // indices：要呈現哪幾筆（值為 plannerNotifItems 的原始索引）。
+  // 大視窗分區／篩選後順序會變，但 onclick 傳的必須始終是原始索引，
+  // 否則按下「接受」會處理到別筆申請。不傳則等同全部。
+  function buildPlannerNotifRows(expanded, indices) {
     const itemCls = expanded ? 'notif-item notif-item-expanded' : 'notif-item';
-    return plannerNotifItems.map((item, index) => {
+    const pairs = Array.isArray(indices)
+      ? indices.map((i) => [plannerNotifItems[i], i]).filter((p) => p[0])
+      : plannerNotifItems.map((item, i) => [item, i]);
+    return pairs.map(([item, index]) => {
       const meta = PLANNER_NOTIF_META[item.type] || { emoji: '🔔', label: '通知' };
       const time = plannerNotifTime(item.createdAt);
       const inner = `<span class="notif-item-emoji">${meta.emoji}</span>
@@ -13672,10 +13880,53 @@
     renderNotifFullView();
   };
 
+  // 待處理的加入申請＝「需要你動作」的事項，混在一般通知裡會被滑過去，獨立成一區。
+  function isPlannerPendingRequest(item) {
+    return !!item && item.type === 'trip_join_request'
+      && (!item.requestStatus || item.requestStatus === 'pending');
+  }
+
+  window.setNotifFilter = function(mode) {
+    plannerNotifFilter = (mode === 'unread') ? 'unread' : 'all';
+    renderNotifFullView();
+  };
+
   function renderNotifFullView() {
     const overlay = document.getElementById('notifFullOverlay');
     if (!overlay) return;
     const unread = plannerNotifItems.filter((item) => item && !item.read).length;
+
+    // 待處理申請永遠顯示（即使已讀），否則切到「未讀」會讓待辦事項憑空消失。
+    const requestIdx = [];
+    const otherIdx = [];
+    plannerNotifItems.forEach((item, i) => {
+      if (!item) return;
+      if (isPlannerPendingRequest(item)) requestIdx.push(i);
+      else if (plannerNotifFilter === 'all' || !item.read) otherIdx.push(i);
+    });
+
+    let bodyHtml;
+    if (!plannerNotifLoaded) {
+      bodyHtml = '<div class="notif-loading-hint">載入通知中…</div>'
+        + (window.waiSkeletonRows ? waiSkeletonRows(4, 'notif-skeleton') : '');
+    } else if (!requestIdx.length && !otherIdx.length) {
+      bodyHtml = plannerNotifFilter === 'unread'
+        ? '<div class="notif-empty">沒有未讀通知<br><span class="notif-empty-sub">切到「全部」可以看過去的紀錄</span></div>'
+        : '<div class="notif-empty">目前沒有通知<br><span class="notif-empty-sub">有人邀你共編或申請加入行程時，會出現在這裡</span></div>';
+    } else {
+      bodyHtml = (requestIdx.length ? `
+        <div class="notif-section">
+          <div class="notif-section-title">待處理的加入申請 <span class="notif-section-count">${requestIdx.length}</span></div>
+          ${buildPlannerNotifRows(true, requestIdx)}
+        </div>` : '')
+        + (otherIdx.length ? `
+        <div class="notif-section">
+          ${requestIdx.length ? '<div class="notif-section-title">其他通知</div>' : ''}
+          ${buildPlannerNotifRows(true, otherIdx)}
+        </div>`
+        : (plannerNotifFilter === 'unread' ? '<div class="notif-empty">沒有其他未讀通知</div>' : ''));
+    }
+
     overlay.innerHTML = `<section class="notif-full-card" role="dialog" aria-modal="true" aria-label="全部通知">
       <header class="notif-full-head">
         <div class="notif-full-title">🔔 全部通知${unread ? ` <span class="notif-full-count">${unread}</span>` : ''}</div>
@@ -13684,8 +13935,16 @@
           <button type="button" class="notif-full-close" onclick="closeNotifFullView()" aria-label="關閉通知列表">✕</button>
         </div>
       </header>
+      <div class="notif-filter-bar" role="tablist" aria-label="通知篩選">
+        <button type="button" role="tab" aria-selected="${plannerNotifFilter === 'all'}"
+          class="notif-filter-btn${plannerNotifFilter === 'all' ? ' active' : ''}"
+          onclick="setNotifFilter('all')">全部</button>
+        <button type="button" role="tab" aria-selected="${plannerNotifFilter === 'unread'}"
+          class="notif-filter-btn${plannerNotifFilter === 'unread' ? ' active' : ''}"
+          onclick="setNotifFilter('unread')">未讀${unread ? ` (${unread})` : ''}</button>
+      </div>
       <div class="notif-full-body">
-        ${buildPlannerNotifRows(true) || '<div class="notif-empty">目前沒有通知</div>'}
+        ${bodyHtml}
       </div>
     </section>`;
   }
@@ -13739,13 +13998,30 @@
     if (event) event.stopPropagation();
     const item = plannerNotifItems[index];
     if (!item || !item.tripId || !item.requesterUid) return;
-    const row = event && event.currentTarget && event.currentTarget.closest('.notif-request-actions');
-    if (row) row.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+    // UIUX#11：被點的那顆顯示「處理中…」spinner，同列另一顆一併鎖住防重複提交。
+    // 先保存參照——await 之後 event.currentTarget 會被瀏覽器清空。
+    const clicked = event && event.currentTarget;
+    const row = clicked && clicked.closest('.notif-request-actions');
+    const siblings = row ? [...row.querySelectorAll('button')].filter((b) => b !== clicked) : [];
+    siblings.forEach((button) => { button.disabled = true; });
+    const restore = window.waiSetBusy
+      ? waiSetBusy(clicked, decision === 'accept' ? '接受中…' : '拒絕中…')
+      : () => {};
     try {
       await WAI_COLLAB.resolveTripJoinRequest(item.tripId, item.requesterUid, decision);
       feedbackToast(decision === 'accept' ? '已接受加入申請' : '已拒絕加入申請', 'green');
+      // 成功時不主動還原：Firestore 推播會重繪整個通知列表，此時 clicked 已從 DOM 移除，
+      // 還原只是寫回一個孤兒節點。留著忙碌態直到重繪蓋掉，畫面不會閃回「接受」再消失。
+      // 但不能「只」依賴推播——listener 斷線／離線時不會重繪，按鈕會永久卡在「接受中…」。
+      if (window.waiBusyUntilRerender) {
+        waiBusyUntilRerender(() => {
+          restore();
+          siblings.forEach((button) => { button.disabled = false; });
+        }, clicked);
+      }
     } catch (error) {
-      if (row) row.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+      restore();
+      siblings.forEach((button) => { button.disabled = false; });
       feedbackToast((error && error.message) || '處理加入申請失敗', 'red');
     }
   };
@@ -13757,6 +14033,7 @@
     if (wrap) wrap.style.display = '';
     plannerNotifUnsub = WAI_NOTIFY.subscribe(email, (items) => {
       plannerNotifItems = items;
+      plannerNotifLoaded = true;
       updatePlannerNotifBadge();
       if (collabRole === 'guest' && currentItineraryId) {
         const joinResult = items.find((item) => item
@@ -13781,6 +14058,8 @@
     if (plannerNotifUnsub) plannerNotifUnsub();
     plannerNotifUnsub = null;
     plannerNotifItems = [];
+    plannerNotifLoaded = false;
+    plannerNotifFilter = 'all';
     const wrap = document.getElementById('notifWrap');
     if (wrap) wrap.style.display = 'none';
     updatePlannerNotifBadge();

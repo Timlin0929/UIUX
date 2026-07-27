@@ -3717,6 +3717,11 @@ function stopFriendsSubscriptions() {
 // ══════════════════════════════════════════════════
 let notifItems = [];
 let notifUnsub = null;
+// UIUX#8：大視窗的「全部／未讀」篩選狀態，只影響呈現不動資料。
+let notifFilter = 'all';
+// 是否已收到第一次 onSnapshot。用來分辨「還在載入」與「真的沒有通知」——
+// 兩者都是空陣列，但該給使用者看的東西完全不同。
+let notifLoaded = false;
 
 function startNotifSubscription(myEmail) {
   stopNotifSubscription();
@@ -3725,6 +3730,7 @@ function startNotifSubscription(myEmail) {
   if (wrap) wrap.style.display = '';
   notifUnsub = WAI_NOTIFY.subscribe(myEmail, (list) => {
     notifItems = list;
+    notifLoaded = true;
     updateNotifBadge();
     // 大視窗開啟時小面板必定是關的（openNotifFullView 會移除 .open），
     // 只判斷 .open 會讓大視窗收不到推播——接受/拒絕後按鈕會永久卡在 disabled。
@@ -3741,6 +3747,8 @@ function startNotifSubscription(myEmail) {
 function stopNotifSubscription() {
   if (notifUnsub) { notifUnsub(); notifUnsub = null; }
   notifItems = [];
+  notifLoaded = false;
+  notifFilter = 'all';
   const wrap = document.getElementById('notifWrap');
   if (wrap) wrap.style.display = 'none';
   const panel = document.getElementById('notifPanel');
@@ -3809,9 +3817,15 @@ function toggleNotifPanel() {
 }
 
 // 通知列 HTML：小面板與展開大視窗共用同一份，避免兩邊行為分歧。
-function buildNotifRowsHtml(expanded) {
+// indices：要呈現哪幾筆（值是 notifItems 的「原始索引」）。大視窗分區／篩選後
+// 順序會變，但 onclick 傳的必須始終是原始索引，否則會操作到別筆通知。
+// 不傳則等同全部。
+function buildNotifRowsHtml(expanded, indices) {
   const itemCls = expanded ? 'notif-item notif-item-expanded' : 'notif-item';
-  return notifItems.map((n, i) => {
+  const list = Array.isArray(indices)
+    ? indices.map(i => [notifItems[i], i]).filter(pair => pair[0])
+    : notifItems.map((n, i) => [n, i]);
+  return list.map(([n, i]) => {
     const meta = NOTIF_TYPE_META[n.type] || { emoji: '🔔', label: '通知' };
     const content = `<span class="notif-item-emoji">${meta.emoji}</span>
       <span class="notif-item-main">
@@ -3863,10 +3877,57 @@ function openNotifFullView() {
   renderNotifFullView();
 }
 
+// UIUX#8：待處理的加入申請要獨立成一區——它是「需要你動作」的事項，
+// 混在一般通知裡容易被滑過去。
+function isPendingJoinRequest(n) {
+  return !!n && n.type === 'trip_join_request'
+    && (!n.requestStatus || n.requestStatus === 'pending');
+}
+
+function setNotifFilter(mode) {
+  notifFilter = (mode === 'unread') ? 'unread' : 'all';
+  renderNotifFullView();
+}
+window.setNotifFilter = setNotifFilter;
+
 function renderNotifFullView() {
   const overlay = document.getElementById('notifFullOverlay');
   if (!overlay) return;
   const unread = notifItems.filter(n => n && !n.read).length;
+
+  // 先分區：待處理申請 vs 其餘；篩選只作用在「其餘」，
+  // 待處理申請永遠顯示（就算已讀），否則使用者會找不到要處理的東西。
+  const requestIdx = [];
+  const otherIdx = [];
+  notifItems.forEach((n, i) => {
+    if (!n) return;
+    if (isPendingJoinRequest(n)) requestIdx.push(i);
+    else if (notifFilter === 'all' || !n.read) otherIdx.push(i);
+  });
+
+  let bodyHtml;
+  if (!notifLoaded) {
+    // 載入狀態：與「沒有通知」區分開來
+    bodyHtml = `<div class="notif-loading-hint">載入通知中…</div>`
+      + (window.waiSkeletonRows ? waiSkeletonRows(4, 'notif-skeleton') : '');
+  } else if (!requestIdx.length && !otherIdx.length) {
+    bodyHtml = notifFilter === 'unread'
+      ? '<div class="notif-empty">沒有未讀通知<br><span class="notif-empty-sub">切到「全部」可以看過去的紀錄</span></div>'
+      : '<div class="notif-empty">目前沒有通知<br><span class="notif-empty-sub">有人邀你共編或申請加入行程時，會出現在這裡</span></div>';
+  } else {
+    bodyHtml = (requestIdx.length ? `
+      <div class="notif-section">
+        <div class="notif-section-title">待處理的加入申請 <span class="notif-section-count">${requestIdx.length}</span></div>
+        ${buildNotifRowsHtml(true, requestIdx)}
+      </div>` : '')
+      + (otherIdx.length ? `
+      <div class="notif-section">
+        ${requestIdx.length ? '<div class="notif-section-title">其他通知</div>' : ''}
+        ${buildNotifRowsHtml(true, otherIdx)}
+      </div>`
+      : (notifFilter === 'unread' ? '<div class="notif-empty">沒有其他未讀通知</div>' : ''));
+  }
+
   overlay.innerHTML = `<section class="notif-full-card" role="dialog" aria-modal="true" aria-label="全部通知">
     <header class="notif-full-head">
       <div class="notif-full-title">🔔 全部通知${unread ? ` <span class="notif-full-count">${unread}</span>` : ''}</div>
@@ -3875,8 +3936,16 @@ function renderNotifFullView() {
         <button type="button" class="notif-full-close" onclick="closeNotifFullView()" aria-label="關閉通知列表">✕</button>
       </div>
     </header>
+    <div class="notif-filter-bar" role="tablist" aria-label="通知篩選">
+      <button type="button" role="tab" aria-selected="${notifFilter === 'all'}"
+        class="notif-filter-btn${notifFilter === 'all' ? ' active' : ''}"
+        onclick="setNotifFilter('all')">全部</button>
+      <button type="button" role="tab" aria-selected="${notifFilter === 'unread'}"
+        class="notif-filter-btn${notifFilter === 'unread' ? ' active' : ''}"
+        onclick="setNotifFilter('unread')">未讀${unread ? ` (${unread})` : ''}</button>
+    </div>
     <div class="notif-full-body">
-      ${buildNotifRowsHtml(true) || '<div class="notif-empty">目前沒有通知</div>'}
+      ${bodyHtml}
     </div>
   </section>`;
 }
@@ -3890,13 +3959,29 @@ async function resolveNotifJoinRequest(idx, decision, event) {
   if (event) event.stopPropagation();
   const n = notifItems[idx];
   if (!n || !n.tripId || !n.requesterUid || !window.WAI_COLLAB) return;
-  const actions = event && event.currentTarget && event.currentTarget.closest('.notif-request-actions');
-  if (actions) actions.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+  // UIUX#11：與 planner 的 resolvePlannerJoinRequest 同一套處理，兩頁行為一致。
+  const clicked = event && event.currentTarget;
+  const actions = clicked && clicked.closest('.notif-request-actions');
+  const siblings = actions ? [...actions.querySelectorAll('button')].filter(b => b !== clicked) : [];
+  siblings.forEach(btn => { btn.disabled = true; });
+  const restore = window.waiSetBusy
+    ? waiSetBusy(clicked, decision === 'accept' ? '接受中…' : '拒絕中…')
+    : () => {};
   try {
     await WAI_COLLAB.resolveTripJoinRequest(n.tripId, n.requesterUid, decision);
     showToast(decision === 'accept' ? '已接受加入申請' : '已拒絕加入申請', 'green');
+    // 成功後推播會重繪列表，clicked 通常已離開 DOM——不主動還原，避免畫面閃動。
+    // 但不能「只」依賴推播：listener 斷線／離線時列表不會重繪，按鈕會永久卡住。
+    // 掛安全網：逾時後若節點仍在，還原成可操作。
+    if (window.waiBusyUntilRerender) {
+      waiBusyUntilRerender(() => {
+        restore();
+        siblings.forEach(btn => { btn.disabled = false; });
+      }, clicked);
+    }
   } catch (error) {
-    if (actions) actions.querySelectorAll('button').forEach(btn => { btn.disabled = false; });
+    restore();
+    siblings.forEach(btn => { btn.disabled = false; });
     showToast((error && error.message) || '處理加入申請失敗', 'red');
   }
 }
@@ -4110,7 +4195,8 @@ function openAddFriendModal() {
             // async/await 之後 Event.currentTarget 會被瀏覽器清空；先保存按鈕參照，
             // 否則 Firestore 拒絕寫入時，錯誤處理本身會再丟出 null.disabled。
             const inviteBtn = ev.currentTarget;
-            inviteBtn.disabled = true;
+            // UIUX#11：原本只 disabled 變灰，使用者看不出是在送出還是壞了
+            const restoreInvite = window.waiSetBusy ? waiSetBusy(inviteBtn, '送出中…') : (inviteBtn.disabled = true, () => {});
             try {
               const inviteResult = await WAI_FRIENDS.sendInvite(
                 { email: currentUser.email, name: currentUser.name },
@@ -4126,6 +4212,9 @@ function openAddFriendModal() {
                 } catch (_notifyError) { /* 通知失敗不影響已成立的好友邀請 */ }
               }
             } catch (e) {
+              // 成功路徑走 closeWaiActionModal()，按鈕已隨彈窗消失，不需要還原；
+              // 失敗才把按鈕還原成可再按一次的狀態。
+              restoreInvite();
               if (inviteBtn && inviteBtn.isConnected) inviteBtn.disabled = false;
               const message = e && e.code === 'permission-denied'
                 ? '邀請未送出，好友權限尚未生效，請重新整理後再試。'
@@ -6589,7 +6678,7 @@ function renderCollabPanel() {
         <input class="collab-link-input" id="collabShareLink" readonly value="${link}">
         <button class="collab-mini-btn" onclick="collabCopy(document.getElementById('collabShareLink').value,'唯讀分享連結')">🔗 複製唯讀連結</button>
       </div>
-      <div class="collab-qr-row"><img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div class="collab-qr-fallback" style="display:none">QR Code 暫時無法載入，請改用邀請碼或複製連結加入。</div><div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
+      <div class="collab-qr-row"><img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div class="collab-qr-fallback" style="display:none">QR Code 暫時無法載入，請改用邀請碼或複製連結加入。</div><div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
       ${(() => {
         // 好友一鍵邀請：列出尚未加入這份行程的好友，點一下複製含邀請碼的訊息（零 schema 變動）
         try {
