@@ -4800,10 +4800,15 @@ button.notif-item { cursor: pointer; }
 @media (max-width: 1024px) {
   .collab-sync-chip { bottom: 140px; right: 12px; left: auto; }
 
-  /* 司機模式的 driver panel 從 bottom:146px 往上展開，且會蓋滿下半部；
-     晶片留在底部會壓在面板內容上。改掛到頂部（此模式下切換列已隱藏，頂部是空的）。 */
+  /* 司機模式的 driver panel 從 bottom:146px 往上展開，會蓋滿下半部，
+     晶片留在底部會壓在面板內容上；但頂部也不是空的——.map-time-banner
+     就在 top:calc(--mobile-header-height + 10px); right:12px，位置完全相同。
+     因此改為靠左，與右上的時間浮卡分邊，兩者都看得到。 */
   body.mobile-role-driver .collab-sync-chip {
     bottom: auto;
     top: calc(var(--mobile-header-height, 132px) + 10px);
+    right: auto;
+    left: 12px;
+    max-width: calc(100% - 150px);   /* 不長到右邊時間浮卡底下 */
   }
 }

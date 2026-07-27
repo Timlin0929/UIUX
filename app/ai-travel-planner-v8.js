@@ -5142,11 +5142,17 @@
   // 抽成共用函式，避免只更新其中一邊造成畫面與資料不一致。
   function syncVisitedUi(stopId, visited) {
     const label = visited ? '✓ 我已去過' : '📌 我去過了';
-    document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${stopId}"]`).forEach((b) => {
+    // stop.id 直接串進屬性選擇器：值若含 " 或 \ 會讓選擇器語法錯誤並拋 DOMException，
+    // 整個同步中斷還在 F12 留紅字。CSS.escape 是為此存在的；舊瀏覽器沒有時退回
+    // 手動跳脫反斜線與雙引號（足以修好這個選擇器情境）。
+    const idSel = window.CSS && CSS.escape
+      ? CSS.escape(String(stopId))
+      : String(stopId).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    document.querySelectorAll(`.visited-toggle-btn[data-stop-id="${idSel}"]`).forEach((b) => {
       b.textContent = label;
       b.classList.toggle('visited', visited);
     });
-    document.querySelectorAll(`.stop-visited-tag[data-stop-id="${stopId}"]`).forEach((t) => {
+    document.querySelectorAll(`.stop-visited-tag[data-stop-id="${idSel}"]`).forEach((t) => {
       t.classList.toggle('is-hidden', !visited);
     });
   }
@@ -5972,6 +5978,12 @@
     // 這個情境是真實的：編輯者在寫入失敗後被擁有者降為唯讀。
     if (collabReadOnly) {
       setCollabSyncState('readonly');
+      return;
+    }
+    // persistCurrentTripStops 還有第二個提早 return 的條件。若不一併擋，
+    // 晶片會設成 syncing 後永遠等不到結果。
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') {
+      setCollabSyncState(null); // 沒有可同步的行程，不該顯示任何同步狀態
       return;
     }
     setCollabSyncState('syncing');
@@ -6855,6 +6867,9 @@
     // 打卡只「加入」造訪清單，不可用 toggle（景點若先前已造訪，toggleVisitedPlace 會反向移除）；起訖點不計入造訪紀錄
     if (!isEndpoint && !isPlaceVisited(stop.name)) {
       toggleVisitedPlace(stop, { gpsVerified });
+      // 第三條會改變 visited 的路徑（另兩條是 handleToggleVisited、markTripAsCompleted）。
+      // 少了這行，打卡後卡面的「✓ 去過」標籤要等下次整段重繪才會出現。
+      syncVisitedUi(stop.id, true);
     }
 
     const checkinMsg = stop.type === 'start' ? `🚗 已從 ${stop.name} 出發！`
@@ -8065,6 +8080,12 @@
   // 宣告刻意放在第一個使用點（setMobileMode）之前：refreshMobileMapLayout 在檔案
   // 一萬多行之後，若把 let 留在那裡，任何在中間執行的初始化呼叫都會踩到 TDZ。
   let pendingMobileMapView = null;
+  // 地圖焦點版本號：任何「刻意改變地圖視野」的動作都讓它前進一。
+  // 還原視角的 callback 會比對排程當下的版本，版本變了就放棄還原——
+  // 只把值提早取走不夠，因為 callback 仍持有那個值並在 80ms 後套用，
+  // 期間若有新的 fitBounds，還原一樣會把它蓋掉。
+  let mapFocusSeq = 0;
+  function bumpMapFocus() { mapFocusSeq++; }
 
   function setMobileMode(mode) {
     const showMap = mode === 'map';
@@ -12831,6 +12852,7 @@
     if (Number.isFinite(maxZoom)) {
       // Stage selection mode: always use fitBounds to ensure both endpoints are visible
       // and the map never pans to the midpoint (which may be offshore for coastal routes)
+      bumpMapFocus(); // 使用者選了某個路段：這是新的焦點意圖，切分頁前的舊視角不該再蓋回來
       map.fitBounds(bounds, { padding: 80 });
       google.maps.event.addListenerOnce(map, 'idle', () => {
         if (animationToken !== routeViewportAnimationToken) return;
@@ -12845,6 +12867,7 @@
     }
     window.setTimeout(() => {
       if (animationToken !== routeViewportAnimationToken) return;
+      bumpMapFocus();
       map.fitBounds(bounds);
     }, center ? 260 : 0);
   }
@@ -13025,16 +13048,19 @@
     // callback 才讀取的話會用舊視角把剛聚焦的結果蓋回去。
     const saved = pendingMobileMapView;
     pendingMobileMapView = null;
+    const seqAtSchedule = mapFocusSeq;
     window.setTimeout(() => {
       google.maps.event.trigger(map, 'resize');
-      if (saved) {
+      // 排程後若有人動過地圖焦點（點路段、重繪路線），放棄還原舊視角——
+      // 使用者最新的意圖優先於「切分頁前的視角」。
+      if (saved && mapFocusSeq === seqAtSchedule) {
         try {
           map.setCenter(saved.center);
           map.setZoom(saved.zoom);
         } catch (error) {
           // 還原失敗就讓它維持 resize 後的預設視角，不要中斷後續的摘要渲染
         }
-      } else if (currentRouteFocusBounds || currentRouteBounds) {
+      } else if (!saved && (currentRouteFocusBounds || currentRouteBounds)) {
         try {
           map.fitBounds(currentRouteFocusBounds || currentRouteBounds);
         } catch (error) {
@@ -13149,6 +13175,7 @@
       routeBounds.extend(new google.maps.LatLng(Number(location.lat), Number(location.lng)));
     });
     currentRouteBounds = routeBounds;
+    bumpMapFocus(); // 重繪整條路線
     map.fitBounds(routeBounds);
     renderMobileRouteSheet();
 
