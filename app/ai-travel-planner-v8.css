@@ -4862,11 +4862,19 @@ button.notif-item { cursor: pointer; }
 .api-cost-row {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 4px 12px;
   padding: 5px 0;
   font-size: 14px;
   color: var(--ink2);
   border-bottom: 1px dashed var(--border);
+  /* 路線規劃那幾列的標籤與數值都偏長（「主路線（每次重畫都重打）」＋「2 次，含路況 2 段 · NT$0.650」），
+     窄螢幕擠不下。允許換行後數值會掉到第二行，靠 margin-left:auto 維持右對齊，
+     不會變成左右各半的破碎排版。 */
+  flex-wrap: wrap;
+}
+.api-cost-row > span:last-child {
+  margin-left: auto;
+  text-align: right;
 }
 .api-cost-row:last-child { border-bottom: none; }
 
@@ -4883,6 +4891,18 @@ button.notif-item { cursor: pointer; }
   font-weight: 800;
   color: var(--ink2);
   margin-bottom: 6px;
+}
+/* 合計列：把「觀測」與「推估」相加的那一行。刻意做得比一般列重，
+   但不做成大字金額——它含推估成分，不該和上方的權威數字看起來同等可靠。 */
+.api-cost-grand {
+  margin-top: 14px;
+  padding-top: 4px;
+  border-top: 2px solid var(--border);
+}
+.api-cost-grand .api-cost-row {
+  font-size: 15px;
+  color: var(--ink);
+  border-bottom: none;
 }
 .api-cost-note {
   margin-top: 8px;

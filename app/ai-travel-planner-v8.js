@@ -3985,6 +3985,95 @@
     return host;
   }
 
+  /* ── 路線規劃（Directions）用量推估 ─────────────────────────────────────
+     為什麼是推估而不是實測：Directions 由瀏覽器直接呼叫 Google，伺服器觀察不到；
+     而前端計數只在「AI 生成的統計區間」內有效，畫路線卻發生在區間外
+     （理由見下方 renderApiCost 的用戶端呼叫區塊）。
+
+     好在這件事的次數完全由行程結構決定，推得出來——以下模型逐項對齊
+     calculateAndDisplayRoute 的實際行為，改那邊的話這裡要一起改：
+
+       主路線：每兩站之間 1 次（可定位站數 − 1 段）
+         汽車／機車段帶 drivingOptions.departureTime（即時路況）→ Advanced 費率
+         走路／大眾運輸段不帶該參數 → Basic 費率
+       停車步行線（皆為 Basic，WALKING 且無路況參數）：
+         進場：每個「開車類且找得到停車場」的路段 1 次（停車場→目的地）
+         出場：車還停在別站時，走回去取車 1 次（出發地→停車場）
+         錨點規則同 calculateAndDisplayRoute：走路段不會弄丟錨點，其他非開車交通會；
+         出場線只看錨點在不在，與「本段有沒有找到停車場」無關（渲染端是兩個獨立 if）。
+
+     ★ 出場線多半不會真的發出請求：_walkRouteCache 以「無序座標對」為鍵，
+       而在 A 站停車（進場線 = P↔A）後從 A 站開走（出場線 = P↔A）是同一對座標，
+       必定命中快取。只有中間夾了走路段——在 A 停車、走到 B、再從 B 開車——
+       出場線變成 P↔B 才是新的一對。這裡只計真正會送出的那些。
+       （實測驗證：3 站全開車的行程 = 主路線 2 + 步行 2 = 4 次，與 SDK 實際請求數相符。）
+
+     停車場找不找得到只有畫過才知道。畫過的路段用 routeStageCache 的實測結果，
+     沒畫過的先假設找得到——寧可高估也不要讓使用者以為比實際便宜。
+
+     回傳分成兩部分：主路線每次重畫都會重打；步行線因為有快取，同一頁瀏覽期間
+     只有第一次會呼叫。呈現時必須分開講，混在一起會把重畫成本講得比實際高。 */
+  function estimateDirectionsUsage() {
+    let locations;
+    try {
+      locations = (buildRouteLocationsFromStops() || [])
+        .filter((l) => l && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng)));
+    } catch (_e) { return null; }
+    if (locations.length < 2) return null;
+
+    let schedule = null;
+    try { schedule = buildReplanSchedule(); } catch (_e) { schedule = null; }
+
+    let advanced = 0;      // 帶即時路況的開車類主路線
+    let basic = 0;         // 其餘主路線
+    let walkLines = 0;     // 真正會送出的停車場↔景點步行線（已扣掉快取命中）
+    let parkingAssumed = false;   // 有路段的停車場是「假設找得到」而非實測
+    let anchorStopIndex = null;   // 車停在哪一站的停車場；null = 目前沒有車停著
+
+    for (let i = 0; i < locations.length - 1; i++) {
+      const originIndex = locations[i].stopIndex;
+      const destIndex = locations[i + 1].stopIndex;
+      const mode = normalizeTransitMode(
+        (schedule && schedule[originIndex] && schedule[originIndex].transitMode) || 'car'
+      );
+      const isParkingMode = (mode === 'car' || mode === 'scooter');
+      if (!isParkingMode) {
+        basic += 1;
+        // 走路不會讓車消失（人還會走回去取車）；其他交通則代表沒開車來
+        if (mode !== 'walk') anchorStopIndex = null;
+        continue;
+      }
+      advanced += 1;
+      // 出場：只看車停在哪，與本段找不找得到停車場無關。
+      // 車就停在出發站時，這對座標等於當初的進場線 → 命中快取，不計。
+      if (anchorStopIndex !== null && anchorStopIndex !== originIndex) walkLines += 1;
+
+      const stage = Array.isArray(routeStageCache) ? routeStageCache[i] : null;
+      const measured = !!(stage && stage.parkingSearched);
+      const found = measured ? !!stage.parkingFound : true;
+      if (!measured) parkingAssumed = true;
+      if (found) walkLines += 1;                    // 進場
+      anchorStopIndex = found ? destIndex : null;   // 找不到停車場就沒有可用的錨點
+    }
+
+    const rates = (getCostConfig() && getCostConfig().mapsApiRates) || null;
+    const basicRate = Number(rates && rates.directionsBasicUsd);
+    const advRate = Number(rates && rates.directionsAdvancedUsd);
+    const priced = Number.isFinite(basicRate) && Number.isFinite(advRate);
+
+    const redrawUsd = priced ? (advanced * advRate + basic * basicRate) : null;
+    const walkUsd = priced ? (walkLines * basicRate) : null;
+    return {
+      legs: locations.length - 1,
+      advanced, basic, walkLines, parkingAssumed,
+      redrawCalls: advanced + basic,              // 每次重畫路線都會重打
+      walkCalls: walkLines,                       // 有快取，同一頁只有第一次會打
+      redrawUsd,
+      firstDrawUsd: priced ? (redrawUsd + walkUsd) : null,
+      freeCallsPerMonth: Number(rates && rates.freeCallsPerMonth) || 0
+    };
+  }
+
   async function renderApiCost() {
     const host = ensureApiCostHost();
     if (!host) return;
@@ -4050,6 +4139,15 @@
     const uniqUnpriced = Array.from(new Set(unpriced));
     const clientTotal = client.directions + client.geocoding + client.placesLegacy;
 
+    // 路線規劃推估。換台幣沿用這些 run 的匯率——多筆 run 匯率不一致時就不換算，
+    // 理由同 sumTwd：拿其中一個匯率去代表全部等於捏造數字。
+    const dirEst = estimateDirectionsUsage();
+    const fxForEst = fxRates.size === 1 ? [...fxRates][0] : null;
+    const twdOf = (usd) => (dirEst && usd !== null && fxForEst) ? usd * fxForEst : null;
+    const dirRedrawTwd = dirEst ? twdOf(dirEst.redrawUsd) : null;
+    const dirFirstTwd = dirEst ? twdOf(dirEst.firstDrawUsd) : null;
+    const grandTwd = (totalTwd !== null && dirFirstTwd !== null) ? totalTwd + dirFirstTwd : null;
+
     host.innerHTML = `
       <div class="api-cost-head">API 用量估算</div>
       <div class="api-cost-summary">
@@ -4076,6 +4174,33 @@
               : (fxRates.size > 1 ? `${fxRates.size} 種匯率（各筆分別換算）` : '—')
           }</span></div>
         </div>
+        ${dirEst ? `
+        <div class="api-cost-client">
+          <div class="api-cost-client-head">路線規劃（依行程結構推估）</div>
+          <div class="api-cost-row"><span>主路線（每次重畫都重打）</span><span>${dirEst.redrawCalls} 次${
+            dirEst.advanced ? `，含路況 ${dirEst.advanced} 段` : ''} · ${
+            dirRedrawTwd !== null ? escapeHtml(fmtTwdAmount(dirRedrawTwd))
+              : (dirEst.redrawUsd !== null ? 'US$' + dirEst.redrawUsd.toFixed(3) : '無費率')
+          }</span></div>
+          <div class="api-cost-row"><span>停車後步行線（同組合只打一次）</span><span>${dirEst.walkCalls} 次</span></div>
+          <div class="api-cost-row"><span>首次繪製合計</span><span>${dirEst.redrawCalls + dirEst.walkCalls} 次 · ${
+            dirFirstTwd !== null ? escapeHtml(fmtTwdAmount(dirFirstTwd))
+              : (dirEst.firstDrawUsd !== null ? 'US$' + dirEst.firstDrawUsd.toFixed(3) : '無費率')
+          }</span></div>
+          <div class="api-cost-note">
+            路線規劃無法由伺服器觀察，這裡是<b>依行程站數與交通工具推算</b>的次數，不是實測值。
+            切換交通工具、拖曳排序、重新規劃都會整條重畫，每重畫一次就多一份「主路線」的量；
+            步行線有快取，同一頁瀏覽期間不會重複呼叫。${dirEst.parkingAssumed
+              ? '尚未繪製的路段假設都找得到停車場（寧可高估），實際畫過後會改用實測結果。'
+              : ''}${dirEst.freeCallsPerMonth
+              ? `每月前 ${dirEst.freeCallsPerMonth.toLocaleString()} 次在免費額度內。`
+              : ''}
+          </div>
+        </div>` : ''}
+        ${grandTwd !== null ? `
+        <div class="api-cost-rows api-cost-grand">
+          <div class="api-cost-row"><span><b>合計</b>（觀測 ＋ 路線首次繪製）</span><span><b>${escapeHtml(fmtTwdAmount(grandTwd))}</b></span></div>
+        </div>` : ''}
         <div class="api-cost-client">
           <div class="api-cost-client-head">用戶端呼叫（地圖 SDK，${clientTotal ? '非後端觀察' : '未納入統計'}）</div>
           ${clientTotal
@@ -4094,8 +4219,9 @@
             : `<div class="api-cost-note">
                  路線規劃、地理編碼、舊版地點查詢由瀏覽器直接呼叫 Google，伺服器無法觀察。
                  這些呼叫發生在瀏覽行程與地圖的過程中，不在 AI 生成的統計區間內，
-                 因此這裡沒有可呈現的次數——這代表<b>未納入統計</b>，不代表沒有發生。
-                 實際用量請以 Google Cloud 主控台的 Maps 用量報表為準。
+                 因此這裡沒有可呈現的實測次數——這代表<b>未納入統計</b>，不代表沒有發生。
+                 ${dirEst ? '其中路線規劃的次數可由行程結構推算，已列在上方；地理編碼與舊版地點查詢則無從推估。'
+                          : '實際用量請以 Google Cloud 主控台的 Maps 用量報表為準。'}
                </div>`}
         </div>
         <div class="api-cost-note">

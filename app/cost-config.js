@@ -32,6 +32,20 @@ window.WAI_COST_CONFIG = {
     '蘭嶼':  2400, 
     '小琉球': 350,  
   },
+  // ── Google Maps 用戶端 API 費率（美金／次），**手動維護**，只用於畫面上的用量推估 ──
+  // 為什麼放在這裡而不是 server/pricing.js：那份是「權威費率表」，算出來的金額會寫進
+  // Firestore 當成帳上數字，所以必須留在後端不可竄改。但路線規劃是瀏覽器直接呼叫 Google、
+  // 伺服器根本觀察不到，只能依行程結構推估——推估值永遠只是顯示用，不會變成權威金額，
+  // 因此放在前端設定檔、比照油價船票由人工維護即可。
+  //   directionsAdvanced：請求帶即時路況（drivingOptions.departureTime）→ 汽車／機車段
+  //   directionsBasic   ：不帶路況參數 → 走路／大眾運輸段、以及停車場↔景點的步行線
+  // 更新方式：Google Maps Platform 定價頁 → Routes 類別（Directions API / Directions Advanced）。
+  // 最後查核：2026-07-28。免費額度會隨方案調整，變動時請一併更新 freeCallsPerMonth。
+  mapsApiRates: {
+    directionsBasicUsd: 0.005,
+    directionsAdvancedUsd: 0.010,
+    freeCallsPerMonth: 10000
+  },
   // 生成前（尚無站點）prompt 用的每模式「每日站間移動」粗估（每人每日，新台幣）。
   dailyMoveAllowance: {
     scooter: 80,
