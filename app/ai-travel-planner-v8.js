@@ -3996,23 +3996,13 @@
        主路線：每兩站之間 1 次（可定位站數 − 1 段）
          汽車／機車段帶 drivingOptions.departureTime（即時路況）→ Advanced 費率
          走路／大眾運輸段不帶該參數 → Basic 費率
-       停車步行線（皆為 Basic，WALKING 且無路況參數）：
-         進場：每個「開車類且找得到停車場」的路段 1 次（停車場→目的地）
-         出場：車還停在別站時，走回去取車 1 次（出發地→停車場）
-         錨點規則同 calculateAndDisplayRoute：走路段不會弄丟錨點，其他非開車交通會；
-         出場線只看錨點在不在，與「本段有沒有找到停車場」無關（渲染端是兩個獨立 if）。
+     只推估主路線。停車場相關的呼叫（候選查詢、步行驗證、步行線）不推估——
+     它們的次數取決於執行期才知道的事：停車場是第幾層資料源命中、候選要試幾個
+     才有一個步行 ≤12 分、以及 _walkRouteCache 有沒有命中。這些改由 mapsCallTally
+     實際計數（見 getMapsCallTally）。硬推只會給出一個看起來精確的錯數字。
 
-     ★ 出場線多半不會真的發出請求：_walkRouteCache 以「無序座標對」為鍵，
-       而在 A 站停車（進場線 = P↔A）後從 A 站開走（出場線 = P↔A）是同一對座標，
-       必定命中快取。只有中間夾了走路段——在 A 停車、走到 B、再從 B 開車——
-       出場線變成 P↔B 才是新的一對。這裡只計真正會送出的那些。
-       （實測驗證：3 站全開車的行程 = 主路線 2 + 步行 2 = 4 次，與 SDK 實際請求數相符。）
-
-     停車場找不找得到只有畫過才知道。畫過的路段用 routeStageCache 的實測結果，
-     沒畫過的先假設找得到——寧可高估也不要讓使用者以為比實際便宜。
-
-     回傳分成兩部分：主路線每次重畫都會重打；步行線因為有快取，同一頁瀏覽期間
-     只有第一次會呼叫。呈現時必須分開講，混在一起會把重畫成本講得比實際高。 */
+     回傳的是「畫一次路線」的量。改交通工具、拖曳排序、重新規劃都會整條重畫，
+     所以呈現時必須講明是單次，不能講成這趟行程的總額。 */
   function estimateDirectionsUsage() {
     let locations;
     try {
@@ -4024,36 +4014,16 @@
     let schedule = null;
     try { schedule = buildReplanSchedule(); } catch (_e) { schedule = null; }
 
-    let advanced = 0;      // 帶即時路況的開車類主路線
-    let basic = 0;         // 其餘主路線
-    let walkLines = 0;     // 真正會送出的停車場↔景點步行線（已扣掉快取命中）
-    let parkingAssumed = false;   // 有路段的停車場是「假設找得到」而非實測
-    let anchorStopIndex = null;   // 車停在哪一站的停車場；null = 目前沒有車停著
+    let advanced = 0;   // 帶即時路況的開車類主路線
+    let basic = 0;      // 其餘主路線
 
     for (let i = 0; i < locations.length - 1; i++) {
       const originIndex = locations[i].stopIndex;
-      const destIndex = locations[i + 1].stopIndex;
       const mode = normalizeTransitMode(
         (schedule && schedule[originIndex] && schedule[originIndex].transitMode) || 'car'
       );
-      const isParkingMode = (mode === 'car' || mode === 'scooter');
-      if (!isParkingMode) {
-        basic += 1;
-        // 走路不會讓車消失（人還會走回去取車）；其他交通則代表沒開車來
-        if (mode !== 'walk') anchorStopIndex = null;
-        continue;
-      }
-      advanced += 1;
-      // 出場：只看車停在哪，與本段找不找得到停車場無關。
-      // 車就停在出發站時，這對座標等於當初的進場線 → 命中快取，不計。
-      if (anchorStopIndex !== null && anchorStopIndex !== originIndex) walkLines += 1;
-
-      const stage = Array.isArray(routeStageCache) ? routeStageCache[i] : null;
-      const measured = !!(stage && stage.parkingSearched);
-      const found = measured ? !!stage.parkingFound : true;
-      if (!measured) parkingAssumed = true;
-      if (found) walkLines += 1;                    // 進場
-      anchorStopIndex = found ? destIndex : null;   // 找不到停車場就沒有可用的錨點
+      if (mode === 'car' || mode === 'scooter') advanced += 1;
+      else basic += 1;
     }
 
     const rates = (getCostConfig() && getCostConfig().mapsApiRates) || null;
@@ -4061,16 +4031,45 @@
     const advRate = Number(rates && rates.directionsAdvancedUsd);
     const priced = Number.isFinite(basicRate) && Number.isFinite(advRate);
 
-    const redrawUsd = priced ? (advanced * advRate + basic * basicRate) : null;
-    const walkUsd = priced ? (walkLines * basicRate) : null;
     return {
       legs: locations.length - 1,
-      advanced, basic, walkLines, parkingAssumed,
-      redrawCalls: advanced + basic,              // 每次重畫路線都會重打
-      walkCalls: walkLines,                       // 有快取，同一頁只有第一次會打
-      redrawUsd,
-      firstDrawUsd: priced ? (redrawUsd + walkUsd) : null,
+      advanced, basic,
+      redrawCalls: advanced + basic,   // 每次重畫路線都會重打
+      redrawUsd: priced ? (advanced * advRate + basic * basicRate) : null,
       freeCallsPerMonth: Number(rates && rates.freeCallsPerMonth) || 0
+    };
+  }
+
+  /* 唯讀快照。面板上的「實測」數字就是它，這個 hook 讓那些數字能被獨立核對
+     （對照 performance 的 DirectionsService.Route／PlaceService.* 請求數）。
+     只讀不寫，複製一份出去，外部改不到內部計數。 */
+  window.WAI_MAPS_TALLY = function () {
+    return Object.assign({ walkCacheSize: _walkRouteCache.size }, mapsCallTally);
+  };
+
+  /**
+   * 本次開啟這頁到目前為止，地圖 SDK 實際送出的呼叫（見 mapsCallTally 的說明）。
+   * 這些都有快取，同一次開啟不會重複計費，因此單位就是「開啟一次行程」。
+   */
+  function getMapsCallTally() {
+    const rates = (getCostConfig() && getCostConfig().mapsApiRates) || null;
+    const basicRate = Number(rates && rates.directionsBasicUsd);
+    const nearbyRate = Number(rates && rates.placesNearbySearchUsd);
+    const textRate = Number(rates && rates.placesTextSearchUsd);
+    const priced = Number.isFinite(basicRate) && Number.isFinite(nearbyRate) && Number.isFinite(textRate);
+    const t = mapsCallTally;
+    const walkCalls = t.walkOverlay + t.walkValidate;
+    const placesCalls = t.placesNearby + t.placesText;
+    return {
+      walkOverlay: t.walkOverlay,
+      walkValidate: t.walkValidate,
+      placesNearby: t.placesNearby,
+      placesText: t.placesText,
+      walkCalls, placesCalls,
+      total: walkCalls + placesCalls,
+      usd: priced
+        ? (walkCalls * basicRate + t.placesNearby * nearbyRate + t.placesText * textRate)
+        : null
     };
   }
 
@@ -4142,11 +4141,16 @@
     // 路線規劃推估。換台幣沿用這些 run 的匯率——多筆 run 匯率不一致時就不換算，
     // 理由同 sumTwd：拿其中一個匯率去代表全部等於捏造數字。
     const dirEst = estimateDirectionsUsage();
+    const tally = getMapsCallTally();
     const fxForEst = fxRates.size === 1 ? [...fxRates][0] : null;
-    const twdOf = (usd) => (dirEst && usd !== null && fxForEst) ? usd * fxForEst : null;
+    const twdOf = (usd) => (usd !== null && usd !== undefined && fxForEst) ? usd * fxForEst : null;
     const dirRedrawTwd = dirEst ? twdOf(dirEst.redrawUsd) : null;
-    const dirFirstTwd = dirEst ? twdOf(dirEst.firstDrawUsd) : null;
-    const grandTwd = (totalTwd !== null && dirFirstTwd !== null) ? totalTwd + dirFirstTwd : null;
+    const tallyTwd = twdOf(tally.usd);
+    // 地圖 API 小計＝主路線推估（1 次繪製）＋ 本次開啟已實際送出的停車場相關呼叫
+    const mapsTwd = (dirRedrawTwd !== null || tallyTwd !== null)
+      ? (dirRedrawTwd || 0) + (tallyTwd || 0)
+      : null;
+    const grandTwd = (totalTwd !== null && mapsTwd !== null) ? totalTwd + mapsTwd : null;
 
     /* 大金額顯示「AI ＋ 路線推估」的總額。
        曾經只放伺服器觀測值，把含推估的總額擺在明細裡叫「合計」——結果畫面上出現
@@ -4154,7 +4158,7 @@
        可稽核性靠下面那行拆解維持：哪部分是觀測、哪部分是推估，一眼看得出來，
        要跟 Google 帳單對帳時取「伺服器觀測」那一段即可。 */
     const headlineTwd = grandTwd !== null ? grandTwd : totalTwd;
-    const hasSplit = grandTwd !== null && dirFirstTwd !== null;
+    const hasSplit = grandTwd !== null && mapsTwd !== null;
 
     host.innerHTML = `
       <div class="api-cost-head">API 用量估算</div>
@@ -4168,7 +4172,7 @@
       </div>
       ${complete.length && hasSplit ? `<div class="api-cost-split">
         AI 生成 <b>${escapeHtml(fmtTwdAmount(totalTwd))}</b>（伺服器實測）
-        ＋ 路線規劃 <b>${escapeHtml(fmtTwdAmount(dirFirstTwd))}</b>（依行程結構推估）
+        ＋ 地圖 API <b>${escapeHtml(fmtTwdAmount(mapsTwd))}</b>（開啟一次行程）
       </div>` : ''}
       ${incomplete ? `<div class="api-cost-warn">有 ${incomplete} 次生成的統計未完成（中途關閉或逾時），其用量未計入上方金額。</div>` : ''}
       ${uniqUnpriced.length ? `<div class="api-cost-warn">下列項目目前沒有費率可套用，用量已記錄但金額未計入：${escapeHtml(uniqUnpriced.join('、'))}</div>` : ''}
@@ -4186,25 +4190,26 @@
               : (fxRates.size > 1 ? `${fxRates.size} 種匯率（各筆分別換算）` : '—')
           }</span></div>
         </div>
-        ${dirEst ? `
+        ${(dirEst || tally.total) ? `
         <div class="api-cost-client">
-          <div class="api-cost-client-head">路線規劃（依行程結構推估）</div>
-          <div class="api-cost-row"><span>主路線（每次重畫都重打）</span><span>${dirEst.redrawCalls} 次${
+          <div class="api-cost-client-head">地圖 API（開啟一次行程）</div>
+          ${dirEst ? `<div class="api-cost-row"><span>主路線 · 推估</span><span>${dirEst.redrawCalls} 次${
             dirEst.advanced ? `，含路況 ${dirEst.advanced} 段` : ''} · ${
             dirRedrawTwd !== null ? escapeHtml(fmtTwdAmount(dirRedrawTwd))
               : (dirEst.redrawUsd !== null ? 'US$' + dirEst.redrawUsd.toFixed(3) : '無費率')
-          }</span></div>
-          <div class="api-cost-row"><span>停車後步行線（同組合只打一次）</span><span>${dirEst.walkCalls} 次</span></div>
-          <div class="api-cost-row"><span>首次繪製合計</span><span>${dirEst.redrawCalls + dirEst.walkCalls} 次 · ${
-            dirFirstTwd !== null ? escapeHtml(fmtTwdAmount(dirFirstTwd))
-              : (dirEst.firstDrawUsd !== null ? 'US$' + dirEst.firstDrawUsd.toFixed(3) : '無費率')
-          }</span></div>
+          }</span></div>` : ''}
+          <div class="api-cost-row"><span>停車場候選查詢 · 實測</span><span>${tally.placesCalls} 次${
+            tally.placesText ? `（含 ${tally.placesText} 次文字搜尋退回）` : ''}</span></div>
+          <div class="api-cost-row"><span>停車場步行路線 · 實測</span><span>${tally.walkCalls} 次${
+            tally.walkValidate ? `（含 ${tally.walkValidate} 次候選驗證）` : ''}</span></div>
           <div class="api-cost-note">
-            路線規劃無法由伺服器觀察，這裡是<b>依行程站數與交通工具推算</b>的次數，不是實測值。
-            切換交通工具、拖曳排序、重新規劃都會整條重畫，每重畫一次就多一份「主路線」的量；
-            步行線有快取，同一頁瀏覽期間不會重複呼叫。${dirEst.parkingAssumed
-              ? '尚未繪製的路段假設都找得到停車場（寧可高估），實際畫過後會改用實測結果。'
-              : ''}${dirEst.freeCallsPerMonth
+            <b>主路線</b>依行程站數與交通工具推算——每段必打，次數只看行程結構。切換交通工具、
+            拖曳排序、重新規劃都會整條重畫，每重畫一次就多一份。
+            <b>停車場相關</b>則是本次開啟到目前為止的實際次數：它打幾次取決於停車場是第幾層資料源
+            命中（景點資料 → 台東本地資料 → TDX → Places，前三層零成本），推不出來只能實際數。
+            這些有快取，同一次開啟不會重複呼叫。${tally.placesCalls
+              ? '⚠ 候選查詢單價約是路線的 6 倍，是這裡最貴的一項。'
+              : '這趟沒走到 Places 那層，停車場查詢零成本。'}${dirEst && dirEst.freeCallsPerMonth
               ? `每月前 ${dirEst.freeCallsPerMonth.toLocaleString()} 次在免費額度內。`
               : ''}
           </div>
@@ -4228,8 +4233,11 @@
                  路線規劃、地理編碼、舊版地點查詢由瀏覽器直接呼叫 Google，伺服器無法觀察。
                  這些呼叫發生在瀏覽行程與地圖的過程中，不在 AI 生成的統計區間內，
                  因此這裡沒有可呈現的實測次數——這代表<b>未納入統計</b>，不代表沒有發生。
-                 ${dirEst ? '其中路線規劃的次數可由行程結構推算，已列在上方；地理編碼與舊版地點查詢則無從推估。'
-                          : '實際用量請以 Google Cloud 主控台的 Maps 用量報表為準。'}
+                 ${(dirEst || tally.total)
+                   ? '其中路線規劃與<b>停車場的</b>地點查詢已列在上方（分別為推估與本次開啟的實測值）。'
+                     + '其他地點查詢（景點驗證、廁所查詢等）與地理編碼目前仍未計數，'
+                     + '因此上方的地點查詢次數只涵蓋停車場那一項，不是本頁 Places 用量的全部。'
+                   : '實際用量請以 Google Cloud 主控台的 Maps 用量報表為準。'}
                </div>`}
         </div>
         <div class="api-cost-note">
@@ -12955,6 +12963,22 @@
   const _parkingCoordCache = new Map();
   const _walkRouteCache = new Map();
 
+  /* 地圖 SDK 實際呼叫計數（本次頁面開啟）。
+     為什麼這幾項用實測而不是推估：它們的次數取決於執行期才知道的結果——
+     停車場是第幾層資料源命中（景點資料／本地縣府資料／TDX／Places）、
+     候選要試幾個才有一個步行 ≤12 分。推不出來，硬推只會給出一個看起來精確的錯數字。
+     反過來主路線是每段必打、次數只看行程結構，那個才適合推估。
+
+     計數與 _walkRouteCache／_parkingCoordCache 同生命週期（都不清空），
+     所以它代表「本次開啟這頁到目前為止」的量，重新整理就重來一輪——
+     這正好是這些呼叫真正的計費單位。 */
+  const mapsCallTally = {
+    walkOverlay: 0,      // 停車場↔景點步行線（Directions WALKING）
+    walkValidate: 0,     // 停車場候選的步行時間驗證（Directions WALKING）
+    placesNearby: 0,     // 停車場候選 nearbySearch
+    placesText: 0        // nearbySearch 無結果時的 textSearch 退回
+  };
+
   function _coordKey(c) {
     return `${Number(c.lat).toFixed(4)},${Number(c.lng).toFixed(4)}`;
   }
@@ -12962,7 +12986,7 @@
   // 只接受能由 Directions 驗證、且實際步行時間在門檻內的候選，避免顯示不確定的遠距停車場。
   async function pickWalkableParking(center, candidates) {
     for (const cand of (candidates || [])) {
-      const route = await resolveWalkRoute(cand, center);
+      const route = await resolveWalkRoute(cand, center, 'validate');
       const leg = route && route.routes && route.routes[0] && route.routes[0].legs && route.routes[0].legs[0];
       const sec = leg && leg.duration ? Number(leg.duration.value) : null;
       if (Number.isFinite(sec) && sec <= PARKING_MAX_WALK_SECONDS) {
@@ -13062,11 +13086,15 @@
         .map((x) => x.cand);
     };
     return new Promise((resolve) => {
+      mapsCallTally.placesNearby += 1;
+      if (window.WAI_COST) WAI_COST.countClientCall('placesLegacy');
       service.nearbySearch(
         { location: loc, radius: PARKING_SEARCH_RADIUS_METERS, type: 'parking', keyword: '停車場' },
         (res, status) => {
           const cands = (status === okStatus()) ? toCandidates(res) : [];
           if (cands.length) { resolve(cands); return; }
+          mapsCallTally.placesText += 1;
+          if (window.WAI_COST) WAI_COST.countClientCall('placesLegacy');
           service.textSearch(
             { query: '停車場', location: loc, radius: PARKING_SEARCH_RADIUS_METERS },
             (res2, status2) => resolve(status2 === okStatus() ? toCandidates(res2) : [])
@@ -13077,24 +13105,36 @@
   }
 
   // 停車點 ↔ 景點 的步行路徑（無序快取，進/出共用），失敗回 null
-  function resolveWalkRoute(parking, attraction) {
+  // purpose：'overlay' 畫步行線 ／ 'validate' 挑停車場候選時驗證步行時間。
+  // 兩者共用同一份快取——選定的候選驗證過之後，稍後畫它的步行線會直接命中，
+  // 不會再送一次請求。計數放在快取檢查之後，數的才是真的送出去的量。
+  function resolveWalkRoute(parking, attraction, purpose = 'overlay') {
     if (!directionsService || !parking || !attraction) return Promise.resolve(null);
     const a = _coordKey(parking), b = _coordKey(attraction);
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
-    if (_walkRouteCache.has(key)) return Promise.resolve(_walkRouteCache.get(key));
-    return new Promise((resolve) => {
-      if (window.WAI_COST) WAI_COST.countClientCall('directions');
+    // 快取存的是 Promise 而不是結果。原本存結果，於是同一對座標在前一個請求還沒回來前
+    // 又被要一次時兩邊都 miss——而這正是常態：某站的進場線與下一段的出場線是同一對座標，
+    // 在同一輪同步發出。實測確認過會送出兩個一模一樣的請求（SDK 剛好幫忙併掉了，
+    // 但那是未文件化的行為，不能當成設計依賴）。存 Promise 後，後到的直接搭前一個的順風車。
+    if (_walkRouteCache.has(key)) return _walkRouteCache.get(key);
+
+    if (purpose === 'validate') mapsCallTally.walkValidate += 1;
+    else mapsCallTally.walkOverlay += 1;
+    if (window.WAI_COST) WAI_COST.countClientCall('directions');
+
+    const pending = new Promise((resolve) => {
       directionsService.route({
         origin: { lat: Number(parking.lat), lng: Number(parking.lng) },
         destination: { lat: Number(attraction.lat), lng: Number(attraction.lng) },
         travelMode: google.maps.TravelMode.WALKING
       }, (response, status) => {
         const ok = status === 'OK' || (google.maps.DirectionsStatus && status === google.maps.DirectionsStatus.OK);
-        const result = ok ? response : null;
-        _walkRouteCache.set(key, result);
-        resolve(result);
+        resolve(ok ? response : null);
       });
     });
+    // 失敗也留著（Promise 解為 null），維持原本「不重試」的行為
+    _walkRouteCache.set(key, pending);
+    return pending;
   }
 
   function _promiseWithTimeout(promise, ms) {
