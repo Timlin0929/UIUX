@@ -4148,16 +4148,28 @@
     const dirFirstTwd = dirEst ? twdOf(dirEst.firstDrawUsd) : null;
     const grandTwd = (totalTwd !== null && dirFirstTwd !== null) ? totalTwd + dirFirstTwd : null;
 
+    /* 大金額顯示「AI ＋ 路線推估」的總額。
+       曾經只放伺服器觀測值，把含推估的總額擺在明細裡叫「合計」——結果畫面上出現
+       兩個不一樣的數字，讀的人只會覺得哪裡算錯了。使用者要的是一個答案：這趟花多少。
+       可稽核性靠下面那行拆解維持：哪部分是觀測、哪部分是推估，一眼看得出來，
+       要跟 Google 帳單對帳時取「伺服器觀測」那一段即可。 */
+    const headlineTwd = grandTwd !== null ? grandTwd : totalTwd;
+    const hasSplit = grandTwd !== null && dirFirstTwd !== null;
+
     host.innerHTML = `
       <div class="api-cost-head">API 用量估算</div>
       <div class="api-cost-summary">
         ${complete.length
-          ? `<div class="api-cost-amount">${escapeHtml(fmtTwdAmount(totalTwd))}</div>
+          ? `<div class="api-cost-amount">${escapeHtml(fmtTwdAmount(headlineTwd))}</div>
              <div class="api-cost-sub">${calls} 次 AI 請求 · ${(prompt + output).toLocaleString()} Tokens${placesCalls ? ` · ${placesCalls} 次地點查詢` : ''}</div>`
           /* 一筆完成的 run 都沒有：顯示金額會變成「花了 NT$0」的錯誤印象 */
           : `<div class="api-cost-amount">—</div>
              <div class="api-cost-sub">尚無完成的統計資料</div>`}
       </div>
+      ${complete.length && hasSplit ? `<div class="api-cost-split">
+        AI 生成 <b>${escapeHtml(fmtTwdAmount(totalTwd))}</b>（伺服器實測）
+        ＋ 路線規劃 <b>${escapeHtml(fmtTwdAmount(dirFirstTwd))}</b>（依行程結構推估）
+      </div>` : ''}
       ${incomplete ? `<div class="api-cost-warn">有 ${incomplete} 次生成的統計未完成（中途關閉或逾時），其用量未計入上方金額。</div>` : ''}
       ${uniqUnpriced.length ? `<div class="api-cost-warn">下列項目目前沒有費率可套用，用量已記錄但金額未計入：${escapeHtml(uniqUnpriced.join('、'))}</div>` : ''}
       ${usageMissing ? `<div class="api-cost-warn">有 ${usageMissing} 次呼叫成功但沒讀到用量資料，實際用量可能高於上方數字。</div>` : ''}
@@ -4196,10 +4208,6 @@
               ? `每月前 ${dirEst.freeCallsPerMonth.toLocaleString()} 次在免費額度內。`
               : ''}
           </div>
-        </div>` : ''}
-        ${grandTwd !== null ? `
-        <div class="api-cost-rows api-cost-grand">
-          <div class="api-cost-row"><span><b>合計</b>（觀測 ＋ 路線首次繪製）</span><span><b>${escapeHtml(fmtTwdAmount(grandTwd))}</b></span></div>
         </div>` : ''}
         <div class="api-cost-client">
           <div class="api-cost-client-head">用戶端呼叫（地圖 SDK，${clientTotal ? '非後端觀察' : '未納入統計'}）</div>

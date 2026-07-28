@@ -4892,18 +4892,15 @@ button.notif-item { cursor: pointer; }
   color: var(--ink2);
   margin-bottom: 6px;
 }
-/* 合計列：把「觀測」與「推估」相加的那一行。刻意做得比一般列重，
-   但不做成大字金額——它含推估成分，不該和上方的權威數字看起來同等可靠。 */
-.api-cost-grand {
-  margin-top: 14px;
-  padding-top: 4px;
-  border-top: 2px solid var(--border);
+/* 大金額底下的拆解列：說明那個數字由「實測」與「推估」兩塊組成。
+   必須緊貼金額（margin-top 小），否則讀起來會像另一組獨立數字。 */
+.api-cost-split {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink2);
 }
-.api-cost-grand .api-cost-row {
-  font-size: 15px;
-  color: var(--ink);
-  border-bottom: none;
-}
+.api-cost-split b { color: var(--ink); font-weight: 700; }
 .api-cost-note {
   margin-top: 8px;
   font-size: 13px;
