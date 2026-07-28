@@ -30,6 +30,27 @@ service cloud.firestore {
       return email.trim().lower().toUtf8().toHexString().lower();
     }
 
+    // ── API 成本統計：權威欄位保護 ──
+    // 成本紀錄一律存在 generation_runs（只有後端 Admin SDK 寫得進去）。
+    // 這些名字在 micro_trips 主文件上「一個都不該出現」——
+    // 只要用戶端能自己寫，畫面就可能讀到假成本，後端算得再準也沒意義。
+    function costFieldNames() {
+      return ['authoritativeUsage', 'costUsd', 'estimatedCost', 'generationCost',
+              'generationUsage', 'pricingVersion', 'billingStatus', 'unpriced',
+              // 匯率與用戶端統計也屬於成本紀錄的一部分：漏掉它們，
+              // 擁有者仍可在主文件寫入假的 fxRate 讓顯示金額失真。
+              'fxRate', 'fxDate', 'clientReportedUsage'];
+    }
+
+    // 這次寫入有沒有碰到任何一個保留欄位（新增或修改都算）
+    function touchesCostFields() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny(costFieldNames());
+    }
+
+    function createsCostFields() {
+      return request.resource.data.keys().hasAny(costFieldNames());
+    }
+
     function isTripMemberOrOwner(tripId) {
       // ★Web 修正（2026-07-16）：先 exists() 再 get()——對不存在的行程 get().data 會直接
       // 讓整條規則求值錯誤（travel_sessions 事件、presence/member_prefs/feedback 子集合都會炸），
@@ -304,6 +325,7 @@ service cloud.firestore {
       }
 
       allow create: if signedIn()
+        && !createsCostFields()   // 新建行程時也不得夾帶假的成本欄位
         && (!('ownerUid' in request.resource.data) || request.resource.data.ownerUid == request.auth.uid)
         && hasEmail()   // ★App 移除 isEmailVerified（v3 在此會擋掉所有未驗證信箱的帳號）
         && (!('ownerEmail' in request.resource.data) || request.resource.data.ownerEmail == request.auth.token.email)
@@ -328,6 +350,7 @@ service cloud.firestore {
       );
 
       allow update: if (isOwner(resource.data)
+        && !touchesCostFields()
         && request.resource.data.get('editorEmails', []).toSet().difference(request.resource.data.get('memberEmails', []).toSet()).hasOnly([]))
         // 編輯者：白名單制。★App 補 aiTitle/aiReply/appDays/transportMode/imageUrl/editingLocks
         //（App 的共編重新生成、插圖上傳、編輯鎖都會動到）
@@ -574,6 +597,19 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
         && request.resource.data.read == true;
       allow delete: if isRecipient();
+    }
+
+    // ── API 成本統計紀錄 ──
+    // 只有後端 Admin SDK 寫得進來（Admin SDK 繞過 Rules，因此這裡 write 一律 false）。
+    // 用戶端唯讀：自己發起的 run，或該 run 已綁定行程且自己是該行程成員。
+    match /generation_runs/{runId} {
+      allow read: if signedIn() && (
+        request.auth.uid == resource.data.get('uid', null)
+        || (resource.data.get('tripId', null) != null
+            && isTripMemberOrOwner(resource.data.tripId))
+      );
+      // 權威數字的意義就在於用戶端動不了它
+      allow write: if false;
     }
 
     match /public_trips/{shareId} {

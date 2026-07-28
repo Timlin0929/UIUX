@@ -46,6 +46,14 @@ const PLACES_RATES = {
   // 'searchText|displayName,formattedAddress': { perCall: 0.00 },
 };
 
+/* ── 顯示用匯率 ─────────────────────────────────────
+   權威值一律是 costUsd；台幣只是「顯示」。但匯率必須跟著紀錄一起存下來，
+   否則日後匯率變動時，舊紀錄會被用新匯率重新換算成不同的數字。
+   放在伺服器端而非前端：前端硬編等於使用者可以改顯示金額。
+   這是人工維護的近似值，不是即時匯率——改這裡要同時更新 FX_DATE。   */
+const FX_TWD_PER_USD = 32.5;
+const FX_DATE = '2026-07-27';
+
 /* ══════════════════════════════════════════════════
    generation_runs 資料格式
    ══════════════════════════════════════════════════ */
@@ -80,8 +88,8 @@ function createRunDoc(runId, uid, nowTimestamp) {
     authoritativeUsage: { gemini: {}, places: {} },
     costUsd: 0,
     unpriced: [],           // 有用量但當時無費率可套的項目，見 summarizeRun
-    fxRate: null,           // 顯示台幣用；不參與權威計算
-    fxDate: null,
+    fxRate: FX_TWD_PER_USD, // 顯示台幣用；不參與權威計算，但要跟著紀錄存下來
+    fxDate: FX_DATE,
     clientReportedUsage: null,
     billingStatus: BILLING_STATUS.INCOMPLETE  // 先假設沒跑完，成功收尾才改 complete
   };
@@ -190,6 +198,8 @@ function summarizeRun(authoritativeUsage) {
 
 module.exports = {
   PRICING_VERSION,
+  FX_TWD_PER_USD,
+  FX_DATE,
   BILLING_STATUS,
   RUN_STATUS,
   GEMINI_RATES,

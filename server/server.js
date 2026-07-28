@@ -28,12 +28,20 @@ const rateLimit = require('express-rate-limit');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+// API 成本統計（docs/API成本統計-實作計畫.md）
+const pricing = require('./pricing');
+const genRuns = require('./generation-runs');
+const { createUsageTap, modelIdFromPath } = require('./usage-tap');
 
 const PORT = Number(process.env.PORT) || 3001;
 const VERTEX_API_KEY = (process.env.VERTEX_API_KEY || '').trim();
 const TDX_APP_ID = (process.env.TDX_APP_ID || '').trim();
 const TDX_APP_KEY = (process.env.TDX_APP_KEY || '').trim();
 const VERTEX_UPSTREAM = 'https://aiplatform.googleapis.com';
+const PLACES_UPSTREAM = 'https://places.googleapis.com';
+// Places (New) 改走代理後，伺服器需要自己的 Maps 金鑰。
+// 必須是「不受 HTTP referrer 限制」的金鑰——瀏覽器用的那把在伺服器端會被 403。
+const GOOGLE_MAPS_SERVER_KEY = (process.env.GOOGLE_MAPS_SERVER_KEY || '').trim();
 const TDX_UPSTREAM = 'https://tdx.transportdata.tw';
 
 if (!VERTEX_API_KEY) {
@@ -54,6 +62,7 @@ let adminDb = null;
 try {
   initializeApp({ credential: cert(require(SA_PATH)) });
   adminDb = getFirestore();
+  genRuns.init(adminDb);   // 用量紀錄一律走 Admin SDK 寫入（繞過 Rules，用戶端只讀）
   adminReady = true;
   console.log('[proxy] firebase-admin 已初始化（' + SA_PATH + '）');
 } catch (e) {
@@ -149,6 +158,87 @@ function publicTripData(tripId, data) {
   }
   return result;
 }
+
+// ══════════════ API 成本統計：generation_runs（需登入 + 限流）══════════════
+// 設計見 docs/API成本統計-實作計畫.md。
+// 三層信任邊界：authoritativeUsage（後端觀察，改不了）／costUsd（後端估算，改不了）
+// ／clientReportedUsage（前端回報，可竄改，UI 必須另外標示）。
+
+const genRunLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+
+// 核發一次生成的 runId。綁定呼叫者 uid，之後每次代理請求都會比對。
+app.post('/api/generation-runs/start', genRunLimiter, requireFirebaseUser, (req, res) => {
+  const runId = genRuns.createRun(req.user.uid);
+  return res.json({ ok: true, runId, pricingVersion: pricing.PRICING_VERSION });
+});
+
+// 取出目前 run（含所屬 uid 驗證）。找不到與不屬於你刻意回同一種錯誤，
+// 避免用回應差異幫人探測哪些 runId 存在。
+function ownedRunOr404(req, res) {
+  const run = genRuns.getOwnedRun(req.params.runId, req.user.uid);
+  if (!run) {
+    res.status(404).json({ error: 'run not found' });
+    return null;
+  }
+  return run;
+}
+
+// 一次性綁定 tripId。兩道檢查缺一不可：
+//   1. run 屬於呼叫者（ownedRunOr404）
+//   2. 呼叫者對這個 tripId 有權限 ← 只驗第 1 點的話，任何登入者都能把自己的 run
+//      綁到別人已知的 tripId 上，污染那筆行程的成本顯示（成員也讀得到）。
+app.post('/api/generation-runs/:runId/bind-trip', genRunLimiter, requireFirebaseUser, async (req, res) => {
+  const run = ownedRunOr404(req, res);
+  if (!run) return;
+  const tripId = String((req.body && req.body.tripId) || '').trim();
+  if (!tripId) return res.status(400).json({ error: 'invalid tripId' });
+  if (!adminReady) return res.status(503).json({ error: 'auth unavailable' });
+
+  try {
+    const snap = await adminDb.collection('micro_trips').doc(tripId).get();
+    if (!snap.exists) return res.status(404).json({ error: 'trip not found' });
+    const data = snap.data() || {};
+    const email = normalizeEmail(req.user.email || '');
+    const allowed = isTripOwner(req.user, data)
+      || (email && (data.memberEmails || []).map(normalizeEmail).includes(email))
+      || (email && (data.editorEmails || []).map(normalizeEmail).includes(email));
+    if (!allowed) return res.status(403).json({ error: 'not your trip' });
+  } catch (err) {
+    console.error('[proxy] bind-trip 權限檢查失敗：', err && err.message);
+    return res.status(500).json({ error: 'bind check failed' });
+  }
+
+  const r = genRuns.bindTrip(run, tripId);
+  if (!r.ok) return res.status(409).json({ error: 'bind failed', reason: r.reason });
+  return res.json({ ok: true });
+});
+
+// Maps JS SDK 的用量由前端回報、後端代寫，
+// 如此整份 run 文件對用戶端維持唯讀，信任邊界只有這一個缺口且集中在此。
+app.post('/api/generation-runs/:runId/client-usage', genRunLimiter, requireFirebaseUser, (req, res) => {
+  const run = ownedRunOr404(req, res);
+  if (!run) return;
+  genRuns.setClientReportedUsage(run, req.body || {});
+  return res.json({ ok: true });
+});
+
+// 收尾：落地並標記 complete。沒收到這支（關分頁、當機）的 run
+// 會由 sweep 以 incomplete 落地——顯示「統計未完成」，不是花了 0 元。
+app.post('/api/generation-runs/:runId/finish', genRunLimiter, requireFirebaseUser, async (req, res) => {
+  const run = ownedRunOr404(req, res);
+  if (!run) return;
+  // 前端會告知這次生成是否成功；失敗一律落成 incomplete，
+  // 不能因為「有呼叫 finish」就把殘缺紀錄標成完整資料。
+  const succeeded = !(req.body && req.body.ok === false);
+  const ok = await genRuns.finishRun(run, { ok: succeeded });
+  return res.json({ ok });
+});
 
 // ══════════════ Vertex AI（需登入 + 限流 + model 白名單）══════════════
 
@@ -565,6 +655,17 @@ app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, async (req, res) =
   }
   url.searchParams.set('key', VERTEX_API_KEY);
 
+  // run 必須在 fetch 之前取得並 retain：
+  //  1. 初始 fetch 就失敗時才有對象可以 markUpstreamError
+  //  2. retain 讓這個 run 在請求結束前不會被 idle 收尾或超量淘汰刪除
+  //     （串流生成可能長達數十秒，中途被刪掉的話晚到的用量會遺失）
+  const run = genRuns.getOwnedRun(req.headers['x-run-id'], req.user.uid);
+  if (req.headers['x-run-id'] && !run) {
+    // 只記 log，不回 4xx——記帳失敗絕不可以擋住生成
+    console.warn('[proxy] 收到無效的 X-Run-Id，本次不記帳（run 可能已收尾或過期）');
+  }
+  if (run) genRuns.retain(run);
+
   let upstream;
   try {
     upstream = await fetch(url, {
@@ -574,25 +675,156 @@ app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, async (req, res) =
     });
   } catch (err) {
     console.error('[proxy] vertex upstream fetch 失敗：', err && err.message);
+    if (run) { genRuns.markUpstreamError(run); genRuns.release(run).catch(() => {}); }
     return res.status(502).json({ error: 'upstream fetch failed' });
   }
 
   res.status(upstream.status);
-  res.set('Content-Type', upstream.headers.get('content-type') || 'application/json');
+  const contentType = upstream.headers.get('content-type') || 'application/json';
+  res.set('Content-Type', contentType);
   res.set('X-Accel-Buffering', 'no'); // 提示 nginx 對 SSE 不要緩衝
 
-  if (!upstream.body) { return res.end(); }
+  // ── 成本統計：旁路解析 usageMetadata（實作計畫第 3 步）──
+  // 只有帶了合法且屬於自己的 X-Run-Id 才記帳；沒帶就完全照舊，行為零差異。
+  // ★ 這裡只「多看一眼」流過去的 bytes，不改變 res.write() 的時機。
+  //   絕不可改成 await upstream.text() 先收完再送——那會讓 SSE 失去串流，
+  //   生成畫面從「站名逐一浮現」退回「轉圈到最後才一次出現」。
+  const isSse = /text\/event-stream/i.test(contentType)
+    || String(req.query.alt || '').toLowerCase() === 'sse';
+  // 上游失敗要記進 run：idle 自動收尾時才知道這趟不該標成 complete
+  if (run && !upstream.ok) genRuns.markUpstreamError(run);
+  const tap = (run && upstream.ok) ? createUsageTap(isSse) : null;
+
+  if (!upstream.body) {
+    // 回了 200 卻沒有 body：這也是「成功但讀不到 usageMetadata」的一種，
+    // 要與有 body 但解析不出用量的情況一致地記下來。
+    if (run) {
+      if (upstream.ok) genRuns.markUsageMissing(run);
+      genRuns.release(run).catch(() => {});
+    }
+    return res.end();
+  }
   try {
     const reader = upstream.body.getReader();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      res.write(Buffer.from(value));
+      const buf = Buffer.from(value);
+      res.write(buf);          // ← 轉發時機不變，維持串流
+      if (tap) tap.feed(buf);  // ← 同一塊 bytes 順便旁路解析
     }
   } catch (err) {
     console.error('[proxy] vertex 串流轉發中斷：', err && err.message);
+    // 上游先回 200、讀到一半才斷：這一樣是失敗，必須標記。
+    // 否則 idle 自動收尾時會把這筆殘缺的 run 標成 complete。
+    if (run) genRuns.markUpstreamError(run);
   }
+  if (tap) {
+    try {
+      const usage = tap.end();
+      if (usage) {
+        genRuns.addGeminiUsage(run, modelIdFromPath(upstreamPath), usage);
+      } else {
+        // 回了 200 卻讀不到 usageMetadata（SSE 格式非預期、超過 buffer 上限…）：
+        // 這筆 run 的用量並不完整，記下來讓 UI 可以揭露。
+        genRuns.markUsageMissing(run);
+      }
+    } catch (e) {
+      console.warn('[proxy] usage 記帳失敗（不影響回應）：', e && e.message);
+    }
+  }
+  if (run) genRuns.release(run).catch(() => {});
   res.end();
+});
+
+// ══════════════ Places API (New) 代理（需登入 + 限流 + 端點白名單）══════════════
+// 搬到後端的兩個理由：金鑰不進瀏覽器，以及後端才數得到實際請求次數。
+// SKU 由 endpoint + Field Mask 共同決定（欄位層級不同 → 單價不同），
+// 因此兩者都要進 key，不能只用「請求數 × 固定單價」。
+
+const PLACES_ALLOWED = new Set(['searchText', 'searchNearby']);
+
+const placesLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+
+app.post('/api/places/:method', placesLimiter, requireFirebaseUser, async (req, res) => {
+  const method = String(req.params.method || '');
+  if (!PLACES_ALLOWED.has(method)) {
+    return res.status(403).json({ error: 'method not allowed' });
+  }
+  if (!GOOGLE_MAPS_SERVER_KEY) {
+    // 明確降級：告訴前端「代理沒設定」，讓它可以決定要不要退回舊路徑，
+    // 而不是回一個看起來像「查無結果」的空陣列，讓問題被靜默吞掉。
+    return res.status(503).json({
+      error: 'places proxy unavailable',
+      message: '伺服器未設定 GOOGLE_MAPS_SERVER_KEY。'
+    });
+  }
+
+  const fieldMask = String(req.headers['x-goog-fieldmask'] || '');
+  if (!fieldMask) return res.status(400).json({ error: 'field mask required' });
+
+  // run 必須在 fetch 之前取得：網路例外時才有對象可以標記失敗。
+  const placesRun = genRuns.getOwnedRun(req.headers['x-run-id'], req.user.uid);
+  if (req.headers['x-run-id'] && !placesRun) {
+    // 與 Vertex 一致：只記 log，不回 4xx——記帳失敗不可擋住功能
+    console.warn('[proxy] places 收到無效的 X-Run-Id，本次不記帳（run 可能已收尾或過期）');
+  }
+  if (placesRun) genRuns.retain(placesRun);   // 請求結束前不得被刪除
+
+  let upstream;
+  try {
+    upstream = await fetch(`${PLACES_UPSTREAM}/v1/places:${method}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_MAPS_SERVER_KEY,
+        'X-Goog-FieldMask': fieldMask
+      },
+      body: JSON.stringify(req.body || {})
+    });
+  } catch (err) {
+    console.error('[proxy] places upstream fetch 失敗：', err && err.message);
+    if (placesRun) {
+      genRuns.markUpstreamError(placesRun);   // 網路例外也是失敗
+      genRuns.release(placesRun).catch(() => {});
+    }
+    return res.status(502).json({ error: 'upstream fetch failed' });
+  }
+
+  // body 也可能在傳輸途中中斷；不 catch 的話會變成未捕捉的 rejection，
+  // 而且這個 run 不會被標成失敗。
+  let text;
+  try {
+    text = await upstream.text();
+  } catch (err) {
+    console.error('[proxy] places 回應讀取中斷：', err && err.message);
+    if (placesRun) {
+      genRuns.markUpstreamError(placesRun);
+      genRuns.release(placesRun).catch(() => {});
+    }
+    return res.status(502).json({ error: 'upstream body failed' });
+  }
+
+  // 只有成功的請求才計費——失敗的請求 Google 多半不收錢，
+  // 記進去會讓估算偏高。
+  if (placesRun) {
+    if (upstream.ok) {
+      genRuns.addPlacesCall(placesRun, pricing.placesSkuKey(`places:${method}`, fieldMask));
+    } else {
+      genRuns.markUpstreamError(placesRun);
+    }
+    genRuns.release(placesRun).catch(() => {});
+  }
+
+  res.status(upstream.status);
+  res.set('Content-Type', upstream.headers.get('content-type') || 'application/json');
+  return res.send(text);
 });
 
 // ══════════════ TDX（client_credentials 留在伺服器；限流；路徑白名單）══════════════
