@@ -205,15 +205,9 @@ function parseDurationFromText(text) {
 async function fetchPlaceReviewsText(name, destination, apiKey) {
   if (!apiKey || !name) return '';
   try {
-    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.reviews,places.editorialSummary'
-      },
-      body: JSON.stringify({ textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 })
-    }, 10000, '評論查詢');
+    const res = await placesFetch('searchText', 'places.reviews,places.editorialSummary',
+      { textQuery: `${name} ${destination}`, languageCode: 'zh-TW', maxResultCount: 1 },
+      10000, '評論查詢', apiKey);
     if (!res.ok) return '';
     const data = await res.json();
     const place = data.places && data.places[0];
@@ -1031,12 +1025,55 @@ function parsePlanJsonFromText(text) {
 
 // 代理模式的 Vertex 呼叫需要登入（後端驗 Firebase ID token，防止陌生人燒 Vertex 額度）。
 // 回傳含 Authorization 的標頭；未登入時不帶（後端會回 401，由呼叫端顯示友善訊息）。
+// ── Places API (New) 送出（成本統計第 5 步）──
+// 設了 API_PROXY_BASE 就走後端代理：金鑰不進瀏覽器，而且後端才數得到實際請求次數
+// （5 個呼叫位置 ≠ 5 次請求——有 Promise.all 併發與逐站驗證）。
+// 沒設代理（file:// 直開、本機開發）維持直連，行為與改動前一致。
+async function placesFetch(method, fieldMask, body, timeoutMs, label, directKey) {
+  const cfg = window.TRAVEL_APP_CONFIG || {};
+  const base = String(cfg.API_PROXY_BASE || '').replace(/\/+$/, '');
+  if (base) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Goog-FieldMask': fieldMask   // 後端靠它判定 SKU，必須原樣傳過去
+    };
+    try {
+      const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+      // getIdToken 要有上限：它不在 fetchWithTimeout 的管轄內，
+      // token 更新卡住時會把整條 Places 流程無限拖住。
+      if (u) {
+        const _tok = await Promise.race([
+          u.getIdToken(),
+          new Promise((r) => setTimeout(() => r(null), 3000))
+        ]);
+        if (_tok) headers.Authorization = 'Bearer ' + _tok;
+      }
+    } catch (_e) {}
+    if (window.WAI_COST && WAI_COST.currentRunId()) headers['X-Run-Id'] = WAI_COST.currentRunId();
+    return fetchWithTimeout(`${base}/places/${method}`, {
+      method: 'POST', headers, body: JSON.stringify(body)
+    }, timeoutMs, label);
+  }
+  return fetchWithTimeout(`https://places.googleapis.com/v1/places:${method}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': directKey,
+      'X-Goog-FieldMask': fieldMask
+    },
+    body: JSON.stringify(body)
+  }, timeoutMs, label);
+}
+
 async function vertexAuthHeaders() {
   const headers = { 'Content-Type': 'application/json' };
   try {
     const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
     if (u) headers.Authorization = 'Bearer ' + (await u.getIdToken());
   } catch (_e) { /* token 取失敗就不帶，讓後端 401 */ }
+  // 成本統計：所有 Vertex 呼叫都經過這裡，runId 從這一處帶上去即可，
+  // 不必逐一改動每個呼叫點（少了漏改某一次呼叫、導致用量統計不全的風險）。
+  if (window.WAI_COST && WAI_COST.currentRunId()) headers['X-Run-Id'] = WAI_COST.currentRunId();
   return headers;
 }
 
@@ -2480,15 +2517,9 @@ async function fetchGoogleMapsPoiList(destination, interests = [], destCenter = 
       };
     }
     try {
-      const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': key,
-          'X-Goog-FieldMask': 'places.displayName,places.location,places.types,places.regularOpeningHours,places.formattedAddress,places.rating'
-        },
-        body: JSON.stringify(body)
-      }, 10000, '景點清單');
+      const res = await placesFetch('searchText',
+        'places.displayName,places.location,places.types,places.regularOpeningHours,places.formattedAddress,places.rating',
+        body, 10000, '景點清單', key);
       const data = await res.json();
       return Array.isArray(data.places) ? data.places : [];
     } catch (e) {
@@ -2600,15 +2631,8 @@ async function fetchCoordinateFromGooglePlaces(name, destination) {
         }
       };
     }
-    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'places.location,places.displayName'
-      },
-      body: JSON.stringify(body)
-    }, 10000, '座標查詢');
+    const res = await placesFetch('searchText', 'places.location,places.displayName',
+      body, 10000, '座標查詢', key);
     const data = await res.json();
     const places = Array.isArray(data.places) ? data.places : [];
     // 只接受名稱嚴格配對者；找不到就回 null（不要退回 places[0]，避免套到只共用通用後綴的別處地點）
@@ -2730,16 +2754,11 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
     }
 
     try {
-      const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchText', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': key,
-          'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours'
-        },
-        // 取多筆候選，從中挑「名稱嚴格配對且在目的地範圍內」者，避免只取 top1 而被通用後綴（漁港/部落）誤配到別的地點
-        body: JSON.stringify({ textQuery: `${name} ${resolveGeoRegion(destination)}`, languageCode: 'zh-TW', maxResultCount: 5 })
-      }, 10000, '景點驗證');
+      // 取多筆候選，從中挑「名稱嚴格配對且在目的地範圍內」者，避免只取 top1 而被通用後綴（漁港/部落）誤配到別的地點
+      const res = await placesFetch('searchText',
+        'places.displayName,places.location,places.regularOpeningHours',
+        { textQuery: `${name} ${resolveGeoRegion(destination)}`, languageCode: 'zh-TW', maxResultCount: 5 },
+        10000, '景點驗證', key);
       const data = await res.json();
       const places = Array.isArray(data.places) ? data.places : [];
       if (!places.length) return null;
@@ -2977,21 +2996,13 @@ async function fetchNearbySubSpots(coord, radius) {
   if (_nearbySubSpotCache.has(cacheKey)) return _nearbySubSpotCache.get(cacheKey);
   let out = [];
   try {
-    const res = await fetchWithTimeout('https://places.googleapis.com/v1/places:searchNearby', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'places.displayName,places.location,places.types'
-      },
-      body: JSON.stringify({
-        languageCode: 'zh-TW',
-        maxResultCount: 10,
-        rankPreference: 'DISTANCE',
-        includedTypes: ['tourist_attraction', 'park'],
-        locationRestriction: { circle: { center: { latitude: coord.lat, longitude: coord.lng }, radius } }
-      })
-    }, 10000, '附近景點');
+    const res = await placesFetch('searchNearby', 'places.displayName,places.location,places.types', {
+      languageCode: 'zh-TW',
+      maxResultCount: 10,
+      rankPreference: 'DISTANCE',
+      includedTypes: ['tourist_attraction', 'park'],
+      locationRestriction: { circle: { center: { latitude: coord.lat, longitude: coord.lng }, radius } }
+    }, 10000, '附近景點', key);
     const data = await res.json();
     out = (Array.isArray(data.places) ? data.places : [])
       .map(p => ({
@@ -6286,6 +6297,9 @@ async function _doGeneration(trip, wData) {
   isGeneratingTrip = true;
   try {
     _genPerf.start();
+    // 成本統計：整趟生成（含補景點、fillTripTimeBudget、逐站驗證…）的所有 API 呼叫
+    // 都會歸到這一個 runId。拿不到就是不統計，絕不擋住生成本身。
+    if (window.WAI_COST) await WAI_COST.startRun();
     setWizGenStep(0);
     // F3 自動避雨：出發日近且台東有雨 → 注入 prompt 規則（_rainOutlook 為暫態欄位，不入庫）
     wData._rainOutlook = await fetchTripRainOutlook(wData).catch(() => null);
@@ -6366,9 +6380,21 @@ async function _doGeneration(trip, wData) {
 
     if (firebaseEnabled) persistMicroTripInBackground(trip);
 
+    // 成本統計收尾：綁定行程後標記完成。失敗不影響行程本身，
+    // 頂多是這筆 run 停在 incomplete（顯示「統計未完成」而不是 0 元）。
+    // 用 completeRun 而不是 bindTrip().then(finishRun)：
+    // 後者的 .then() 回呼會回頭讀全域 activeRun，若使用者在 bind 重試期間
+    // 已開始下一趟生成，收尾到的會是新的那個 run。
+    if (window.WAI_COST && WAI_COST.currentRunId()) {
+      WAI_COST.completeRun(trip.id, true).catch(function () {});
+    }
+
   } catch (error) {
     localStorage.removeItem('wai_pending_gen');
     isGeneratingTrip = false;
+    // 生成失敗也要收尾，否則這個 run 會一直留在伺服器記憶體等 TTL 過期
+    // 生成失敗：收尾為 incomplete，不可標成完成（否則畫面會顯示一筆零用量的「完整」紀錄）
+    if (window.WAI_COST && WAI_COST.currentRunId()) WAI_COST.finishRun(false).catch(function () {});
     wizGenError(error.message);
     console.error('_doGeneration error:', error);
     return;

@@ -1825,6 +1825,9 @@
 
     const geocoder = new google.maps.Geocoder();
     const result = await new Promise((resolve) => {
+      // 成本統計：Maps JS SDK 由瀏覽器直連 Google，後端看不到這些請求，只能在前端數。
+      // 這個數字屬於「用戶端估算」，UI 上必須與後端權威數字分開標示。
+      if (window.WAI_COST) WAI_COST.countClientCall('geocoding');
       geocoder.geocode(
         {
           address: normalizedQuery,
@@ -3916,6 +3919,180 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeAllStopMore();
   });
+
+
+  // ══════════════════════════════════════════════════
+  // API 成本統計顯示（實作計畫第 6 步）
+  // 三件事必須做對，否則就是在誤導：
+  //   1. 權威估算與用戶端估算分開標示
+  //   2. 文案是「用量估算」不是「你已花費」（Gemini 有免費額度，純 token 數學會高估）
+  //   3. incomplete 的 run 顯示「統計未完成」，不顯示金額
+  // ══════════════════════════════════════════════════
+  // 匯率一律取自 run 文件（後端寫入）。前端硬編等於使用者可以改顯示金額，
+  // 而且日後匯率變動時，舊紀錄會被用新匯率重新換算成不同的數字。
+  function fmtTwdAmount(twd) {
+    if (twd === null) return '—';
+    // 金額極小時多給小數位，否則一律顯示 NT$0.00 看起來像沒統計到
+    return 'NT$' + (twd < 1 ? twd.toFixed(3) : twd.toFixed(2));
+  }
+
+  /**
+   * 逐筆 run 用「它自己當時的匯率」換算後再加總。
+   * 不可先把所有 USD 加起來再乘一個匯率——多筆 run 可能跨不同日期／匯率，
+   * 那樣算等於用最後一筆的匯率去換算更早的花費。
+   * 任何一筆缺匯率就回 null（顯示「—」），不假裝算得出台幣。
+   */
+  function sumTwd(runs) {
+    let total = 0;
+    for (const r of runs) {
+      const rate = Number(r && r.fxRate);
+      if (!Number.isFinite(rate) || rate <= 0) return null;
+      total += (Number(r.costUsd) || 0) * rate;
+    }
+    return total;
+  }
+
+  function sumTokens(gemini) {
+    let prompt = 0, output = 0, calls = 0;
+    Object.keys(gemini || {}).forEach((m) => {
+      const g = gemini[m] || {};
+      prompt += Number(g.promptTokens) || 0;
+      output += (Number(g.outputTokens) || 0) + (Number(g.thoughtTokens) || 0);
+      calls += Number(g.calls) || 0;
+    });
+    return { prompt, output, calls };
+  }
+
+  /**
+   * 取得成本區塊的容器；沒有就現場建立並掛到預算頁最前面。
+   * 不能用 HTML 裡的靜態 div——renderBudgetTracker() 是
+   * `document.getElementById('view-budget').innerHTML = ...`，
+   * 整個覆寫這一頁，靜態元素一進頁就被清掉。
+   */
+  function ensureApiCostHost() {
+    let host = document.getElementById('apiCostBlock');
+    if (host) return host;
+    const view = document.getElementById('view-budget');
+    if (!view) return null;
+    host = document.createElement('div');
+    host.id = 'apiCostBlock';
+    host.className = 'api-cost-block';
+    // 放在「微旅行花費追蹤」標題之後：兩者刻意分開呈現，
+    // 一個是旅費、一個是產生這份行程用掉的 API 成本，混在一起會誤導。
+    const hero = view.querySelector('.hero-section');
+    if (hero && hero.nextSibling) view.insertBefore(host, hero.nextSibling);
+    else view.appendChild(host);
+    return host;
+  }
+
+  async function renderApiCost() {
+    const host = ensureApiCostHost();
+    if (!host) return;
+    if (!window.WAI_COST || !currentItineraryId || currentItineraryId === 'TRIP-EMPTY') {
+      host.style.display = 'none';
+      return;
+    }
+
+    host.style.display = '';
+    host.innerHTML = '<div class="api-cost-loading">載入 API 用量統計中…</div>'
+      + (window.waiSkeletonRows ? waiSkeletonRows(2) : '');
+
+    const result = await WAI_COST.loadTripRuns(currentItineraryId);
+    if (!result.ok) {
+      // 讀取失敗 ≠ 沒有紀錄。講成「舊行程」會把權限錯誤或斷網藏起來。
+      host.innerHTML = '<div class="api-cost-head">API 用量估算</div>'
+        + '<div class="api-cost-empty">目前讀不到用量統計（連線或權限問題），稍後再試。</div>';
+      return;
+    }
+    const runs = result.runs;
+    if (!runs.length) {
+      // 舊行程沒有統計資料。這與「花了 0 元」完全是兩回事，必須講清楚。
+      host.innerHTML = '<div class="api-cost-head">API 用量估算</div>'
+        + '<div class="api-cost-empty">這份行程沒有用量統計資料（統計功能上線前建立的行程）。</div>';
+      return;
+    }
+
+    // Firestore 查詢未帶 orderBy，回傳順序不保證；明確依開始時間排序，
+    // 否則「最後讀到的匯率／計價版本」會隨機變動，畫面數字不穩定。
+    runs.sort((a, b) => {
+      const ta = a && a.startedAt && a.startedAt.seconds ? a.startedAt.seconds : 0;
+      const tb = b && b.startedAt && b.startedAt.seconds ? b.startedAt.seconds : 0;
+      return ta - tb;
+    });
+    const complete = runs.filter((r) => r && r.billingStatus === 'complete');
+    const incomplete = runs.length - complete.length;
+    const totalTwd = sumTwd(complete);   // 逐筆用各自匯率換算後加總
+
+    let prompt = 0, output = 0, calls = 0;
+    const unpriced = [];
+    const client = { directions: 0, geocoding: 0, placesLegacy: 0 };
+    let placesCalls = 0;
+    let pricingVersion = '';
+    const fxRates = new Set();   // 多筆 run 可能跨不同匯率，要能分辨
+    let usageMissing = 0;        // 上游回 200 卻讀不到 usageMetadata 的次數
+    let fxDate = '';
+
+    complete.forEach((r) => {
+      const t = sumTokens(r.authoritativeUsage && r.authoritativeUsage.gemini);
+      prompt += t.prompt; output += t.output; calls += t.calls;
+      const places = (r.authoritativeUsage && r.authoritativeUsage.places) || {};
+      Object.keys(places).forEach((k) => { placesCalls += Number(places[k].calls) || 0; });
+      (r.unpriced || []).forEach((u) => { if (u && u.key) unpriced.push(u.key); });
+      if (Number(r.fxRate) > 0) { fxRates.add(Number(r.fxRate)); fxDate = r.fxDate || fxDate; }
+      usageMissing += Number(r.usageMissing) || 0;
+      const c = r.clientReportedUsage || {};
+      client.directions += Number(c.directions) || 0;
+      client.geocoding += Number(c.geocoding) || 0;
+      client.placesLegacy += Number(c.placesLegacy) || 0;
+      pricingVersion = r.pricingVersion || pricingVersion;
+    });
+
+    const uniqUnpriced = Array.from(new Set(unpriced));
+    const clientTotal = client.directions + client.geocoding + client.placesLegacy;
+
+    host.innerHTML = `
+      <div class="api-cost-head">API 用量估算</div>
+      <div class="api-cost-summary">
+        ${complete.length
+          ? `<div class="api-cost-amount">${escapeHtml(fmtTwdAmount(totalTwd))}</div>
+             <div class="api-cost-sub">${calls} 次 AI 請求 · ${(prompt + output).toLocaleString()} Tokens${placesCalls ? ` · ${placesCalls} 次地點查詢` : ''}</div>`
+          /* 一筆完成的 run 都沒有：顯示金額會變成「花了 NT$0」的錯誤印象 */
+          : `<div class="api-cost-amount">—</div>
+             <div class="api-cost-sub">尚無完成的統計資料</div>`}
+      </div>
+      ${incomplete ? `<div class="api-cost-warn">有 ${incomplete} 次生成的統計未完成（中途關閉或逾時），其用量未計入上方金額。</div>` : ''}
+      ${uniqUnpriced.length ? `<div class="api-cost-warn">下列項目目前沒有費率可套用，用量已記錄但金額未計入：${escapeHtml(uniqUnpriced.join('、'))}</div>` : ''}
+      ${usageMissing ? `<div class="api-cost-warn">有 ${usageMissing} 次呼叫成功但沒讀到用量資料，實際用量可能高於上方數字。</div>` : ''}
+      <details class="api-cost-detail">
+        <summary>看明細</summary>
+        <div class="api-cost-rows">
+          <div class="api-cost-row"><span>輸入</span><span>${prompt.toLocaleString()} Tokens</span></div>
+          <div class="api-cost-row"><span>輸出與思考</span><span>${output.toLocaleString()} Tokens</span></div>
+          <div class="api-cost-row"><span>地點查詢（後端觀察）</span><span>${placesCalls} 次</span></div>
+          <div class="api-cost-row"><span>計價版本</span><span>${escapeHtml(pricingVersion || '—')}</span></div>
+          <div class="api-cost-row"><span>匯率（僅供顯示）</span><span>${
+            fxRates.size === 1
+              ? `1 USD ≈ ${[...fxRates][0]} TWD · ${escapeHtml(fxDate || '—')}`
+              : (fxRates.size > 1 ? `${fxRates.size} 種匯率（各筆分別換算）` : '—')
+          }</span></div>
+        </div>
+        <div class="api-cost-client">
+          <div class="api-cost-client-head">用戶端估算（地圖 SDK，非後端觀察）</div>
+          <div class="api-cost-row"><span>路線規劃</span><span>${client.directions} 次</span></div>
+          <div class="api-cost-row"><span>地理編碼</span><span>${client.geocoding} 次</span></div>
+          <div class="api-cost-row"><span>地點查詢（舊版 SDK）</span><span>${client.placesLegacy} 次</span></div>
+          <div class="api-cost-note">
+            這三項由瀏覽器直接呼叫 Google，伺服器無法觀察，因此數字由前端回報、
+            ${clientTotal ? '' : '目前為 0 可能代表尚未使用或未回報，'}僅供參考，未計入上方金額。
+          </div>
+        </div>
+        <div class="api-cost-note">
+          此為依當時費率計算的<b>用量估算</b>，不是 Google 的實際帳單金額。
+          免費額度、月累計級距與折扣都會影響最終帳單。
+        </div>
+      </details>`;
+  }
+  window.renderApiCost = renderApiCost;
 
   // ── 旅程拼貼（把一趟旅程的照片合成一張大圖，分享/下載）──
 
@@ -7445,7 +7622,10 @@
     document.getElementById('view-' + viewId).classList.add('active');
 
     if (viewId === 'travellog') renderTravelLog();
-    if (viewId === 'budget') renderBudgetTracker();
+    if (viewId === 'budget') {
+      renderBudgetTracker();
+      renderApiCost();   // 必須在 renderBudgetTracker 之後：它會覆寫整個 #view-budget
+    }
     if (viewId === 'members') renderMembersView();
     if (viewId === 'current-spot') renderCurrentSpotView();
     if (viewId === 'weather') refreshWeatherView(); // C5：切到天氣頁時抓 CWA 真實預報（失敗保留原內容）
@@ -7465,7 +7645,14 @@
   // F-C0032-001＝36 小時縣市預報（臺東縣），三個 12 小時時段。
   // 失敗一律靜默（保留頁面原內容，不噴紅字）；30 分鐘 localStorage 快取。
   // ══════════════════════════════════════════════════
-  const CWA_CACHE_KEY = 'wai_cwa_taitung_wk';
+  // 快取鍵帶「結構版本」。
+  // 踩過的坑：溫度欄位（minT/maxT）是後來才加進 periods 的，但舊快取還在有效期內
+  // 且不含這兩個欄位，讀出來直接渲染就變成「undefined–undefined°」。
+  // 只要 periods 的欄位有增減，就把 v 往上加一，舊快取自然失效。
+  const CWA_SCHEMA_VERSION = 2;
+  const CWA_CACHE_KEY = 'wai_cwa_taitung_wk_v' + CWA_SCHEMA_VERSION;
+  // 清掉舊版本鍵，避免它們永遠佔著 localStorage
+  try { localStorage.removeItem('wai_cwa_taitung_wk'); } catch (_e) {}
 
   // 天氣時間欄位可能是 "2026-07-09 18:00:00"（F-C0032）或 ISO "2026-07-09T18:00:00+08:00"（F-D0047）
   function parseWeatherTime(s) {
@@ -7529,7 +7716,12 @@
     if (!VERTEX_PROXY_BASE) return null; // file:// 或未設代理時測不到 /api，保留 mock
     try {
       const cached = JSON.parse(localStorage.getItem(CWA_CACHE_KEY) || 'null');
-      if (cached && cached.exp > Date.now() && cached.data) return cached.data;
+      // 版本號之外再驗一次實際欄位：萬一改了格式卻忘了加版本號，這層仍擋得住。
+      const ok = cached && cached.exp > Date.now() && cached.data
+        && Array.isArray(cached.data.periods) && cached.data.periods.length
+        && cached.data.periods.every((p) => p && 'minT' in p && 'maxT' in p);
+      if (ok) return cached.data;
+      if (cached) { try { localStorage.removeItem(CWA_CACHE_KEY); } catch (_e) {} }
     } catch (_e) {}
     let data = null;
     try { data = await fetchCwaWeekly(); } catch (_e) {}            // 主：未來一週
@@ -7641,10 +7833,19 @@
     if (chev) chev.textContent = _weatherExpanded[i] ? '▲' : '▼';
   };
 
+  /** 溫度區間文字。任何一端缺值就回「--」——
+   *  資料有問題是一回事，把 undefined 印在使用者畫面上是另一回事。 */
+  function tempRangeText(minT, maxT) {
+    const lo = Number(minT);
+    const hi = Number(maxT);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '--';
+    return `${lo}–${hi}°`;
+  }
+
   function weatherDayCardHtml(date, day, idx, expandedDefault) {
     const rainy = (Number(day.pop) || 0) >= 30;
     const icon = day.source === 'climate' ? (rainy ? '🌧️' : '⛅') : weatherIconFor(day.wx, day.pop);
-    const temp = (day.minT != null && day.maxT != null) ? `${day.minT}–${day.maxT}°` : '--';
+    const temp = tempRangeText(day.minT, day.maxT);
     const expanded = expandedDefault || _weatherExpanded[idx];
     let detailHtml;
     if (day.source === 'forecast') {
@@ -7652,7 +7853,7 @@
         <div class="wc-period">
           <span class="wc-period-time">${weatherPeriodLabel(p)}</span>
           <span>${weatherIconFor(p.wx, p.pop)} ${escapeHtml(p.wx)}</span>
-          <span class="wc-period-meta">${p.minT}–${p.maxT}° · 降雨 ${p.pop}%</span>
+          <span class="wc-period-meta">${tempRangeText(p.minT, p.maxT)} · 降雨 ${Number(p.pop) || 0}%</span>
         </div>`).join('');
     } else {
       detailHtml = `<div class="wc-climate-note">📊 ${escapeHtml(day.note)}<br><span style="color:var(--ink3)">中央氣象署預報僅到未來一週，接近出發日會自動更新為即時預報。</span></div>`;
@@ -8230,6 +8431,15 @@
       const u = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
       if (u) headers.Authorization = 'Bearer ' + (await u.getIdToken());
     } catch (_e) { /* token 取失敗就不帶，讓後端 401 */ }
+    // 成本統計：planner 沒有單一的「一次生成」邊界（重新規劃／補景點／行程圖
+    // 各自獨立觸發），因此在所有 Vertex 呼叫的共同出口自動開 run 並綁定當前行程，
+    // 閒置 45 秒後自動收尾。統計失敗不影響呼叫本身。
+    try {
+      if (window.WAI_COST && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY') {
+        const runId = await WAI_COST.ensureRun(currentItineraryId);
+        if (runId) headers['X-Run-Id'] = runId;
+      }
+    } catch (_e) { /* 統計拿不到就不帶，功能照常 */ }
     return headers;
   }
 
@@ -12727,6 +12937,7 @@
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     if (_walkRouteCache.has(key)) return Promise.resolve(_walkRouteCache.get(key));
     return new Promise((resolve) => {
+      if (window.WAI_COST) WAI_COST.countClientCall('directions');
       directionsService.route({
         origin: { lat: Number(parking.lat), lng: Number(parking.lng) },
         destination: { lat: Number(attraction.lat), lng: Number(attraction.lng) },
@@ -13214,6 +13425,7 @@
       const driveDest = destParking || destination;
       const directionRequest = buildGoogleRouteRequest(stageMode, driveOrigin, driveDest);
 
+      if (window.WAI_COST) WAI_COST.countClientCall('directions');
       directionsService.route(
         directionRequest,
         (response, status) => {
@@ -13284,12 +13496,10 @@
 
             const fallbackTransitMin = schedule[origin.stopIndex] ? schedule[origin.stopIndex].transit : 0;
             const liveLegEstimate = getGoogleLegEstimate(leg, fallbackTransitMin);
-            const savedTransitMin = schedule[origin.stopIndex] && Number(schedule[origin.stopIndex].transit);
-            // 既有行程開啟時，Google 只負責畫路線；排程沿用已保存的交通分鐘數，
-            // 避免每次重新整理都因即時路況改變行程時間。新增/修改行程時才採用 live 值。
-            const legEstimate = !recalculateTransport && Number.isFinite(savedTransitMin) && savedTransitMin > 0
-              ? { ...liveLegEstimate, durationMinutes: savedTransitMin, durationText: getTransitDurationText(savedTransitMin) }
-              : liveLegEstimate;
+            // 一律採用 Google 實測時間（原本既有行程開啟時會沿用舊估算，
+            // 導致「階段」面板顯示的時段與同一行的距離／預估互相矛盾：
+            // 例如 67.7 公里卻只排 15 分鐘，後面每一段的時間也跟著全錯）。
+            const legEstimate = liveLegEstimate;
 
             if (routeStageCache[i]) {
               routeStageCache[i].mode = stageMode;
@@ -13297,10 +13507,14 @@
               routeStageCache[i].duration = legEstimate.durationText;
 
               if (typeof origin.stopIndex === 'number' && replanStops[origin.stopIndex]) {
-                if (recalculateTransport) replanStops[origin.stopIndex].transitMin = legEstimate.durationMinutes;
-                // 既有行程開啟只畫線、不回填交通分鐘；新增/修改行程才更新並依互動狀態保存。
+                // 記憶體內一律更新，排程與畫面才會跟實測一致。
+                replanStops[origin.stopIndex].transitMin = legEstimate.durationMinutes;
+
+                // ★ 寫回 Firestore 的條件維持不變：只有「使用者實際互動過」才存檔。
+                //   載入路徑必須維持只讀不寫——否則每次重新整理都會用當下路況
+                //   覆寫掉 App 端剛寫入的資料（這是先前特意修過的行為，不可回退）。
                 if (recalculateTransport && tripUserDirty) schedulePersistTrip();
-                else if (recalculateTransport) scheduleDisplayRefit(); // 新增行程的 Google 實測交通比估算長 → 顯示端補壓縮
+                else scheduleDisplayRefit(); // 實測比估算長時，顯示端補壓縮
               }
             }
 
