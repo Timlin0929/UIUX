@@ -114,9 +114,15 @@
       var res = await requestWithLimit(base + '/generation-runs/start', {
         method: 'POST', headers: await authHeaders(), body: '{}'
       }, 4000, true);
-      if (!res.ok || !res.data) return null;
+      if (!res.ok || !res.data) {
+        console.warn('[API 成本統計] 無法建立 generation run：HTTP ' + res.status);
+        return null;
+      }
       var data = res.data;
-      if (!data.runId) return null;
+      if (!data.runId) {
+        console.warn('[API 成本統計] generation run 回應缺少 runId');
+        return null;
+      }
       pricingVersion = data.pricingVersion || '';
       return {
         id: data.runId,
@@ -129,6 +135,7 @@
         counts: { directions: 0, geocoding: 0, placesLegacy: 0 }
       };
     } catch (_e) {
+      console.warn('[API 成本統計] 建立 generation run 失敗：', _e && (_e.name || _e.message) || _e);
       return null;
     }
   }

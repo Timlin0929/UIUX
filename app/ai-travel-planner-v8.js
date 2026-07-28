@@ -4077,14 +4077,26 @@
           }</span></div>
         </div>
         <div class="api-cost-client">
-          <div class="api-cost-client-head">用戶端估算（地圖 SDK，非後端觀察）</div>
-          <div class="api-cost-row"><span>路線規劃</span><span>${client.directions} 次</span></div>
-          <div class="api-cost-row"><span>地理編碼</span><span>${client.geocoding} 次</span></div>
-          <div class="api-cost-row"><span>地點查詢（舊版 SDK）</span><span>${client.placesLegacy} 次</span></div>
-          <div class="api-cost-note">
-            這三項由瀏覽器直接呼叫 Google，伺服器無法觀察，因此數字由前端回報、
-            ${clientTotal ? '' : '目前為 0 可能代表尚未使用或未回報，'}僅供參考，未計入上方金額。
-          </div>
+          <div class="api-cost-client-head">用戶端呼叫（地圖 SDK，${clientTotal ? '非後端觀察' : '未納入統計'}）</div>
+          ${clientTotal
+            /* 有數字：代表這些呼叫確實落在某次統計區間內（例如在 planner 重新規劃、
+               開著 run 的期間又重畫了路線），照實列出。 */
+            ? `<div class="api-cost-row"><span>路線規劃</span><span>${client.directions} 次</span></div>
+               <div class="api-cost-row"><span>地理編碼</span><span>${client.geocoding} 次</span></div>
+               <div class="api-cost-row"><span>地點查詢（舊版 SDK）</span><span>${client.placesLegacy} 次</span></div>
+               <div class="api-cost-note">
+                 這三項由瀏覽器直接呼叫 Google，伺服器無法觀察，數字由前端回報，
+                 且只涵蓋統計區間內的呼叫，僅供參考，未計入上方金額。
+               </div>`
+            /* 沒有數字：這裡刻意不印「0 次」。路線規劃／地理編碼發生在瀏覽行程與地圖時，
+               而統計區間只在 AI 生成期間開啟，兩者不重疊——列 0 會被讀成「量到了，是零」，
+               但實際上是「根本沒在量」。這兩件事對判讀成本的意義完全相反。 */
+            : `<div class="api-cost-note">
+                 路線規劃、地理編碼、舊版地點查詢由瀏覽器直接呼叫 Google，伺服器無法觀察。
+                 這些呼叫發生在瀏覽行程與地圖的過程中，不在 AI 生成的統計區間內，
+                 因此這裡沒有可呈現的次數——這代表<b>未納入統計</b>，不代表沒有發生。
+                 實際用量請以 Google Cloud 主控台的 Maps 用量報表為準。
+               </div>`}
         </div>
         <div class="api-cost-note">
           此為依當時費率計算的<b>用量估算</b>，不是 Google 的實際帳單金額。
