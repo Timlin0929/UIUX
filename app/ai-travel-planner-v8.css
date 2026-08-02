@@ -1889,6 +1889,38 @@ body.prototype-mode .prototype-id-chip {
   color: var(--ink);
 }
 
+/* Google Maps 分享卡：連結、QR 與操作按鈕保持同一組視覺層級。 */
+.maps-share-card {
+  display: grid;
+  grid-template-columns: 1fr 132px;
+  gap: 14px;
+  align-items: center;
+}
+.maps-share-copy { min-width: 0; display: grid; gap: 8px; }
+.maps-share-url {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--ink2);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  resize: none;
+}
+.maps-share-qr {
+  width: 124px;
+  height: 124px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  object-fit: contain;
+}
+.maps-share-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.maps-share-actions .travel-btn { min-height: 44px; white-space: nowrap; }
+
 .travel-result-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4165,6 +4197,88 @@ button:focus-visible,.nav-pill:focus-visible,.tool-btn:focus-visible{outline:3px
   white-space: nowrap;
 }
 
+/* 停車資訊回報：與記錄停車位置分開，避免使用者誤以為會改變自己的 GPS 停車點。 */
+.parking-report-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 530;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(34, 32, 29, .5);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .2s ease, visibility 0s linear .2s;
+}
+.parking-report-overlay.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+.parking-report-sheet {
+  width: min(460px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+}
+.parking-report-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.parking-report-title { margin: 0; font-size: 20px; line-height: 1.3; color: var(--ink); }
+.parking-report-subtitle { margin: 4px 0 0; color: var(--ink2); font-size: 13px; line-height: 1.55; text-wrap: pretty; }
+.parking-report-close {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink2);
+  font-size: 18px;
+  cursor: pointer;
+}
+.parking-report-context {
+  margin: 14px 20px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--ink2);
+  font-size: 13px;
+  font-weight: 700;
+}
+.parking-report-label { display: block; margin: 16px 20px 7px; color: var(--ink); font-size: 13px; font-weight: 800; }
+.parking-report-select,
+.parking-report-note {
+  display: block;
+  width: calc(100% - 40px);
+  box-sizing: border-box;
+  margin: 0 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.parking-report-select { min-height: 46px; padding: 0 12px; }
+.parking-report-note { min-height: 88px; padding: 10px 12px; resize: vertical; line-height: 1.5; }
+.parking-report-select:focus, .parking-report-note:focus { outline: 3px solid rgba(46,125,109,.16); border-color: var(--accent); }
+.parking-report-actions { display: flex; gap: 10px; padding: 18px 20px 20px; }
+.parking-report-actions button { min-height: 46px; border-radius: 10px; padding: 10px 16px; border: 1px solid transparent; font: inherit; font-weight: 800; white-space: nowrap; cursor: pointer; }
+.parking-report-cancel { flex: 1; border-color: var(--border) !important; background: var(--surface2); color: var(--ink2); }
+.parking-report-submit { flex: 1; background: var(--accent); color: #fff; }
+
 /* 共用通知中心：探索頁與行程內各分頁維持相同操作。 */
 .notif-wrap { position: relative; flex-shrink: 0; }
 .notif-bell {
@@ -4368,6 +4482,20 @@ button.notif-item { cursor: pointer; }
   white-space: nowrap;
   cursor: pointer;
 }
+.parking-report-inline-btn {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 5px 9px;
+  border: 1px solid rgba(194, 65, 12, .25);
+  border-radius: 8px;
+  background: #fff;
+  color: #9a3412;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
 .find-car-bar {
   position: fixed;
   right: 18px;
@@ -4460,9 +4588,19 @@ button.notif-item { cursor: pointer; }
   body.mobile-role-driver .find-car-bar {
     bottom: calc(var(--mobile-driver-panel-clearance, 240px) + 12px);
   }
+  body.ai-open .find-car-bar { bottom: calc(72vh + 28px); }
+}
+
+@media (min-width: 1025px) {
+  /* AI 管家開啟時，回車列移到抽屜左側，避免蓋住輸入框與操作列。 */
+  body.ai-open .find-car-bar { right: 452px; }
 }
 
 @media (max-width: 640px) {
+  .maps-share-card { grid-template-columns: 1fr; }
+  .maps-share-qr { justify-self: center; }
+  .parking-report-overlay { align-items: flex-end; padding: 0; }
+  .parking-report-sheet { width: 100%; max-height: min(86vh, 680px); border-width: 1px 0 0; border-radius: 18px 18px 0 0; }
   .parking-record-overlay {
     align-items: flex-end;
     padding: 0;
@@ -4725,6 +4863,11 @@ button.notif-item { cursor: pointer; }
 /* 警告：僅用於使用者需要手動處理的狀況（找不到停車場／時間衝突／資料不完整）。
    樣式集中在這裡，取代原本寫在 JS 模板裡的行內 style。 */
 .transit-parking-warn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-top: 6px;
   padding: 6px 8px;
   font-size: 13px;

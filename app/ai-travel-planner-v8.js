@@ -12,6 +12,7 @@
   let currentTripStartedAt = null;
   let tripLoadFailureMessage = '';
   let parkingRecords = {};
+  let parkingReports = [];
   let parkingDraft = null;
   let parkingDraftStopId = '';
   let parkingDraftAdjusted = false;
@@ -19,6 +20,7 @@
   let parkingAdjustMap = null;
   let parkingAdjustMarker = null;
   let parkingMainMarker = null;
+  let parkingReportStopId = '';
   let lastUserLocation = null;
   let currentTripMembers = null;   // 共編成員 map（members[ekey]）
   let currentTripOwnerName = '';
@@ -1123,6 +1125,22 @@
     )));
   }
 
+  function normalizeParkingReports(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter((report) => report && report.stopId && report.type)
+      .map((report) => ({
+        id: String(report.id || `${report.stopId}-${report.at || Date.now()}`),
+        stopId: String(report.stopId),
+        stopName: String(report.stopName || '景點'),
+        type: String(report.type),
+        note: String(report.note || '').slice(0, 240),
+        at: Number(report.at) || Date.now(),
+        uid: String(report.uid || ''),
+        displayName: String(report.displayName || '旅伴')
+      }))
+      .slice(-50);
+  }
+
   function getParkingRecord(stopId) {
     const record = parkingRecords && parkingRecords[stopId];
     return record && !record.releasedAt ? record : null;
@@ -1154,7 +1172,7 @@
       const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
       const index = myTrips.findIndex((trip) => trip.id === currentItineraryId);
       if (index >= 0) {
-        const progress = { ...(myTrips[index].tripProgress || {}), parking: parkingRecords };
+        const progress = { ...(myTrips[index].tripProgress || {}), parking: parkingRecords, parkingReports };
         myTrips[index] = { ...myTrips[index], parkingRecords, tripProgress: progress };
         localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
       }
@@ -1164,7 +1182,7 @@
     if (!authed) return;
     try {
       await firebaseDb.collection('micro_trips').doc(currentItineraryId)
-        .set({ tripProgress: { parking: parkingRecords } }, { merge: true });
+        .set({ tripProgress: { parking: parkingRecords, parkingReports } }, { merge: true });
     } catch (_e) {
       feedbackToast('停車位置已保存在這台裝置', 'blue');
     }
@@ -1362,6 +1380,64 @@
     feedbackToast('🚗 已清除目前停車位置', 'blue');
   };
 
+  window.openParkingReportSheet = function(stopId) {
+    const stop = (replanStops || []).find((item) => item.id === stopId);
+    if (!stop) return;
+    parkingReportStopId = stopId;
+    const overlay = document.getElementById('parkingReportOverlay');
+    const context = document.getElementById('parkingReportContext');
+    const note = document.getElementById('parkingReportNote');
+    const type = document.getElementById('parkingReportType');
+    if (context) context.textContent = `📍 ${stop.name} · 回報會同步給這份行程的成員`;
+    if (note) note.value = '';
+    if (type) type.value = 'found';
+    if (overlay) overlay.classList.add('open');
+  };
+
+  window.closeParkingReportSheet = function() {
+    const overlay = document.getElementById('parkingReportOverlay');
+    if (overlay) overlay.classList.remove('open');
+    parkingReportStopId = '';
+  };
+
+  window.submitParkingReport = async function() {
+    const stop = (replanStops || []).find((item) => item.id === parkingReportStopId);
+    const type = document.getElementById('parkingReportType')?.value || 'found';
+    const note = String(document.getElementById('parkingReportNote')?.value || '').trim().slice(0, 240);
+    if (!stop) return window.closeParkingReportSheet();
+    const now = Date.now();
+    let reporter = '';
+    let uid = '';
+    try {
+      const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
+      reporter = (u && u.currentUser && (u.currentUser.name || u.currentUser.email)) || '';
+    } catch (_e) {}
+    if (firebaseAuth && firebaseAuth.currentUser) uid = firebaseAuth.currentUser.uid || '';
+    const existing = parkingReports.findIndex((r) => r.stopId === stop.id && r.uid === uid && now - Number(r.at || 0) < 30 * 60 * 1000);
+    const report = {
+      id: existing >= 0 ? parkingReports[existing].id : `${stop.id}-${now}`,
+      stopId: stop.id,
+      stopName: stop.name,
+      type,
+      note,
+      at: now,
+      uid,
+      displayName: reporter || '旅伴'
+    };
+    if (existing >= 0) parkingReports[existing] = report;
+    else parkingReports.push(report);
+    parkingReports = normalizeParkingReports(parkingReports);
+    const stage = routeStageCache.find((item) => item && item.destinationStopIndex === replanStops.indexOf(stop));
+    if (stage) {
+      stage.parkingSearched = true;
+      stage.parkingFound = type === 'found';
+    }
+    window.closeParkingReportSheet();
+    renderItineraryDisplay();
+    await persistParkingRecords();
+    feedbackToast('🅿️ 停車資訊回報已送出，已同步給同行者', 'green');
+  };
+
   window.openActiveParkingDetails = function() {
     const active = getActiveParkingEntry();
     if (active) window.openParkingRecordSheet(active[0], true);
@@ -1379,10 +1455,12 @@
     const active = getActiveParkingEntry();
     const distance = document.getElementById('findCarDistance');
     if (!active || !distance) return;
+    const parkedStop = (replanStops || []).find((stop) => stop && stop.id === active[0]);
+    const parkedStopName = parkedStop && parkedStop.name ? `「${parkedStop.name}」` : '目前景點';
     const meters = lastUserLocation ? measureDistanceMeters(lastUserLocation, active[1]) : Number.NaN;
     distance.textContent = Number.isFinite(meters)
-      ? `你的車在 ${formatDistanceZh(meters)}外`
-      : '已記錄停車位置';
+      ? `車輛停在 ${parkedStopName} · 距你 ${formatDistanceZh(meters)}`
+      : `車輛停在 ${parkedStopName}`;
   }
 
   function renderActiveParkingUI() {
@@ -1397,7 +1475,7 @@
     const meta = document.getElementById('findCarMeta');
     if (meta) {
       const note = record.note ? `${record.note} · ` : '';
-      meta.textContent = `${note}${getParkingTimeText(record.at)} 由 ${record.displayName || '你'}停放`;
+      meta.textContent = `${note}實際停車 ${getParkingTimeText(record.at)} · ${record.displayName || '你'}回報`;
     }
     updateActiveParkingDistance();
     if (map && window.google && google.maps) {
@@ -1435,6 +1513,10 @@
     }
     if (document.getElementById('parkingRecordOverlay')?.classList.contains('open')) {
       window.closeParkingRecordSheet();
+      return;
+    }
+    if (document.getElementById('parkingReportOverlay')?.classList.contains('open')) {
+      window.closeParkingReportSheet();
     }
   });
 
@@ -1451,23 +1533,59 @@
     window.open(url, '_blank', 'noopener');
   }
 
-  // ── 整趟導航：一次把當日所有站串成 Google Maps 多點路線（起點→中停點→終點）──
-  // Google Maps dir URL 的 waypoints 上限 9 個；超過時取前 9 個中停點並提示。
-  function openFullTripNavigation() {
+  // ── 整趟導航：一次把所有站串成 Google Maps 多點路線（起點→中停點→終點）──
+  // Google Maps dir URL 的 waypoints 上限 9 個；分享與開啟導航共用同一條 URL，避免兩個按鈕產生不同路線。
+  function getFullTripNavigationInfo() {
     const coords = (replanStops || [])
       .map((s) => ({ s, pos: getStopLatLng(s) }))
       .filter((x) => x.pos);
-    if (coords.length < 2) return feedbackToast('行程站點不足或缺座標，無法整趟導航', 'orange');
+    if (coords.length < 2) return null;
     const origin = coords[0].pos;
     const dest = coords[coords.length - 1].pos;
     const mids = coords.slice(1, -1);
-    if (mids.length > 9) feedbackToast('中停點超過 Google Maps 上限，僅帶入前 9 站', 'orange');
     const waypoints = mids.slice(0, 9).map((x) => `${x.pos.lat},${x.pos.lng}`).join('|');
     const mode = normalizeTransitMode(coords[0].s.transitMode) === 'walk' ? 'walking' : 'driving';
     const url = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lng}&destination=${dest.lat},${dest.lng}`
       + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=${mode}`;
+    return { url, totalStops: coords.length, omittedStops: Math.max(0, mids.length - 9) };
+  }
+
+  function openFullTripNavigation() {
+    const info = getFullTripNavigationInfo();
+    if (!info) return feedbackToast('行程站點不足或缺座標，無法整趟導航', 'orange');
+    if (info.omittedStops > 0) feedbackToast(`中停點超過 Google Maps 上限，僅帶入前 9 站（省略 ${info.omittedStops} 站）`, 'orange');
+    const url = info.url;
     window.open(url, '_blank', 'noopener');
   }
+
+  window.openMapShareDialog = function() {
+    if (!getFullTripNavigationInfo()) return feedbackToast('行程站點不足或缺座標，無法建立地圖分享連結', 'orange');
+    openTravelTools('export');
+  };
+
+  window.copyMapShareLink = async function() {
+    const info = getFullTripNavigationInfo();
+    if (!info) return feedbackToast('行程站點不足或缺座標，無法建立地圖分享連結', 'orange');
+    try {
+      await navigator.clipboard.writeText(info.url);
+      feedbackToast('📋 Google Maps 連結已複製', 'green');
+    } catch (_e) {
+      const input = document.getElementById('mapsShareUrl');
+      if (input) { input.focus(); input.select(); }
+      feedbackToast('請手動複製上方連結', 'orange');
+    }
+  };
+
+  window.shareMapLink = async function() {
+    const info = getFullTripNavigationInfo();
+    if (!info) return feedbackToast('行程站點不足或缺座標，無法建立地圖分享連結', 'orange');
+    const title = `${currentTripTitle || '旅遊行程'} · Google Maps 路線`;
+    const text = `${title}\n點此開啟整趟路線：${info.url}`;
+    if (navigator.share) {
+      try { await navigator.share({ title, text, url: info.url }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    await window.copyMapShareLink();
+  };
 
   // 站名短版（嵌進提示句用）：先砍掉括號附註（餐廳名常帶「(最後點餐時間…)」整串），再截長度
   function shortStopName(name, maxLen = 14) {
@@ -2305,6 +2423,7 @@
           parkingRecords = normalizeParkingRecords(
             (trip.tripProgress && trip.tripProgress.parking) || trip.parkingRecords || {}
           );
+          parkingReports = normalizeParkingReports(trip.tripProgress && trip.tripProgress.parkingReports);
           tripSessionId = `${currentItineraryId}-${Date.now()}`;
           if (trip.inviteCode) currentInviteCode = trip.inviteCode;
           
@@ -2415,7 +2534,7 @@
                     manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
                     durationLocked: s.durationLocked === true,
                     checkedInAt: s.checkedInAt || null,
-                    isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                    isOutdoor: typeof s.isOutdoor === 'boolean' ? s.isOutdoor : classifyIndoorOutdoor(s.name, s.desc), altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
                     dayIndex: clampDayIndex(s.dayIndex, 1),
                     dayIndexLocked: s.dayIndexLocked === true,
                     __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
@@ -2506,7 +2625,7 @@
                 manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
                 durationLocked: s.durationLocked === true,
                 checkedInAt: s.checkedInAt || null,
-                isOutdoor: s.isOutdoor || false, altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
+                isOutdoor: typeof s.isOutdoor === 'boolean' ? s.isOutdoor : classifyIndoorOutdoor(s.name, s.desc), altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
                 dayIndex: clampDayIndex(s.dayIndex, 1),
                 dayIndexLocked: s.dayIndexLocked === true,
                 __appExtras: extractAppStopExtras(s) // App 端欄位（time/order/stopId…）存檔時鋪回
@@ -2583,6 +2702,9 @@
                 });
               }
             }
+
+            // 舊行程可能沒有 Plan B 欄位；載入時補上正確的室內／戶外與附近替代景點。
+            ensureIndoorOutdoorMetadata(replanStops, trip.region || currentTripRegion);
 
             // 載入後若超出設定時長 → 平均壓縮（餐廳例外），僅作畫面顯示。
             // 注意：載入路徑不可寫回 Firestore——壓縮/enrich 的重算值一旦回寫，
@@ -4456,7 +4578,30 @@
 
     if (activeTravelToolTab === 'export') {
       applyExportTimeFit(); // 進入匯出分頁先檢查並壓縮超時行程，摘要與後續生成皆用壓縮後排程
+      const mapShareInfo = getFullTripNavigationInfo();
+      const mapShareUrl = mapShareInfo ? mapShareInfo.url : '';
+      const mapShareQr = mapShareUrl
+        ? `https://api.qrserver.com/v1/create-qr-code/?size=132x132&data=${encodeURIComponent(mapShareUrl)}`
+        : '';
       bodyEl.innerHTML = `
+        <div class="travel-panel maps-share-panel">
+          <div class="travel-panel-title">🗺 分享 Google Maps 路線</div>
+          <div class="travel-panel-subtitle">把整趟路線交給旅伴或司機；掃描 QR Code 可直接在 Google Maps 開啟。</div>
+          ${mapShareInfo ? `
+            <div class="maps-share-card">
+              <div class="maps-share-copy">
+                <textarea class="maps-share-url" id="mapsShareUrl" readonly aria-label="Google Maps 路線分享連結">${escapeHtml(mapShareUrl)}</textarea>
+                <div class="maps-share-actions">
+                  <button class="travel-btn primary" onclick="shareMapLink()">📤 分享連結</button>
+                  <button class="travel-btn secondary" onclick="copyMapShareLink()">📋 複製連結</button>
+                  <button class="travel-btn secondary" onclick="openFullTripNavigation()">開啟地圖</button>
+                </div>
+                ${mapShareInfo.omittedStops > 0 ? `<div class="travel-hint">Google Maps 最多支援 9 個中停點，目前省略 ${mapShareInfo.omittedStops} 站。</div>` : ''}
+              </div>
+              <img class="maps-share-qr" src="${mapShareQr}" alt="Google Maps 路線 QR Code" loading="eager">
+            </div>
+          ` : '<div class="travel-hint">目前至少需要兩個有座標的站點，才能建立 Google Maps 分享連結。</div>'}
+        </div>
         <div class="travel-panel soft">
           <div class="travel-panel-title">行程摘要</div>
           <div class="travel-panel-subtitle">${escapeHtml(getTripScheduleSummary())}</div>
@@ -6471,7 +6616,7 @@
         lng: pos ? Number(pos.lng) : (Number.isFinite(Number(s.lng)) ? Number(s.lng) : null),
         nearbyToiletLocations: s.nearbyToiletLocations || [],
         checkedInAt: s.checkedInAt || null,
-        isOutdoor: s.isOutdoor || false,
+        isOutdoor: typeof s.isOutdoor === 'boolean' ? s.isOutdoor : classifyIndoorOutdoor(s.name, s.desc),
         altNearby: s.altNearby || null,
         dayIndex: clampDayIndex(s.dayIndex, 1),
         dayIndexLocked: s.dayIndexLocked === true,
@@ -6515,6 +6660,12 @@
       parkingRecords = remoteParking;
       updateLocalTripField(currentItineraryId, 'parkingRecords', parkingRecords);
       updateLocalTripField(currentItineraryId, 'tripProgress', data.tripProgress || { parking: parkingRecords });
+      hasStatusOrIndexChange = true;
+    }
+    const remoteParkingReports = normalizeParkingReports(data.tripProgress && data.tripProgress.parkingReports);
+    if (JSON.stringify(remoteParkingReports) !== JSON.stringify(parkingReports)) {
+      parkingReports = remoteParkingReports;
+      updateLocalTripField(currentItineraryId, 'tripProgress', data.tripProgress || { parking: parkingRecords, parkingReports });
       hasStatusOrIndexChange = true;
     }
 
@@ -6582,6 +6733,7 @@
     }
 
     replanStops = buildStopsFromCollabSnapshot(data.stops);
+    ensureIndoorOutdoorMetadata(replanStops, currentTripRegion);
     collabBaseStops = replanStops.map(serializeStopForPersistence);
     activeStopMenuId = null;
     renderItineraryDisplay();
@@ -6646,7 +6798,7 @@
       mergedRadiusMeters: stop.mergedRadiusMeters || null,
       mergedMemberCoords: stop.mergedMemberCoords || null,
       checkedInAt: stop.checkedInAt || null,
-      isOutdoor: stop.isOutdoor || false,
+      isOutdoor: typeof stop.isOutdoor === 'boolean' ? stop.isOutdoor : classifyIndoorOutdoor(stop.name, stop.desc),
       altNearby: stop.altNearby || null,
       dayIndex: clampDayIndex(stop.dayIndex, 1),
       dayIndexLocked: stop.dayIndexLocked === true
@@ -7468,8 +7620,9 @@
       const parkingButtonHtml = canRecordParking
         ? `<button class="stay-edit-btn parking-stop-action" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', ${parkingRecord ? 'true' : 'false'})">🅿️ ${parkingRecord ? '修改停車點' : '我停在這'}</button>`
         : '';
+      const plannedArrivalText = schedule[index] ? minutesToClock(schedule[index].start) : '';
       const parkingInlineHtml = parkingRecord
-        ? `<div class="parking-inline-record"><span>🅿️ ${getParkingTimeText(parkingRecord.at)} 停車${parkingRecord.note ? ` · ${escapeHtml(parkingRecord.note)}` : ''}</span>${collabReadOnly ? '' : `<button type="button" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', true)">查看</button>`}</div>`
+        ? `<div class="parking-inline-record"><span>🅿️ 抵達後停車：實際 ${getParkingTimeText(parkingRecord.at)}${plannedArrivalText ? ` · 預計 ${plannedArrivalText}` : ''}${parkingRecord.note ? ` · ${escapeHtml(parkingRecord.note)}` : ''}</span>${collabReadOnly ? '' : `<button type="button" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', true)">查看</button>`}</div>`
         : '';
 
       let actionButtonsHtml = '';
@@ -7595,7 +7748,10 @@
         // 找不到停車場屬於這一類；一般交通資訊走中性色，避免整條時間軸看起來都像出錯。
         // 樣式從行內搬進 .transit-parking-warn（CSS），行內只留下語意。
         const noParkingWarn = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
-          ? `<div class="transit-parking-warn">⚠️ 此段目的地找不到鄰近停車場，請預留路邊或付費停車的時間。</div>`
+          ? `<div class="transit-parking-warn"><span>⚠️ 目的地停車：找不到鄰近停車場，請預留路邊或付費停車的時間。</span></div>`
+          : '';
+        const parkingReportBtnHtml = isDriveSeg && nextStop.type !== 'end'
+          ? `<button type="button" class="parking-report-inline-btn" onclick="event.stopPropagation(); openParkingReportSheet('${nextStop.id}')">回報停車資訊</button>`
           : '';
         html += `<div class="transit-block">
           <div class="transit-block-main">${primaryText}</div>
@@ -7606,6 +7762,7 @@
               ${segmentModeOptions.map((modeOption) => `<option value="${modeOption.value}" ${transitMode === modeOption.value ? 'selected' : ''}>${modeOption.icon} ${modeOption.label}</option>`).join('')}
             </select>
           </label>
+          ${parkingReportBtnHtml}
           ${noParkingWarn}
         </div>`;
       }
@@ -10327,6 +10484,7 @@
       ensureStopDayIndexes(replanStops, wizardData);
       // 對齊描述「（含 …）」與 mergedSubSpots，並清掉累加的重複括號
       reconcileMergedSubSpots(replanStops);
+      ensureIndoorOutdoorMetadata(replanStops, region);
 
       // 重新規劃結果若仍超出設定時長，套用與匯出相同的壓縮（停留最久優先、每站最多縮 35%）
       try {
@@ -10641,6 +10799,56 @@
       }
     }
     return out;
+  }
+
+  // Plan B 室內／戶外分類：舊行程沒有 isOutdoor 時，以景點名稱與描述補正。
+  // 回傳 true = 戶外、false = 室內（與雨天替換及畫面 badge 的既有語意一致）。
+  function classifyIndoorOutdoor(name, desc) {
+    const nameText = String(name || '');
+    const text = `${nameText} ${String(desc || '')}`;
+    const indoor = /館|博物|美術|文創|展覽|展館|中心|咖啡|餐廳|飯店|商場|市集|室內|廟|宮|寺|教堂|教會|書店|酒莊|觀光工廠|文物|故事館|車站|轉運站|火車站/;
+    const outdoor = /公園|海|沙灘|山|步道|瀑布|森林|部落|漁港|濕地|景觀|農場|牧場|溫泉|草原|溪|湖|島|岬|燈塔|花海|稻田|大道|自行車/;
+    // 景點名稱比描述優先，避免「距離車站很近」把公園誤判成室內。
+    if (outdoor.test(nameText)) return true;
+    if (indoor.test(nameText)) return false;
+    if (outdoor.test(text) && !indoor.test(text)) return true;
+    if (indoor.test(text)) return false;
+    // 無法辨識時以戶外處理，讓雨天提醒不會漏掉未知景點。
+    return true;
+  }
+
+  function ensureIndoorOutdoorMetadata(stops, destination) {
+    if (!Array.isArray(stops)) return stops;
+    const pool = getLocalPoiList(destination) || [];
+    const used = new Set(stops.map((s) => String(s && s.name || '').trim()).filter(Boolean));
+    stops.forEach((stop) => {
+      if (!stop || stop.type === 'start' || stop.type === 'end' || !stop.name) return;
+      stop.isOutdoor = classifyIndoorOutdoor(stop.name, stop.desc);
+      const here = readStopCoordinates(stop);
+      const existing = Array.isArray(stop.altNearby) ? stop.altNearby : [];
+      const normalizedExisting = existing.filter((a) => a && a.name).map((a) => ({
+        ...a,
+        // 舊資料曾把 isOutdoor 寫反；每次載入都以名稱／描述重新判定，避免替換面板整批顯示錯誤。
+        isOutdoor: classifyIndoorOutdoor(a.name, a.desc)
+      }));
+      const seen = new Set(normalizedExisting.map((a) => String(a.name).trim()));
+      const localAlternatives = pool
+        .filter((p) => p && p.name && !used.has(String(p.name).trim()) && !seen.has(String(p.name).trim())
+          && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng)))
+        .map((p) => ({
+          name: p.name,
+          lat: Number(p.lat),
+          lng: Number(p.lng),
+          desc: String(p.desc || p.description || '').slice(0, 120),
+          rating: p.rating || null,
+          isOutdoor: classifyIndoorOutdoor(p.name, p.desc || p.description),
+          distM: here ? Math.round(measureDistanceMeters(here, { lat: Number(p.lat), lng: Number(p.lng) })) : null
+        }));
+      stop.altNearby = normalizedExisting.concat(localAlternatives)
+        .sort((a, b) => (a.distM ?? Infinity) - (b.distM ?? Infinity))
+        .slice(0, 6);
+    });
+    return stops;
   }
 
   // 門票費用（只來自本地已驗證資料 poi-data.js 的 fee/feeNote，爬蟲 enrich:fees 寫入的真實票價）。
@@ -10970,6 +11178,7 @@
     const willOpen = drawer && !drawer.classList.contains('open');
     if (!drawer) return;
     drawer.classList.toggle('open');
+    document.body.classList.toggle('ai-open', willOpen);
     if (willOpen) {
       renderAiWelcomeMessage();
       const input = document.getElementById('aiChatInput');
