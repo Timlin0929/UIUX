@@ -1152,11 +1152,6 @@
       .sort((a, b) => Number(b[1].at || 0) - Number(a[1].at || 0))[0] || null;
   }
 
-  function getParkingTimeText(timestamp) {
-    const date = new Date(Number(timestamp) || Date.now());
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-  }
-
   function getParkingOwnerName() {
     try {
       const user = JSON.parse(localStorage.getItem('wai_user') || '{}');
@@ -1475,7 +1470,7 @@
     const meta = document.getElementById('findCarMeta');
     if (meta) {
       const note = record.note ? `${record.note} · ` : '';
-      meta.textContent = `${note}實際停車 ${getParkingTimeText(record.at)} · ${record.displayName || '你'}回報`;
+      meta.textContent = `${note}由 ${record.displayName || '你'} 記錄`;
     }
     updateActiveParkingDistance();
     if (map && window.google && google.maps) {
@@ -7620,9 +7615,8 @@
       const parkingButtonHtml = canRecordParking
         ? `<button class="stay-edit-btn parking-stop-action" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', ${parkingRecord ? 'true' : 'false'})">🅿️ ${parkingRecord ? '修改停車點' : '我停在這'}</button>`
         : '';
-      const plannedArrivalText = schedule[index] ? minutesToClock(schedule[index].start) : '';
       const parkingInlineHtml = parkingRecord
-        ? `<div class="parking-inline-record"><span>🅿️ 抵達後停車：實際 ${getParkingTimeText(parkingRecord.at)}${plannedArrivalText ? ` · 預計 ${plannedArrivalText}` : ''}${parkingRecord.note ? ` · ${escapeHtml(parkingRecord.note)}` : ''}</span>${collabReadOnly ? '' : `<button type="button" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', true)">查看</button>`}</div>`
+        ? `<div class="parking-inline-record"><span>🅿️ 已記錄停車位置${parkingRecord.note ? ` · ${escapeHtml(parkingRecord.note)}` : ''}</span>${collabReadOnly ? '' : `<button type="button" onclick="event.stopPropagation(); openParkingRecordSheet('${stop.id}', true)">查看</button>`}</div>`
         : '';
 
       let actionButtonsHtml = '';
@@ -8607,6 +8601,9 @@
     // 判斷「原本在地圖模式」必須在下面 toggle class 之前做，否則狀態已經被覆蓋。
     const leavingMap = !showMap && !isCurrSpot
       && document.body.classList.contains('mobile-mode-map');
+    if (leavingMap && document.getElementById('mapInfoCard')?.classList.contains('show')) {
+      closePinInfo();
+    }
     if (leavingMap && map && window.google && google.maps) {
       try {
         const c = map.getCenter();
@@ -14122,6 +14119,7 @@
 
     // 顯示卡片
     document.getElementById('mapInfoCard').classList.add('show');
+    document.body.classList.add('map-info-open');
     
     // 重置所有圖釘，並高亮當前點擊的圖釘
     document.querySelectorAll('.map-pin').forEach(p => p.classList.remove('active'));
@@ -14145,6 +14143,7 @@
   function closePinInfo() {
     // 隱藏卡片
     document.getElementById('mapInfoCard').classList.remove('show');
+    document.body.classList.remove('map-info-open');
     // 移除點擊產生的高亮
     if (currentOpenPin) {
       const pin = document.getElementById(currentOpenPin);

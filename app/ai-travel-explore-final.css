@@ -424,10 +424,17 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .collab-pref-note{margin-top:8px;font-size:12.5px;color:#c45c28;background:var(--accent2-light);border-radius:8px;padding:7px 10px;line-height:1.5;}
 .collab-save-btn{margin-top:11px;width:100%;border:none;border-radius:9px;padding:9px;font-size:14px;font-weight:700;background:#eef4ff;color:#2f6fed;cursor:pointer;}
 .collab-agg{font-size:13.5px;color:#46566a;line-height:1.7;}
-.collab-actions{margin-top:14px;display:flex;flex-direction:column;gap:9px;}
+.collab-actions{
+  position:sticky;bottom:-1px;z-index:3;
+  margin-top:14px;padding:12px 0 4px;
+  display:flex;flex-direction:column;gap:9px;
+  background:linear-gradient(180deg,rgba(255,255,255,.84),#fff 24%);
+  border-top:1px solid var(--line,#e1e8f2);
+  box-shadow:0 -10px 18px rgba(21,38,59,.06);
+}
 .collab-primary{border:none;border-radius:11px;padding:13px;font-size:16px;font-weight:800;color:#fff;cursor:pointer;
-  background:linear-gradient(135deg,#11796b,#2fa08c);}
-.collab-secondary{border:1px solid #cdd9ea;border-radius:11px;padding:11px;font-size:14px;font-weight:700;background:#fff;color:#37506e;cursor:pointer;}
+  background:linear-gradient(135deg,#11796b,#2fa08c);white-space:nowrap;}
+.collab-secondary{border:1px solid #cdd9ea;border-radius:11px;padding:11px;font-size:14px;font-weight:700;background:#fff;color:#37506e;cursor:pointer;white-space:nowrap;}
 .collab-wait{text-align:center;font-size:13px;color:var(--ink3);padding:6px;}
 .collab-friend-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;}
 .collab-friend-chips .collab-mini-btn{min-height:40px;}
@@ -586,7 +593,7 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
    分享被截斷、刪除掉到下一行。flex 讓按鈕依卡片寬度自動排 2~3 行，不會被吃掉。 */
 .mt-actions{display:flex;flex-wrap:wrap;gap:7px;}
 .mt-action-btn{
-  flex:1 1 calc(33% - 7px);min-width:0;
+  flex:0 1 calc(33.333% - 5px);min-width:0;
   min-height:40px;padding:8px 10px;border-radius:11px;font-size:14.5px;
   font-family:inherit;font-weight:700;cursor:pointer;
   border:1px solid rgba(216,209,197,.9);background:rgba(255,255,255,.82);color:#6b6459;
