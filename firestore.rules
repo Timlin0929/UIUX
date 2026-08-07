@@ -612,6 +612,37 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ── 停車回報（群眾外包停車點）──
+    // 三個集合對用戶端一律全關，只由後端 Admin SDK 讀寫（Admin SDK 繞過 Rules）。
+    // 依據：docs/停車回報群眾外包-實作計畫.md 4.3。
+    //
+    // 為什麼連 read 都關：
+    //   停車回報是「使用者當時的實體位置」。若開放 `allow read: if signedIn()`，
+    //   任何登入者都能列舉全體使用者的座標、時間與備註——那和「個別回報不對外」
+    //   的設計目標直接矛盾。前端本來就只讀靜態檔 app/parking-data.js，
+    //   沒有任何程式碼需要查詢這兩個集合，關掉不影響功能。
+    //
+    // 用戶端的合法路徑一律走後端端點：
+    //   POST   /api/parking-report              寫入（含地理圍籬與限流）
+    //   GET    /api/parking-reports/mine        只讀自己的
+    //   DELETE /api/parking-report/:destKey     刪除自己的
+    match /parking_reports/{reportId} {
+      allow read, write: if false;
+    }
+
+    // 促進後的社群停車點。爬蟲以 Admin SDK 寫入，
+    // 前端透過 export:local 產生的 app/parking-data.js 取得，不查 Firestore。
+    match /parking_lots/{lotId} {
+      allow read, write: if false;
+    }
+
+    // 刪除處理紀錄（個資刪除請求的稽核軌跡）。
+    // 內容已最小化——只有隨機請求編號、時間、結果與待重算的地點鍵，不含 uid 與座標。
+    // 即便如此仍不對用戶端開放：它能反映「某地點有人撤回過回報」。
+    match /parking_report_deletions/{recordId} {
+      allow read, write: if false;
+    }
+
     match /public_trips/{shareId} {
       // 公開分享改由後端依 tripId + shareToken 即時讀取並去敏
       allow read, write: if false;
