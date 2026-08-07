@@ -451,6 +451,65 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
   }
 });
 
+/* 我自己的停車回報。
+   這是「冷啟動緩解」的核心（計畫 6.5）：聚合門檻要 3 位不同使用者，
+   在使用者規模夠大之前幾乎不會達標。但同一個人再訪同一地點時，
+   他自己上次的回報應該立即生效——不需要別人附議。
+   查詢只用 uid 單欄位，不需要複合索引。 */
+app.get('/api/parking-reports/mine', parkingReportIpLimiter, requireFirebaseUser, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
+  try {
+    const snap = await adminDb.collection(PARKING_REPORT_COLLECTION)
+      .where('uid', '==', req.user.uid).limit(200).get();
+    const items = [];
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      // 只回前端畫得出來的欄位；note 是自己寫的可以回，但不外流給別人（本端點只回自己的）
+      if (d.type !== 'found') return;
+      if (typeof d.lat !== 'number' || typeof d.lng !== 'number') return;
+      items.push({
+        destKey: d.destKey || doc.id.split('__')[0],
+        lat: d.lat, lng: d.lng, kind: d.kind || null, note: d.note || '',
+        at: d.at && typeof d.at.toMillis === 'function' ? d.at.toMillis() : 0
+      });
+    });
+    return res.json({ ok: true, items });
+  } catch (err) {
+    console.error('[proxy] parking-reports/mine 讀取失敗：', err && err.message);
+    return res.status(500).json({ error: 'read failed' });
+  }
+});
+
+/* 刪除自己的停車回報（計畫 4.6）。
+   「用戶端不可 update/delete」與「使用者刪除個資的權利」不衝突——
+   前者約束的是 Rules 層，後端 Admin SDK 仍可刪。
+
+   ★ 真的刪除文件，不是加 deleted:true。留著原座標與 uid 不等於刪除。
+     只保留最小化的處理紀錄（隨機請求編號、時間、結果），不含座標與 uid。 */
+app.delete('/api/parking-report/:destKey', parkingReportIpLimiter, requireFirebaseUser, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
+  const destKey = String(req.params.destKey || '').trim();
+  if (!/^[a-zA-Z0-9_]{1,64}$/.test(destKey)) return res.status(400).json({ error: 'invalid destKey' });
+  const docId = `${destKey}__${req.user.uid}`;   // 只可能刪到自己的那一筆
+  try {
+    const ref = adminDb.collection(PARKING_REPORT_COLLECTION).doc(docId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'not found' });
+    await ref.delete();
+    // 處理紀錄：可稽核「有處理過刪除請求」，但無法從中還原是誰、在哪
+    await adminDb.collection('parking_report_deletions').add({
+      requestId: crypto.randomBytes(8).toString('hex'),
+      at: Timestamp.now(),
+      result: 'deleted',
+      needsReaggregation: destKey     // 供後續聚合重算；destKey 是地點不是個人
+    }).catch(() => {});
+    return res.json({ ok: true, deleted: true });
+  } catch (err) {
+    console.error('[proxy] parking-report 刪除失敗：', err && err.message);
+    return res.status(500).json({ error: 'delete failed' });
+  }
+});
+
 app.post('/api/collab/invites/verify', collabLimiter, requireFirebaseUser, async (req, res) => {
   // 信箱驗證只屬於註冊提示；登入後的共編功能僅要求 token 具有 email。
   if (!req.user.email) {

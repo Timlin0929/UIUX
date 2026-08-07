@@ -564,6 +564,43 @@
       .map((x) => x.cand);
   }
 
+  /* ── 我自己的停車回報（計畫 6.5 的冷啟動緩解）─────────────────
+     聚合門檻要 3 位不同使用者，在使用者規模夠大之前幾乎不會達標。
+     但同一個人再訪同一地點時，他自己上次停過的位置立即可用——不必等別人附議。
+     這一層讓「第一筆回報就對回報者本人有價值」，也是本功能第一個真的有人受益的時刻。 */
+  let myParkingPoints = [];
+  let myParkingLoaded = false;
+
+  async function loadMyParkingPoints() {
+    if (myParkingLoaded) return myParkingPoints;
+    myParkingLoaded = true;   // 失敗也不重試：這是加值資訊，不該拖慢每次畫路線
+    const base = VERTEX_PROXY_BASE;
+    if (!base || !firebaseAuth || !firebaseAuth.currentUser) return myParkingPoints;
+    try {
+      const token = await firebaseAuth.currentUser.getIdToken();
+      const res = await fetch(`${base}/parking-reports/mine`, {
+        headers: { Authorization: 'Bearer ' + token }
+      });
+      if (!res.ok) return myParkingPoints;
+      const data = await res.json();
+      myParkingPoints = Array.isArray(data.items) ? data.items : [];
+    } catch (_e) { /* 拿不到就當作沒有，不影響既有的四層解析 */ }
+    return myParkingPoints;
+  }
+
+  /** 取離 center 最近、我自己回報過的停車點 */
+  function pickMyParkingPoint(center) {
+    if (!center || !myParkingPoints.length) return null;
+    const cand = myParkingPoints
+      .filter((p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng)))
+      .map((p) => ({ ...p, source: 'mine', parkingNote: '' }));
+    const near = nearbyTdxParkings(center, cand, PARKING_SEARCH_RADIUS_METERS, 1)[0];
+    if (!near) return null;
+    near.parkingSource = 'mine';
+    near.name = near.name || '你上次停的位置';
+    return near;
+  }
+
   // 促進門檻：≥3 位不同回報者才算「正式」，才有資格插隊到景點資料之前。
   // 與 docs/停車回報群眾外包-實作計畫.md 6.6 的聚合門檻對齊；那邊算 uid 數，這邊只看已促進的結果。
   const COMMUNITY_PARKING_MIN_REPORTS = 3;
@@ -14066,7 +14103,16 @@
     const finish = (coord) => { _parkingCoordCache.set(key, coord || null); return coord || null; };
 
     try {
-      // 0) 已促進的社群回報點（≥3 位不同回報者）排在最前面。
+      // 0-a) 我自己回報過的位置最優先——那是我親自停過的地方，沒有比這更可信的來源。
+      //      不必等聚合門檻，第一筆就生效（計畫 6.5）。
+      await loadMyParkingPoints();
+      const mine = pickMyParkingPoint(center);
+      if (mine) {
+        const chosenMine = await pickWalkableParking(center, [mine]);
+        if (chosenMine) return finish(chosenMine);
+      }
+
+      // 0-b) 已促進的社群回報點（≥3 位不同回報者）排在景點資料之前。
       //    理由：getEmbeddedParkingHint 是文字啟發式——它比對景點描述裡有沒有「停車場」三個字，
       //    命中時回傳的是「景點本身的座標」，並不是真的停車場位置。
       //    而促進過的社群點是多位使用者實際停過、帶真實座標的位置，資訊品質嚴格較高。
@@ -14792,11 +14838,13 @@
             if (destParking) {
               drawParkingMarker(i, destParking, renderToken);
               // 有來源說明就顯示（原本寫死只認 'stop-data'，社群點永遠顯示不出來）
-              const sourceNote = destParking.parkingSource === 'community'
-                ? buildCommunityParkingNote(destParking)
-                : (destParking.parkingSource === 'stop-data'
-                  ? (destParking.parkingNote || '請以現場標示為準')
-                  : '');
+              const sourceNote = destParking.parkingSource === 'mine'
+                ? '你上次停在這裡。'
+                : (destParking.parkingSource === 'community'
+                  ? buildCommunityParkingNote(destParking)
+                  : (destParking.parkingSource === 'stop-data'
+                    ? (destParking.parkingNote || '請以現場標示為準')
+                    : ''));
               if (sourceNote) {
                 const note = stageDiv.querySelector('.stage-walk-note');
                 if (note) {
