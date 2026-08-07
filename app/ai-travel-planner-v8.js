@@ -1129,6 +1129,37 @@
     )));
   }
 
+  /* 停車回報的狀況分類。前四項是「這一站有沒有地方停」（給之後來的人），
+     後兩項是「資料有錯」（給系統修資料）——收件人不同，因此在 UI 上分組，
+     在畫面提示上也只有前四項會影響行程顯示。
+     'closed' 在舊資料裡代表「已關閉或不存在」，新版拆成 closed（今天沒開）與 missing（不存在）；
+     舊值仍可解析，顯示走 closed 的措辭。 */
+  const PARKING_REPORT_TYPES = new Set(['found', 'full', 'closed', 'none', 'wrong', 'missing']);
+
+  // 只有這四種會改變行程上的停車提示；wrong/missing 是資料修正，不該影響當下的行程顯示
+  const PARKING_REPORT_WARN = {
+    full: '⚠️ 目的地停車：旅伴回報停車場已滿，請預留找位或改停路邊的時間。',
+    closed: '⚠️ 目的地停車：旅伴回報停車場今天沒開，請預留另尋車位的時間。',
+    none: '⚠️ 目的地停車：旅伴回報附近沒有停車場，請預留路邊或付費停車的時間。'
+    // found 不列：有人成功停過，就沒有需要警告的事
+  };
+
+  /**
+   * 取某一站最新的一筆停車狀況回報（wrong/missing 屬資料修正，不算在內）。
+   * 提示改由這裡驅動而不是 routeStageCache——後者每次重畫路線都會被沖掉（:14544），
+   * 回報的效果撐不過一次換交通工具（見計畫書 1.2 缺口三）。
+   */
+  function getLatestParkingReport(stopId) {
+    if (!stopId || !Array.isArray(parkingReports)) return null;
+    let best = null;
+    for (const r of parkingReports) {
+      if (!r || r.stopId !== stopId) continue;
+      if (r.type === 'wrong' || r.type === 'missing') continue;
+      if (!best || Number(r.at || 0) > Number(best.at || 0)) best = r;
+    }
+    return best;
+  }
+
   // ⚠ 這是白名單映射：沒列在這裡的欄位會被靜默丟掉。新增回報欄位時務必一併加進來，
   //   否則送出後立刻被 submitParkingReport 的 normalize 濾掉，且不會有任何錯誤訊息。
   function normalizeParkingReports(value) {
@@ -1423,9 +1454,9 @@
     const context = document.getElementById('parkingReportContext');
     const note = document.getElementById('parkingReportNote');
     const type = document.getElementById('parkingReportType');
-    if (context) context.textContent = `📍 ${stop.name} · 回報會同步給這份行程的成員`;
+    if (context) context.textContent = `📍 ${stop.name} · 回報會用來改善這個地點的停車資訊`;
     if (note) note.value = '';
-    if (type) type.value = 'found';
+    if (type) type.value = '';   // 預設未選取：誤按送出不該被記成「我停好了」
     if (overlay) overlay.classList.add('open');
   };
 
@@ -1469,20 +1500,21 @@
     if (existing >= 0) parkingReports[existing] = report;
     else parkingReports.push(report);
     parkingReports = normalizeParkingReports(parkingReports);
-    const stage = routeStageCache.find((item) => item && item.destinationStopIndex === replanStops.indexOf(stop));
-    if (stage) {
-      stage.parkingSearched = true;
-      stage.parkingFound = type === 'found';
-    }
+    // 這裡刻意不再改寫 routeStageCache 的 parkingSearched/parkingFound。
+    // 那兩個欄位在下一次畫路線時就會被實際解析結果覆寫（:14544），
+    // 而且它們是布林——把五種狀況壓成「有沒有找到」正是要修的問題。
+    // 提示改由 getLatestParkingReport() 從持久化的回報推導，效果撐得過重畫。
     renderItineraryDisplay();
     await persistParkingRecords();
   }
 
   window.submitParkingReport = async function() {
     const stop = (replanStops || []).find((item) => item.id === parkingReportStopId);
-    const type = document.getElementById('parkingReportType')?.value || 'found';
+    const type = document.getElementById('parkingReportType')?.value || '';
     const note = String(document.getElementById('parkingReportNote')?.value || '').trim().slice(0, 240);
     if (!stop) return window.closeParkingReportSheet();
+    // 沒選狀況就送出：不要猜他的意思，留在原地要他選
+    if (!PARKING_REPORT_TYPES.has(type)) return feedbackToast('請先選擇目前的停車狀況', 'orange');
 
     // 「找到停車場」必須帶座標，否則這則回報只會把警示關掉，卻不告訴任何人要去哪停。
     // 先把草稿擱著，轉去既有的位置標記流程；標好按儲存時才真正送出（saveParkingRecord）。
@@ -8483,8 +8515,19 @@
         // 警告色只留給「使用者需要手動處理」的狀況（建議書 UIUX#6）——
         // 找不到停車場屬於這一類；一般交通資訊走中性色，避免整條時間軸看起來都像出錯。
         // 樣式從行內搬進 .transit-parking-warn（CSS），行內只留下語意。
-        const noParkingWarn = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
-          ? `<div class="transit-parking-warn"><span>⚠️ 目的地停車：找不到鄰近停車場，請預留路邊或付費停車的時間。</span></div>`
+        // 旅伴回報優先於系統的自動判定——現場的人看到的比資料庫準。
+        // 回報存活於 tripProgress，不像 routeStageCache 會被重畫沖掉。
+        const latestReport = getLatestParkingReport(nextStop.id);
+        const reportWarnText = latestReport ? PARKING_REPORT_WARN[latestReport.type] : '';
+        const systemWarnText = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
+          ? '⚠️ 目的地停車：找不到鄰近停車場，請預留路邊或付費停車的時間。'
+          : '';
+        // 有人回報「我停好了」（found）就不顯示任何警告，即使系統自己找不到停車場
+        const warnText = latestReport
+          ? reportWarnText
+          : systemWarnText;
+        const noParkingWarn = warnText
+          ? `<div class="transit-parking-warn"><span>${escapeHtml(warnText)}</span></div>`
           : '';
         const parkingReportBtnHtml = isDriveSeg && nextStop.type !== 'end'
           ? `<button type="button" class="parking-report-inline-btn" onclick="event.stopPropagation(); openParkingReportSheet('${nextStop.id}')">回報停車資訊</button>`

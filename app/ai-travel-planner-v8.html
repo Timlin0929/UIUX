@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260806-parking0a">
+<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260806-parking0b">
 <link rel="stylesheet" href="./design-tokens.css?v=20260727-fix3">
 <script src="./icons.js?v=20260727-fix3"></script>
 <script src="./ui-feedback.js?v=20260727-fix3"></script>
@@ -530,18 +530,26 @@
     <header class="parking-report-head">
       <div>
         <h2 class="parking-report-title" id="parkingReportTitle">回報停車資訊</h2>
-        <p class="parking-report-subtitle" id="parkingReportSubtitle">協助同行者知道這一站的停車狀況。</p>
+        <p class="parking-report-subtitle" id="parkingReportSubtitle">回報停車狀況，幫助之後來的人。</p>
       </div>
       <button class="parking-report-close" type="button" onclick="closeParkingReportSheet()" aria-label="關閉停車資訊回報視窗">✕</button>
     </header>
     <div class="parking-report-context" id="parkingReportContext"></div>
     <label class="parking-report-label" for="parkingReportType">目前狀況</label>
+    <!-- 兩組的收件人不同：上組是給之後來的人的停車狀況，下組是給系統的資料修正。
+         預設留在未選取（value=""），避免誤按送出就記成「我停好了」。 -->
     <select class="parking-report-select" id="parkingReportType">
-      <option value="found">找到停車場</option>
-      <option value="full">停車場已滿</option>
-      <option value="closed">停車場已關閉或不存在</option>
-      <option value="wrong">地圖位置或資訊不正確</option>
-      <option value="none">附近沒有可用停車位</option>
+      <option value="" disabled selected>請選擇…</option>
+      <optgroup label="這一站有沒有地方停？">
+        <option value="found">✅ 有，我停好了（接著標位置）</option>
+        <option value="full">⚠️ 有停車場，但已經滿了</option>
+        <option value="closed">⚠️ 有停車場，但今天沒開</option>
+        <option value="none">❌ 附近真的沒有停車場</option>
+      </optgroup>
+      <optgroup label="資料有錯">
+        <option value="wrong">🛠 停車場位置標錯了</option>
+        <option value="missing">🛠 這個停車場不存在</option>
+      </optgroup>
     </select>
     <label class="parking-report-label" for="parkingReportNote">補充說明（選填）</label>
     <textarea class="parking-report-note" id="parkingReportNote" maxlength="240" rows="3" placeholder="例如：入口在景點南側、B2 已滿、只接受現金…"></textarea>
@@ -627,7 +635,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="./collab.js?v=20260726-fix3"></script>
 <script src="./notifications.js?v=20260722-friends2"></script>
-<script src="./ai-travel-planner-v8.js?v=20260806-parking0a"></script>
+<script src="./ai-travel-planner-v8.js?v=20260806-parking0b"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。
