@@ -3832,7 +3832,20 @@
 
   // 拍照/選圖入口（旅記卡「📷」與打卡後 snackbar 共用）。
   // input 不加 capture：iOS 加了會強制只開相機；不加則 iOS/Android 都出「拍照／相簿」選單。
-  function addPhotoForVisitedPlace(name) {
+  function visitedPlaceNameKey(name) {
+    return String(name || '').replace(/\s/g, '').toLowerCase();
+  }
+
+  function visitedPlaceMatches(place, name, tripId = null) {
+    if (visitedPlaceNameKey(place && place.name) !== visitedPlaceNameKey(name)) return false;
+    return tripId == null || String((place && place.tripId) || '') === String(tripId || '');
+  }
+
+  function findVisitedPlaceRecord(name, tripId = null) {
+    return getVisitedPlaces().find((place) => visitedPlaceMatches(place, name, tripId));
+  }
+
+  function addPhotoForVisitedPlace(name, tripId = null) {
     if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) {
       return feedbackToast('登入後即可保存照片', 'orange');
     }
@@ -3843,6 +3856,8 @@
       input.addEventListener('change', handleTripPhotoInputChange);
     }
     input.dataset.targetName = name || '';
+    input.dataset.targetTripId = tripId == null ? '' : String(tripId);
+    input.dataset.targetTripScoped = tripId == null ? '0' : '1';
     input.value = '';
     input.click();
   }
@@ -3850,10 +3865,10 @@
   async function handleTripPhotoInputChange(evt) {
     const input = evt.target;
     const name = input.dataset.targetName || '';
+    const tripId = input.dataset.targetTripScoped === '1' ? input.dataset.targetTripId : null;
     const files = Array.from(input.files || []);
     if (!name || !files.length) return;
-    const norm = name.replace(/\s/g, '').toLowerCase();
-    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    const rec = findVisitedPlaceRecord(name, tripId);
     if (!rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
     feedbackToast('📤 照片上傳中…', 'blue');
     const results = [];
@@ -3864,7 +3879,7 @@
       } catch (e) { console.warn('照片上傳失敗：', e); }
     }
     if (!results.length) return feedbackToast('照片上傳失敗，這張格式可能不支援', 'orange');
-    updateVisitedPlaceByName(name, (p) => { (p.photos = p.photos || []).push(...results); });
+    updateVisitedPlaceByName(name, (p) => { (p.photos = p.photos || []).push(...results); }, tripId);
     if (document.getElementById('travellog-list')) renderTravelLog();
     feedbackToast(`✅ 已加入 ${results.length} 張照片`, 'green');
   }
@@ -3885,7 +3900,7 @@
     const btn = document.createElement('button');
     btn.className = 'photo-prompt-btn';
     btn.textContent = '拍照';
-    btn.onclick = () => { bar.remove(); addPhotoForVisitedPlace(stopName); };
+    btn.onclick = () => { bar.remove(); addPhotoForVisitedPlace(stopName, currentItineraryId || null); };
     const close = document.createElement('button');
     close.className = 'photo-prompt-close';
     close.textContent = '✕';
@@ -3899,10 +3914,9 @@
     }, 7000);
   }
 
-  function deleteTripPhoto(name, ts) {
+  function deleteTripPhoto(name, ts, tripId = null) {
     if (!window.confirm('要刪除這張照片嗎？')) return;
-    const norm = (name || '').replace(/\s/g, '').toLowerCase();
-    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    const rec = findVisitedPlaceRecord(name, tripId);
     const photo = rec && Array.isArray(rec.photos) ? rec.photos.find(p => p && p.ts === ts) : null;
     if (photo && photo.path && firebaseStorage) {
       firebaseStorage.ref(photo.path).delete().catch(() => {}); // object-not-found 等一律靜默
@@ -3913,19 +3927,20 @@
       const i = arr.findIndex(x => x && (photo ? x.path === photo.path : x.ts === ts));
       if (i >= 0) arr.splice(i, 1);
       p.photos = arr;
-    });
+    }, tripId);
     renderTravelLog();
     feedbackToast('照片已刪除', 'blue');
   }
 
   // ── Week4 C6：景點文字備註（個人資料：visitedSpots.note，走既有整包鏡像同步）──
   let noteModalTargetName = null;
+  let noteModalTargetTripId = null;
 
-  function openVisitedNoteModal(name) {
-    const norm = (name || '').replace(/\s/g, '').toLowerCase();
-    const rec = getVisitedPlaces().find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+  function openVisitedNoteModal(name, tripId = null) {
+    const rec = findVisitedPlaceRecord(name, tripId);
     if (!rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
     noteModalTargetName = name;
+    noteModalTargetTripId = tripId;
     const sub = document.getElementById('noteModalSub');
     const textarea = document.getElementById('noteModalText');
     if (sub) sub.textContent = rec.name; // textContent 塞名稱、textarea 用 .value——都不進 innerHTML，無 XSS 面
@@ -3939,13 +3954,14 @@
     const modal = document.getElementById('noteModal');
     if (modal) modal.style.display = 'none';
     noteModalTargetName = null;
+    noteModalTargetTripId = null;
   }
 
   function saveVisitedNote() {
     if (!noteModalTargetName) return closeNoteModal();
     const textarea = document.getElementById('noteModalText');
     const val = textarea ? String(textarea.value).trim().slice(0, 500) : '';
-    const ok = updateVisitedPlaceByName(noteModalTargetName, (p) => { p.note = val; });
+    const ok = updateVisitedPlaceByName(noteModalTargetName, (p) => { p.note = val; }, noteModalTargetTripId);
     closeNoteModal();
     if (!ok) return feedbackToast('備註儲存失敗：找不到造訪紀錄', 'orange');
     renderTravelLog();
@@ -4365,112 +4381,724 @@
   }
   window.renderApiCost = renderApiCost;
 
-  // ── 旅程拼貼（把一趟旅程的照片合成一張大圖，分享/下載）──
+  // ── 製作旅程回憶（IG 個人檔案大圖＋回顧短片入口）──
+  // Web 版先完成可在瀏覽器內產出九張 JPEG 的垂直切片；短片輸出尚未有後端
+  // render_job，因此只誠實呈現素材與聲音設定，不製造假的完成狀態。
+  const MEMORY_GRID_ORDER = [
+    { order: 1, row: 3, col: 3, position: '右下角', suffix: 'post-first' },
+    { order: 2, row: 3, col: 2, position: '下方中央', suffix: 'post-02' },
+    { order: 3, row: 3, col: 1, position: '左下角', suffix: 'post-03' },
+    { order: 4, row: 2, col: 3, position: '右側中央', suffix: 'post-04' },
+    { order: 5, row: 2, col: 2, position: '正中央', suffix: 'post-05' },
+    { order: 6, row: 2, col: 1, position: '左側中央', suffix: 'post-06' },
+    { order: 7, row: 1, col: 3, position: '右上角', suffix: 'post-07' },
+    { order: 8, row: 1, col: 2, position: '上方中央', suffix: 'post-08' },
+    { order: 9, row: 1, col: 1, position: '左上角', suffix: 'post-last' }
+  ];
+
+  let memoryStudioState = null;
+  let memoryStudioBound = false;
+
+  function revokeMemorySlices(state) {
+    if (!state || !state.slices) return;
+    state.slices.forEach((slice) => {
+      if (slice && slice.url) URL.revokeObjectURL(slice.url);
+    });
+    state.slices.clear();
+  }
+
+  function collectMemoryMaterials(tripId) {
+    const records = getVisitedPlaces().filter((p) => (p.tripId || 'no-trip') === tripId);
+    const photos = [];
+    const videos = [];
+    records.forEach((place, placeIndex) => {
+      (Array.isArray(place.photos) ? place.photos : []).forEach((photo, photoIndex) => {
+        if (!photo || !photo.url) return;
+        photos.push({
+          id: `p-${placeIndex}-${photoIndex}-${photo.ts || 0}`,
+          spotName: place.name || '旅程照片',
+          url: photo.url,
+          ts: Number(photo.ts) || 0
+        });
+      });
+      // 先相容 App 日後可能鏡射回來的 videos 欄位；目前不改 schema、不做上傳。
+      (Array.isArray(place.videos) ? place.videos : []).forEach((video, videoIndex) => {
+        if (!video || !(video.url || video.downloadURL)) return;
+        videos.push({
+          id: `v-${placeIndex}-${videoIndex}-${video.ts || 0}`,
+          spotName: place.name || '旅程影片',
+          url: video.url || video.downloadURL,
+          duration: Number(video.duration || video.durationSeconds) || 0
+        });
+      });
+    });
+    photos.sort((a, b) => a.ts - b.ts);
+    const dates = records.map((p) => p.visitDate).filter(Boolean).sort();
+    return {
+      records,
+      photos,
+      videos,
+      title: (records[0] && records[0].tripTitle) || currentTripTitle || '我的旅程',
+      dateRange: !dates.length ? '' : (dates[0] === dates[dates.length - 1]
+        ? dates[0] : `${dates[0]} – ${dates[dates.length - 1]}`)
+    };
+  }
 
   function renderCollageBar() {
     const bar = document.getElementById('travellog-collage-bar');
     if (!bar) return;
-    const groups = {};
-    getVisitedPlaces().forEach((p) => {
-      if (!Array.isArray(p.photos) || !p.photos.length) return;
-      const key = p.tripId || 'no-trip';
-      if (!groups[key]) groups[key] = { tripId: key, tripTitle: p.tripTitle || '我的旅程', count: 0 };
-      groups[key].count += p.photos.length;
-    });
-    const list = Object.values(groups);
-    bar.style.display = list.length ? '' : 'none';
-    bar.innerHTML = list.map((g) => {
-      const idEsc = escapeHtml(g.tripId).replace(/'/g, '&#39;');
-      return `<button class="travellog-collage-btn" onclick="exportTripCollage('${idEsc}')">🖼 匯出拼貼 · ${escapeHtml(g.tripTitle)}（${g.count} 張）</button>`;
-    }).join('');
+    const tripId = String(currentItineraryId || '');
+    if (!tripId || tripId === 'TRIP-EMPTY') {
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+    const records = getVisitedPlaces().filter((place) => String(place.tripId || '') === tripId);
+    const photos = records.reduce((total, place) => total
+      + (Array.isArray(place.photos) ? place.photos.filter((photo) => photo && photo.url).length : 0), 0);
+    const videos = records.reduce((total, place) => total
+      + (Array.isArray(place.videos) ? place.videos.filter((video) => video && (video.url || video.downloadURL)).length : 0), 0);
+    const title = currentTripTitle || (records[0] && records[0].tripTitle) || '目前行程';
+    const count = photos + videos;
+    const hint = count ? `${photos} 張照片${videos ? ` · ${videos} 段影片` : ''}` : '尚無素材';
+    bar.style.display = '';
+    bar.innerHTML = `<button type="button" class="travellog-collage-btn memory-entry-btn${count ? '' : ' is-empty'}"
+      onclick="openMemoryStudio('${jsAttrStr(tripId)}')" aria-label="製作 ${escapeHtml(title)} 的旅程回憶">
+      <span>✨ 製作旅程回憶</span><small>${escapeHtml(title)} · ${escapeHtml(hint)}</small>
+    </button>`;
   }
 
-  async function exportTripCollage(tripId) {
-    const records = getVisitedPlaces().filter(p => (p.tripId || 'no-trip') === tripId);
-    const items = [];
-    records.forEach((p) => (p.photos || []).forEach((ph) => {
-      if (ph && ph.url) items.push({ spotName: p.name || '', url: ph.url, ts: ph.ts || 0 });
-    }));
-    if (!items.length) return;
-    items.sort((a, b) => a.ts - b.ts);
-    const picked = items.slice(-16); // 上限 16 張，超過取最新
-    feedbackToast('🖼 拼貼製作中…', 'blue');
+  function setupMemoryStudio() {
+    if (memoryStudioBound) return;
+    const overlay = document.getElementById('memoryStudioOverlay');
+    const close = document.getElementById('memoryStudioCloseBtn');
+    const back = document.getElementById('memoryStudioBackBtn');
+    if (!overlay) return;
+    memoryStudioBound = true;
+    if (close) close.addEventListener('click', closeMemoryStudio);
+    if (back) back.addEventListener('click', memoryStudioBack);
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) closeMemoryStudio();
+    });
+  }
 
-    // crossOrigin='anonymous' 是關鍵：少了它 canvas 會被污染，toBlob 直接 SecurityError
-    const loaded = (await Promise.all(picked.map(it => new Promise((resolve) => {
+  function setMemoryStudioOpen(open) {
+    const overlay = document.getElementById('memoryStudioOverlay');
+    if (!overlay) return false;
+    overlay.hidden = !open;
+    overlay.classList.toggle('open', open);
+    overlay.setAttribute('aria-hidden', open ? 'false' : 'true');
+    document.body.classList.toggle('memory-studio-open', open);
+    return true;
+  }
+
+  function openMemoryStudio(tripId) {
+    setupMemoryStudio();
+    if (!document.getElementById('memoryStudioOverlay')) {
+      feedbackToast('回憶製作工具尚未載入，請重新整理後再試', 'orange');
+      return;
+    }
+    if (memoryStudioState) {
+      memoryStudioState.saveRunId += 1;
+      revokeMemorySlices(memoryStudioState);
+    }
+    const material = collectMemoryMaterials(tripId);
+    memoryStudioState = {
+      tripId,
+      material,
+      step: 'modes',
+      selectedPhotoIds: new Set(material.photos.slice(-9).map((photo) => photo.id)),
+      gridVisible: true,
+      imageCache: new Map(),
+      imagePromises: new Map(),
+      masterCanvas: null,
+      slices: new Map(),
+      failedOrders: [],
+      photoLoadFailures: [],
+      previewOrder: 1,
+      saveRunId: 0,
+      audioMode: 'original'
+    };
+    setMemoryStudioOpen(true);
+    renderMemoryStudio();
+    const close = document.getElementById('memoryStudioCloseBtn');
+    if (close) setTimeout(() => close.focus(), 0);
+  }
+
+  function closeMemoryStudio() {
+    if (memoryStudioState) memoryStudioState.saveRunId += 1;
+    setMemoryStudioOpen(false);
+    revokeMemorySlices(memoryStudioState);
+    memoryStudioState = null;
+  }
+
+  function memoryStudioBack() {
+    if (!memoryStudioState) return closeMemoryStudio();
+    if (memoryStudioState.step === 'save') memoryStudioState.saveRunId += 1;
+    const previous = { grid: 'modes', preview: 'grid', save: 'preview', result: 'preview', guide: 'result', video: 'modes', shortage: 'modes' };
+    const next = previous[memoryStudioState.step];
+    if (!next) return closeMemoryStudio();
+    memoryStudioState.step = next;
+    renderMemoryStudio();
+  }
+
+  function setMemoryStudioHeader(title, step, showBack = true) {
+    const titleEl = document.getElementById('memoryStudioTitle');
+    const stepEl = document.getElementById('memoryStudioStep');
+    const back = document.getElementById('memoryStudioBackBtn');
+    if (titleEl) titleEl.textContent = title;
+    if (stepEl) stepEl.textContent = step || '';
+    if (back) back.hidden = !showBack;
+  }
+
+  function renderMemoryStudio() {
+    if (!memoryStudioState) return;
+    const body = document.getElementById('memoryStudioBody');
+    if (!body) return;
+    const step = memoryStudioState.step;
+    if (step === 'modes') return renderMemoryModes(body);
+    if (step === 'shortage') return renderMemoryShortage(body);
+    if (step === 'grid') return renderMemoryGridEditor(body);
+    if (step === 'preview') return renderMemoryGridPreview(body);
+    if (step === 'save') return renderMemorySave(body);
+    if (step === 'result') return renderMemorySaveResult();
+    if (step === 'guide') return renderMemoryGuide(body);
+    if (step === 'video') return renderMemoryVideo(body);
+  }
+
+  function renderMemoryModes(body) {
+    const { photos, videos } = memoryStudioState.material;
+    setMemoryStudioHeader('製作旅程回憶', '', false);
+    const total = photos.length + videos.length;
+    body.innerHTML = `
+      <div class="memory-studio-intro">
+        <h3>${escapeHtml(memoryStudioState.material.title)}</h3>
+        <p>${total ? `已找到 ${photos.length} 張照片${videos.length ? `、${videos.length} 段影片` : ''}` : '這趟目前還沒有照片或影片'}</p>
+      </div>
+      <div class="memory-mode-grid">
+        <button type="button" class="memory-mode-card" onclick="memoryChooseMode('grid')">
+          <span class="memory-mode-icon" aria-hidden="true">▦</span>
+          <span class="memory-mode-title">IG 個人檔案大圖</span>
+          <span class="memory-mode-desc">產生 9 張獨立貼文，依順序發布後會在個人檔案組成一張大圖。</span>
+        </button>
+        <button type="button" class="memory-mode-card" onclick="memoryChooseMode('video')">
+          <span class="memory-mode-icon" aria-hidden="true">▶</span>
+          <span class="memory-mode-title">旅程回顧短片</span>
+          <span class="memory-mode-desc">查看這趟的真實素材與聲音選項；網頁版影片輸出仍在建置。</span>
+        </button>
+      </div>`;
+  }
+
+  function memoryChooseMode(mode) {
+    if (!memoryStudioState) return;
+    const material = memoryStudioState.material;
+    if (!material.photos.length && !material.videos.length) {
+      memoryStudioState.step = 'shortage';
+    } else if (mode === 'grid' && !material.photos.length) {
+      memoryStudioState.step = 'shortage';
+    } else {
+      memoryStudioState.step = mode === 'video' ? 'video' : 'grid';
+    }
+    renderMemoryStudio();
+  }
+
+  function renderMemoryShortage(body) {
+    setMemoryStudioHeader('素材不足', '', true);
+    const hasVideo = memoryStudioState.material.videos.length > 0;
+    body.innerHTML = `
+      <div class="memory-empty-state">
+        <span class="memory-empty-icon" aria-hidden="true">📷</span>
+        <h3>${hasVideo ? '九宮格需要至少一張照片' : '這趟還沒有照片'}</h3>
+        <p>先回旅記替景點加照片，再回來製作 IG 個人檔案大圖。原始素材不會被修改。</p>
+        <div class="memory-studio-actions">
+          <button type="button" class="memory-primary-btn" onclick="closeMemoryStudio()">去加照片</button>
+          ${hasVideo ? '<button type="button" class="memory-secondary-btn" onclick="memoryChooseMode(\'video\')">查看短片素材</button>' : ''}
+        </div>
+      </div>`;
+  }
+
+  function selectedMemoryPhotos() {
+    if (!memoryStudioState) return [];
+    const selected = memoryStudioState.selectedPhotoIds;
+    return memoryStudioState.material.photos.filter((photo) => selected.has(photo.id)).slice(0, 9);
+  }
+
+  function loadMemoryImage(photo) {
+    const state = memoryStudioState;
+    if (!state) return Promise.resolve(null);
+    if (state.imageCache.has(photo.id)) return Promise.resolve(state.imageCache.get(photo.id));
+    if (state.imagePromises.has(photo.id)) return state.imagePromises.get(photo.id);
+    const promise = new Promise((resolve) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
-      img.onload = () => resolve({ ...it, img });
-      img.onerror = () => resolve(null);
-      img.src = it.url;
-    })))).filter(Boolean);
-    if (!loaded.length) return feedbackToast('照片載入失敗，請稍後再試', 'orange');
-
-    const title = (records[0] && records[0].tripTitle) || '我的旅程';
-    const dates = records.map(p => p.visitDate).filter(Boolean).sort();
-    const dateRange = !dates.length ? ''
-      : dates[0] === dates[dates.length - 1] ? dates[0]
-      : `${dates[0]} – ${dates[dates.length - 1]}`;
-
-    const n = loaded.length;
-    const cols = n <= 4 ? 2 : n <= 9 ? 3 : 4;
-    const rows = Math.ceil(n / cols);
-    const W = 1200, headerH = 140, pad = 12;
-    const cell = Math.floor((W - pad * (cols + 1)) / cols);
-    const H = headerH + rows * (cell + pad) + pad;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#f6f4ef'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#2c3e50';
-    ctx.font = 'bold 44px "Noto Sans TC", "PingFang TC", sans-serif';
-    ctx.fillText(title, pad + 12, 64);
-    ctx.font = '24px "Noto Sans TC", "PingFang TC", sans-serif';
-    ctx.fillStyle = '#8fa4b8';
-    ctx.fillText(dateRange, pad + 12, 102);
-
-    loaded.forEach((it, i) => {
-      const cx = pad + (i % cols) * (cell + pad);
-      const cy = headerH + Math.floor(i / cols) * (cell + pad);
-      const iw = it.img.naturalWidth, ih = it.img.naturalHeight;
-      const s = Math.max(cell / iw, cell / ih); // cover 裁切置中
-      const sw = cell / s, sh = cell / s;
-      ctx.drawImage(it.img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, cx, cy, cell, cell);
-      const barH = 34;
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(cx, cy + cell - barH, cell, barH);
-      ctx.fillStyle = '#fff';
-      ctx.font = '20px "Noto Sans TC", "PingFang TC", sans-serif';
-      let label = it.spotName;
-      while (label && ctx.measureText(label + '…').width > cell - 20) label = label.slice(0, -1);
-      if (label !== it.spotName) label += '…';
-      ctx.fillText(label, cx + 10, cy + cell - 11);
+      img.onload = () => {
+        if (memoryStudioState === state) state.imageCache.set(photo.id, img);
+        resolve(img);
+      };
+      img.onerror = () => {
+        if (memoryStudioState === state) state.imageCache.set(photo.id, null);
+        resolve(null);
+      };
+      img.src = photo.url;
     });
+    state.imagePromises.set(photo.id, promise);
+    return promise;
+  }
 
-    let blob = null;
-    try {
-      blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-    } catch (e) { console.warn('拼貼輸出失敗（可能是圖片 CORS）：', e); }
-    if (!blob) return feedbackToast('拼貼輸出失敗，請稍後再試', 'orange');
+  async function ensureSelectedMemoryImages() {
+    const state = memoryStudioState;
+    const photos = selectedMemoryPhotos();
+    const loaded = await Promise.all(photos.map(async (photo) => ({ photo, img: await loadMemoryImage(photo) })));
+    if (memoryStudioState === state && state) {
+      state.photoLoadFailures = loaded.filter((item) => !item.img).map((item) => item.photo.spotName);
+    }
+    return loaded.filter((item) => item.img);
+  }
 
-    const file = new File([blob], `${title}-拼貼.jpg`, { type: 'image/jpeg' });
-    try {
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title });
-        feedbackToast('✅ 拼貼已完成', 'green');
+  function drawCover(ctx, img, x, y, width, height) {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    const scale = Math.max(width / iw, height / ih);
+    const sw = width / scale;
+    const sh = height / scale;
+    ctx.drawImage(img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, x, y, width, height);
+  }
+
+  function fitCanvasText(ctx, text, maxWidth) {
+    let value = String(text || '旅程回憶');
+    while (value.length > 1 && ctx.measureText(value).width > maxWidth) value = value.slice(0, -1);
+    return value === text ? value : value + '…';
+  }
+
+  async function buildMemoryMasterCanvas(width = 810, height = 1080, showGrid = false) {
+    const loaded = await ensureSelectedMemoryImages();
+    if (!loaded.length) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#F7F5F0';
+    ctx.fillRect(0, 0, width, height);
+    const cellW = width / 3;
+    const cellH = height / 3;
+    for (let index = 0; index < 9; index += 1) {
+      const x = (index % 3) * cellW;
+      const y = Math.floor(index / 3) * cellH;
+      // 少於九張時循環使用真實照片；不生成或替換任何使用者素材。
+      const item = loaded[index % loaded.length];
+      drawCover(ctx, item.img, x, y, cellW, cellH);
+      const gradient = ctx.createLinearGradient(0, y + cellH * 0.55, 0, y + cellH);
+      gradient.addColorStop(0, 'rgba(0,0,0,0)');
+      gradient.addColorStop(1, 'rgba(0,0,0,0.58)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x, y, cellW, cellH);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = `700 ${Math.max(15, Math.round(width / 54))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+      const label = fitCanvasText(ctx, item.photo.spotName, cellW - width / 28);
+      ctx.fillText(label, x + width / 56, y + cellH - height / 54);
+    }
+    if (showGrid) {
+      const band = Math.max(2, width * (40 / 3240));
+      ctx.fillStyle = 'rgba(232,115,58,0.2)';
+      [cellW, cellW * 2].forEach((x) => ctx.fillRect(x - band, 0, band * 2, height));
+      [cellH, cellH * 2].forEach((y) => ctx.fillRect(0, y - band, width, band * 2));
+      ctx.strokeStyle = 'rgba(255,255,255,0.96)';
+      ctx.lineWidth = Math.max(1, width / 405);
+      [cellW, cellW * 2].forEach((x) => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); });
+      [cellH, cellH * 2].forEach((y) => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); });
+    }
+    return canvas;
+  }
+
+  function renderMemoryGridEditor(body) {
+    setMemoryStudioHeader('IG 個人檔案大圖', '1 / 3　主視覺', true);
+    const photos = memoryStudioState.material.photos;
+    const selected = memoryStudioState.selectedPhotoIds;
+    body.innerHTML = `
+      <div class="memory-grid-editor">
+        <div class="memory-canvas-wrap" aria-label="3 比 4 的九宮格主視覺預覽">
+          <canvas id="memoryMasterCanvas" class="memory-master-canvas" width="810" height="1080"></canvas>
+        </div>
+        <label class="memory-grid-toggle">
+          <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
+          <span>顯示切線與安全區</span>
+        </label>
+        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/9）</strong><span>點照片即可移除或補回</span></div>
+        <div class="memory-photo-list" aria-label="這趟旅程的照片">
+          ${photos.map((photo) => {
+            const active = selected.has(photo.id);
+            return `<button type="button" class="memory-photo-item${active ? ' selected' : ''}"
+              onclick="memoryTogglePhoto('${jsAttrStr(photo.id)}')" aria-pressed="${active}" aria-label="${active ? '移除' : '加入'}照片：${escapeHtml(photo.spotName)}">
+              <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.spotName)}" loading="lazy">
+              <span>${active ? '✓ 使用中' : '＋ 加入'}</span>
+            </button>`;
+          }).join('')}
+        </div>
+        ${selected.size < 9 ? `<div class="memory-inline-note"><p>目前有 ${selected.size} 張照片；少於 9 張時會重複使用真實照片填滿九格。</p><button type="button" class="memory-secondary-btn" onclick="closeMemoryStudio()">返回旅記加照片</button></div>` : ''}
+        <div class="memory-studio-actions">
+          <button type="button" class="memory-primary-btn" onclick="memoryGoPreview()" ${selected.size ? '' : 'disabled'}>下一步：預覽九張</button>
+        </div>
+      </div>`;
+    paintMemoryEditorCanvas();
+  }
+
+  async function paintMemoryEditorCanvas() {
+    const state = memoryStudioState;
+    const target = document.getElementById('memoryMasterCanvas');
+    if (!state || !target || state.step !== 'grid') return;
+    const ctx = target.getContext('2d');
+    ctx.fillStyle = '#F0EDE6';
+    ctx.fillRect(0, 0, target.width, target.height);
+    ctx.fillStyle = '#5A5750';
+    ctx.font = '700 32px "Noto Sans TC", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('載入照片中…', target.width / 2, target.height / 2);
+    ctx.textAlign = 'start';
+    const canvas = await buildMemoryMasterCanvas(810, 1080, state.gridVisible);
+    if (!canvas || memoryStudioState !== state || state.step !== 'grid') return;
+    const current = document.getElementById('memoryMasterCanvas');
+    if (!current) return;
+    current.getContext('2d').drawImage(canvas, 0, 0);
+  }
+
+  function memoryToggleGrid(checked) {
+    if (!memoryStudioState) return;
+    memoryStudioState.gridVisible = !!checked;
+    paintMemoryEditorCanvas();
+  }
+
+  function memoryTogglePhoto(photoId) {
+    if (!memoryStudioState) return;
+    const selected = memoryStudioState.selectedPhotoIds;
+    if (selected.has(photoId)) {
+      selected.delete(photoId);
+    } else {
+      if (selected.size >= 9) {
+        feedbackToast('最多選擇 9 張照片；請先移除一張再加入', 'orange');
         return;
       }
-    } catch (e) {
-      if (e.name === 'AbortError') return; // 使用者取消分享
-      console.warn('拼貼分享失敗，改為下載：', e);
+      selected.add(photoId);
     }
-    const anchor = document.createElement('a');
-    anchor.href = URL.createObjectURL(blob);
-    anchor.download = `${title}-拼貼.jpg`;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(anchor.href), 5000);
-    feedbackToast('✅ 拼貼已下載', 'green');
+    memoryStudioState.masterCanvas = null;
+    revokeMemorySlices(memoryStudioState);
+    memoryStudioState.photoLoadFailures = [];
+    renderMemoryGridEditor(document.getElementById('memoryStudioBody'));
   }
+
+  async function memoryGoPreview() {
+    if (!memoryStudioState || !selectedMemoryPhotos().length) {
+      feedbackToast('請至少選擇一張照片', 'orange');
+      return;
+    }
+    const state = memoryStudioState;
+    const loaded = await ensureSelectedMemoryImages();
+    if (memoryStudioState !== state) return;
+    if (!loaded.length) {
+      feedbackToast('照片載入失敗，請確認網路後再試', 'orange');
+      return;
+    }
+    state.step = 'preview';
+    state.previewOrder = 1;
+    renderMemoryStudio();
+  }
+
+  function renderMemoryGridPreview(body) {
+    setMemoryStudioHeader('確認九張', '2 / 3　預覽', true);
+    const failedNames = Array.from(new Set(memoryStudioState.photoLoadFailures || []));
+    body.innerHTML = `
+      <div class="memory-preview-copy">
+        <strong>發布後你的個人檔案會長這樣</strong>
+        <p>格線位置是最終畫面；數字是發布次序。</p>
+      </div>
+      <div id="memoryGridPreview" class="memory-grid-preview" aria-label="九宮格最終排列"></div>
+      <div class="memory-guide-card"><strong>由右下角開始發布</strong><p>第 1 張在右下角，最後一張在左上角，主頁才會正確排列。</p></div>
+      ${failedNames.length ? `<div class="memory-guide-card memory-guide-warning"><strong>有 ${failedNames.length} 張照片未載入</strong><p>已略過：${escapeHtml(failedNames.join('、'))}。九宮格會以其餘已載入的真實照片補足。</p></div>` : ''}
+      <div class="memory-single-preview">
+        <div class="memory-single-head"><strong>單張檢視</strong><span id="memorySinglePosition"></span></div>
+        <div class="memory-single-stage">
+          <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(-1)" aria-label="上一張">‹</button>
+          <canvas id="memorySingleCanvas" width="270" height="360" aria-label="目前單張預覽"></canvas>
+          <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(1)" aria-label="下一張">›</button>
+        </div>
+      </div>
+      <div class="memory-studio-actions"><button type="button" class="memory-primary-btn" onclick="memoryStartSave()">保存九張</button></div>`;
+    paintMemoryGridPreview();
+  }
+
+  async function paintMemoryGridPreview() {
+    const state = memoryStudioState;
+    if (!state || state.step !== 'preview') return;
+    const master = await buildMemoryMasterCanvas(810, 1080, false);
+    if (!master || memoryStudioState !== state || state.step !== 'preview') return;
+    state.masterCanvas = master;
+    const host = document.getElementById('memoryGridPreview');
+    if (!host) return;
+    host.innerHTML = '';
+    for (let row = 1; row <= 3; row += 1) {
+      for (let col = 1; col <= 3; col += 1) {
+        const meta = MEMORY_GRID_ORDER.find((item) => item.row === row && item.col === col);
+        const canvas = document.createElement('canvas');
+        canvas.width = 270;
+        canvas.height = 360;
+        canvas.setAttribute('aria-label', `第 ${meta.order} 張，${meta.position}`);
+        canvas.getContext('2d').drawImage(master, (col - 1) * 270, (row - 1) * 360, 270, 360, 0, 0, 270, 360);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'memory-grid-cell';
+        button.onclick = () => { state.previewOrder = meta.order; paintMemorySinglePreview(); };
+        const badge = document.createElement('span');
+        badge.className = 'memory-grid-order';
+        badge.textContent = String(meta.order);
+        button.append(canvas, badge);
+        host.appendChild(button);
+      }
+    }
+    paintMemorySinglePreview();
+  }
+
+  function paintMemorySinglePreview() {
+    const state = memoryStudioState;
+    if (!state || !state.masterCanvas) return;
+    const meta = MEMORY_GRID_ORDER.find((item) => item.order === state.previewOrder) || MEMORY_GRID_ORDER[0];
+    const canvas = document.getElementById('memorySingleCanvas');
+    const label = document.getElementById('memorySinglePosition');
+    if (label) label.textContent = `第 ${meta.order} 張 · ${meta.position} · r${meta.row}c${meta.col}`;
+    if (!canvas) return;
+    canvas.getContext('2d').drawImage(
+      state.masterCanvas,
+      (meta.col - 1) * 270,
+      (meta.row - 1) * 360,
+      270,
+      360,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+  }
+
+  function memoryShiftPreview(delta) {
+    if (!memoryStudioState) return;
+    memoryStudioState.previewOrder = ((memoryStudioState.previewOrder - 1 + delta + 9) % 9) + 1;
+    paintMemorySinglePreview();
+  }
+
+  function canvasToJpegBlob(canvas, quality = 0.9) {
+    return new Promise((resolve) => {
+      try { canvas.toBlob(resolve, 'image/jpeg', quality); }
+      catch (_error) { resolve(null); }
+    });
+  }
+
+  function memorySliceFilename(meta) {
+    return `${String(meta.order).padStart(2, '0')}_r${meta.row}c${meta.col}_${meta.suffix}.jpg`;
+  }
+
+  function triggerMemoryDownload(slice) {
+    if (!slice || !slice.url) return false;
+    const anchor = document.createElement('a');
+    anchor.href = slice.url;
+    anchor.download = slice.filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return true;
+  }
+
+  async function memoryStartSave(orders) {
+    if (!memoryStudioState) return;
+    const state = memoryStudioState;
+    const runId = ++state.saveRunId;
+    state.step = 'save';
+    renderMemorySave(document.getElementById('memoryStudioBody'));
+    const targetOrders = Array.isArray(orders) && orders.length ? orders : MEMORY_GRID_ORDER.map((item) => item.order);
+    if (!Array.isArray(orders)) {
+      state.failedOrders = [];
+      revokeMemorySlices(state);
+    } else {
+      state.failedOrders = state.failedOrders.filter((order) => !targetOrders.includes(order));
+    }
+    const master = await buildMemoryMasterCanvas(3240, 4320, false);
+    if (!master || memoryStudioState !== state || state.saveRunId !== runId) {
+      if (memoryStudioState !== state || state.saveRunId !== runId) return;
+      state.failedOrders = targetOrders.slice();
+      return renderMemorySaveResult();
+    }
+    state.masterCanvas = master;
+    let completed = 0;
+    for (const order of targetOrders) {
+      if (memoryStudioState !== state || state.saveRunId !== runId) return;
+      const meta = MEMORY_GRID_ORDER.find((item) => item.order === order);
+      const cell = document.createElement('canvas');
+      cell.width = 1080;
+      cell.height = 1440;
+      cell.getContext('2d').drawImage(
+        master,
+        (meta.col - 1) * 1080,
+        (meta.row - 1) * 1440,
+        1080,
+        1440,
+        0,
+        0,
+        1080,
+        1440
+      );
+      const blob = await canvasToJpegBlob(cell, 0.9);
+      if (memoryStudioState !== state || state.saveRunId !== runId) return;
+      if (!blob) {
+        state.failedOrders.push(order);
+      } else {
+        const old = state.slices.get(order);
+        if (old && old.url) URL.revokeObjectURL(old.url);
+        state.slices.set(order, {
+          order,
+          meta,
+          blob,
+          url: URL.createObjectURL(blob),
+          filename: memorySliceFilename(meta)
+        });
+      }
+      completed += 1;
+      updateMemorySaveProgress(completed, targetOrders.length, order);
+    }
+    if (memoryStudioState !== state || state.saveRunId !== runId) return;
+    renderMemorySaveResult();
+  }
+
+  function renderMemorySave(body) {
+    setMemoryStudioHeader('保存九張', '3 / 3　輸出', true);
+    body.innerHTML = `
+      <div class="memory-progress" role="status" aria-live="polite">
+        <h3>正在產生九張貼文…</h3>
+        <div id="memoryProgressDots" class="memory-progress-dots">○○○○○○○○○</div>
+        <strong id="memoryProgressCount">0 / 9</strong>
+        <p id="memoryProgressText">準備主視覺中…</p>
+      </div>`;
+  }
+
+  function updateMemorySaveProgress(completed, total, order) {
+    const dots = document.getElementById('memoryProgressDots');
+    const count = document.getElementById('memoryProgressCount');
+    const text = document.getElementById('memoryProgressText');
+    if (dots) dots.textContent = '●'.repeat(completed) + '○'.repeat(Math.max(0, total - completed));
+    if (count) count.textContent = `${completed} / ${total}`;
+    if (text) text.textContent = `已產生第 ${order} 張`;
+  }
+
+  function renderMemorySaveResult() {
+    const state = memoryStudioState;
+    const body = document.getElementById('memoryStudioBody');
+    if (!state || !body) return;
+    state.step = 'result';
+    setMemoryStudioHeader('保存九張', '3 / 3　輸出完成', true);
+    const failed = Array.from(new Set(state.failedOrders)).sort((a, b) => a - b);
+    body.innerHTML = `
+      <div class="memory-result-card ${failed.length ? 'has-error' : ''}">
+        <span class="memory-result-icon" aria-hidden="true">${failed.length ? '⚠️' : '✓'}</span>
+        <h3>${failed.length ? '部分圖片產生失敗' : '九張圖片已產生'}</h3>
+        <p>${failed.length ? `失敗序號：${failed.join('、')}。已完成的圖片仍可下載。` : '請依下方順序逐張下載，避免瀏覽器攔截多檔下載。'}</p>
+        <p class="memory-download-note">檔名已包含發布順序與九宮格位置；請由第 1 張開始依序發布。</p>
+      </div>
+      <div class="memory-download-list">
+        ${MEMORY_GRID_ORDER.map((meta) => {
+          const slice = state.slices.get(meta.order);
+          return `<button type="button" class="memory-secondary-btn" onclick="memoryDownloadSlice(${meta.order})" ${slice ? '' : 'disabled'}>
+            第 ${meta.order} 張 · ${escapeHtml(meta.position)}
+          </button>`;
+        }).join('')}
+      </div>
+      <div class="memory-studio-actions">
+        ${failed.length ? `<button type="button" class="memory-primary-btn" onclick="memoryRetryFailed()">只重試失敗圖片</button>` : '<button type="button" class="memory-primary-btn" onclick="memoryOpenGuide()">查看發布順序</button>'}
+        <button type="button" class="memory-secondary-btn" onclick="closeMemoryStudio()">稍後再說</button>
+      </div>`;
+  }
+
+  function memoryDownloadSlice(order) {
+    if (!memoryStudioState || !triggerMemoryDownload(memoryStudioState.slices.get(Number(order)))) {
+      feedbackToast('這張圖片尚未產生，請先重試', 'orange');
+    }
+  }
+
+  function memoryRetryFailed() {
+    if (!memoryStudioState || !memoryStudioState.failedOrders.length) return;
+    memoryStartSave(memoryStudioState.failedOrders.slice());
+  }
+
+  function memoryOpenGuide() {
+    if (!memoryStudioState) return;
+    memoryStudioState.step = 'guide';
+    renderMemoryStudio();
+  }
+
+  function renderMemoryGuide(body) {
+    setMemoryStudioHeader('發布順序', '保存完成', true);
+    body.innerHTML = `
+      <div class="memory-guide-card memory-guide-warning">
+        <strong>一次保存後，再依序發布</strong>
+        <p>從第 1 張（右下角）開始，到第 9 張（左上角）結束。發布九張期間不要穿插其他貼文或 Reels。</p>
+      </div>
+      <ol class="memory-publish-order">
+        ${MEMORY_GRID_ORDER.map((meta) => `<li><strong>第 ${meta.order} 張</strong><span>${escapeHtml(meta.position)} · r${meta.row}c${meta.col}</span><code>${escapeHtml(memorySliceFilename(meta))}</code></li>`).join('')}
+      </ol>
+      <div class="memory-guide-card">
+        <strong>發布前先確認</strong>
+        <p>置頂貼文或手動重排可能占用格線位置。發布完成後新增 1～2 篇會暫時打亂，滿 3 篇後才會重新對齊。</p>
+        <p>網站無法確認你是否真的發布，因此不會顯示假的發布完成狀態。</p>
+      </div>
+      <div class="memory-studio-actions"><button type="button" class="memory-primary-btn" onclick="closeMemoryStudio()">完成</button></div>`;
+  }
+
+  function renderMemoryVideo(body) {
+    const { photos, videos } = memoryStudioState.material;
+    setMemoryStudioHeader('旅程回顧短片', '素材摘要', true);
+    body.innerHTML = `
+      <div class="memory-video-summary">
+        <span class="memory-mode-icon" aria-hidden="true">▶</span>
+        <h3>${escapeHtml(memoryStudioState.material.title)}</h3>
+        <p>${photos.length} 張照片 · ${videos.length} 段影片</p>
+      </div>
+      <fieldset class="memory-audio-options">
+        <legend>影片聲音</legend>
+        <label><input type="radio" name="memoryAudioMode" value="original" ${memoryStudioState.audioMode === 'original' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 保留現場聲</label>
+        <label><input type="radio" name="memoryAudioMode" value="muted" ${memoryStudioState.audioMode === 'muted' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 靜音</label>
+      </fieldset>
+      <div class="memory-video-status" role="status">
+        <strong>網頁版影片輸出尚在建置</strong>
+        <p>目前只顯示這趟的真實素材摘要與聲音偏好；素材不會送出、不會上傳，也不會假裝已產生影片。</p>
+      </div>
+      <div class="memory-studio-actions">
+        ${photos.length || videos.length ? '' : '<button type="button" class="memory-primary-btn" onclick="closeMemoryStudio()">去加照片</button>'}
+        <button type="button" class="memory-secondary-btn" onclick="memoryStudioBack()">返回選擇</button>
+      </div>`;
+  }
+
+  function memorySetAudioMode(mode) {
+    if (!memoryStudioState) return;
+    memoryStudioState.audioMode = mode === 'muted' ? 'muted' : 'original';
+  }
+
+  // 保留舊入口名稱供書籤／測試腳本相容，但行為已改為開啟新工具。
+  function exportTripCollage(tripId) { openMemoryStudio(tripId); }
+
+  Object.assign(window, {
+    openMemoryStudio,
+    closeMemoryStudio,
+    memoryStudioBack,
+    memoryChooseMode,
+    memoryToggleGrid,
+    memoryTogglePhoto,
+    memoryGoPreview,
+    memoryShiftPreview,
+    memoryStartSave,
+    memoryDownloadSlice,
+    memoryRetryFailed,
+    memoryOpenGuide,
+    memorySetAudioMode,
+    exportTripCollage
+  });
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setupMemoryStudio);
+  else setupMemoryStudio();
 
   async function copyImageUrl() {
     if (!posterGeneratedImageBase64) {
@@ -5974,13 +6602,22 @@
   }
 
   function renderTravelLog() {
-    const places = getVisitedPlaces();
+    const activeTripId = String(currentItineraryId || '');
+    const places = (!activeTripId || activeTripId === 'TRIP-EMPTY')
+      ? []
+      : getVisitedPlaces().filter((place) => String(place.tripId || '') === activeTripId);
     const countEl = document.getElementById('travellog-count');
     const listEl = document.getElementById('travellog-list');
     const emptyEl = document.getElementById('travellog-empty');
     if (!listEl) return;
 
+    const openTripKeys = new Set(Array.from(listEl.querySelectorAll('.travellog-trip-group[open]'))
+      .map((item) => item.dataset.tripKey).filter(Boolean));
+    const openSpotKeys = new Set(Array.from(listEl.querySelectorAll('.travellog-spot-card[open]'))
+      .map((item) => item.dataset.spotKey).filter(Boolean));
+
     if (countEl) countEl.textContent = `${places.length} 個景點`;
+    renderCollageBar();
 
     if (places.length === 0) {
       listEl.innerHTML = '';
@@ -5989,72 +6626,109 @@
     }
     if (emptyEl) emptyEl.style.display = 'none';
 
-    const byRegion = {};
-    places.forEach(p => {
-      const r = p.region || '其他';
-      (byRegion[r] = byRegion[r] || []).push(p);
+    const groups = new Map();
+    places.forEach((place) => {
+      const tripId = String(place.tripId || '');
+      const legacyLabel = place.tripTitle || place.region || '未分類旅程';
+      const key = tripId ? `trip:${tripId}` : `legacy:${legacyLabel}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          tripId,
+          title: place.tripTitle || '未命名旅程',
+          spots: [],
+          dates: [],
+          regions: new Set()
+        });
+      }
+      const group = groups.get(key);
+      group.spots.push(place);
+      if (place.visitDate) group.dates.push(place.visitDate);
+      if (place.region) group.regions.add(place.region);
     });
 
-    listEl.innerHTML = Object.entries(byRegion).map(([region, spots]) => `
-      <div class="travellog-region">
-        <div class="travellog-region-title">📍 ${escapeHtml(region)}（${spots.length} 個景點）</div>
+    const tripGroups = Array.from(groups.values()).sort((a, b) => {
+      const aCurrent = a.tripId && a.tripId === activeTripId;
+      const bCurrent = b.tripId && b.tripId === activeTripId;
+      if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+      const aLatest = Math.max(0, ...a.dates.map((date) => Date.parse(date) || 0));
+      const bLatest = Math.max(0, ...b.dates.map((date) => Date.parse(date) || 0));
+      return bLatest - aLatest;
+    });
+    const hasCurrentGroup = tripGroups.some((group) => group.tripId && group.tripId === activeTripId);
+
+    listEl.innerHTML = tripGroups.map((group, groupIndex) => {
+      const isCurrent = !!group.tripId && group.tripId === activeTripId;
+      const shouldOpen = openTripKeys.has(group.key) || isCurrent || (!hasCurrentGroup && groupIndex === 0);
+      const dates = Array.from(new Set(group.dates)).sort();
+      const dateLabel = !dates.length ? '' : (dates.length === 1 ? dates[0] : `${dates[0]}–${dates[dates.length - 1]}`);
+      const regionLabel = Array.from(group.regions).join('、');
+      const title = isCurrent && currentTripTitle ? currentTripTitle : group.title;
+      return `<details class="travellog-trip-group" data-trip-key="${escapeHtml(group.key)}" ${shouldOpen ? 'open' : ''}>
+        <summary class="travellog-trip-summary">
+          <span class="travellog-trip-icon" aria-hidden="true">🧳</span>
+          <span class="travellog-trip-copy">
+            <strong>${escapeHtml(title)}</strong>
+            <small>${escapeHtml([dateLabel, regionLabel].filter(Boolean).join(' · ') || '日期未記錄')}</small>
+          </span>
+          ${isCurrent ? '<span class="travellog-current-badge">目前行程</span>' : ''}
+          <span class="travellog-trip-count">${group.spots.length} 個景點</span>
+          <span class="travellog-chevron" aria-hidden="true">⌄</span>
+        </summary>
         <div class="travellog-spots">
-          ${spots.map(s => {
-            // 紀錄欄位可能來自共編/AI 站名，全部 escapeHtml 後才進 innerHTML。
-            // 進 onclick 的 JS 字串要「先 JS 跳脫再 escapeHtml」：屬性值的 HTML 實體會先被
-            // 瀏覽器解碼，只做 escapeHtml 的單引號解碼後仍會破壞 JS 字面量。
-            const nameEsc = escapeHtml(s.name);
-            const nameJs = escapeHtml(String(s.name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
-            const photos = Array.isArray(s.photos) ? s.photos.filter(p => p && p.url) : [];
-            // downloadURL 帶 &token=，進 attribute 一定要 escapeHtml
-            const photoRow = `
-              <div class="travellog-photo-row">
-                ${photos.map(p => `
-                  <div class="travellog-photo-thumb">
-                    <img src="${escapeHtml(p.url)}" alt="" loading="lazy" onclick="openImageLightbox(this.src)">
-                    <button class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(p.ts) || 0})" aria-label="刪除這張照片">✕</button>
-                  </div>
-                `).join('')}
-                <button class="travellog-photo-add" onclick="addPhotoForVisitedPlace('${nameJs}')" title="新增照片" aria-label="上傳景點照片">📷</button>
-              </div>`;
-            // Week4 C6：個人文字備註列（有備註→顯示文字＋✏️ 編輯；無→「＋ 加備註」）
-            const noteRow = s.note
-              ? `<div class="travellog-note-row">
-                  <span class="travellog-note-text">${escapeHtml(s.note)}</span>
-                  <button class="travellog-note-edit" onclick="openVisitedNoteModal('${nameJs}')" title="編輯備註" aria-label="編輯備註">✏️</button>
-                </div>`
-              : `<div class="travellog-note-row">
-                  <button class="travellog-note-add" onclick="openVisitedNoteModal('${nameJs}')">＋ 加備註</button>
-                </div>`;
-            return `
-            <div class="travellog-spot-card">
-              <div class="travellog-spot-main">
-                <span class="travellog-spot-emoji">${escapeHtml(s.emoji || '📍')}</span>
-                <div class="travellog-spot-info">
-                  <span class="travellog-spot-name">${nameEsc}</span>
-                  <span class="travellog-spot-meta">${escapeHtml(s.visitDate || '')}${s.tripTitle ? ' · ' + escapeHtml(s.tripTitle) : ''}${s.gpsVerified === true ? ' <span class="travellog-gps-badge">📍 GPS</span>' : ''}</span>
+          ${group.spots.map((spot) => {
+            const nameJs = jsAttrStr(spot.name);
+            const tripIdJs = jsAttrStr(spot.tripId || '');
+            const photos = Array.isArray(spot.photos) ? spot.photos.filter((photo) => photo && photo.url) : [];
+            const hasNote = !!String(spot.note || '').trim();
+            const status = [photos.length ? `${photos.length} 張照片` : '', hasNote ? '有備註' : ''].filter(Boolean).join(' · ') || '無素材';
+            const spotKey = `${group.key}::${spot.name || ''}`;
+            const lead = photos.length
+              ? `<img class="travellog-spot-cover" src="${escapeHtml(photos[0].url)}" alt="" loading="lazy">`
+              : `<span class="travellog-spot-emoji" aria-hidden="true">${escapeHtml(spot.emoji || '📍')}</span>`;
+            return `<details class="travellog-spot-card" data-spot-key="${escapeHtml(spotKey)}" ${openSpotKeys.has(spotKey) ? 'open' : ''}>
+              <summary class="travellog-spot-summary">
+                <span class="travellog-spot-leading">${lead}</span>
+                <span class="travellog-spot-info">
+                  <strong class="travellog-spot-name">${escapeHtml(spot.name)}</strong>
+                  <small class="travellog-spot-meta">${escapeHtml(spot.visitDate || '日期未記錄')}${spot.gpsVerified === true ? ' · 📍 GPS' : ''}</small>
+                </span>
+                <span class="travellog-material-status${photos.length || hasNote ? ' has-material' : ''}">${escapeHtml(status)}</span>
+                <span class="travellog-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="travellog-spot-detail">
+                ${hasNote ? `<p class="travellog-note-text">${escapeHtml(spot.note)}</p>` : ''}
+                ${photos.length ? `<div class="travellog-photo-row">
+                  ${photos.map((photo) => `<div class="travellog-photo-thumb">
+                    <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(spot.name)}的旅程照片" loading="lazy" onclick="openImageLightbox(this.src)">
+                    <button type="button" class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(photo.ts) || 0}, '${tripIdJs}')" aria-label="刪除這張照片">✕</button>
+                  </div>`).join('')}
+                </div>` : ''}
+                <div class="travellog-spot-actions">
+                  <button type="button" onclick="openVisitedNoteModal('${nameJs}', '${tripIdJs}')">${hasNote ? '✏️ 編輯備註' : '＋ 加備註'}</button>
+                  <button type="button" onclick="addPhotoForVisitedPlace('${nameJs}', '${tripIdJs}')">📷 ${photos.length ? '新增照片' : '加照片'}</button>
+                  <button type="button" class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameJs}', '${tripIdJs}')">移除紀錄</button>
                 </div>
-                <button class="travellog-remove-btn" onclick="removeVisitedPlaceByName('${nameJs}')" aria-label="移除景點紀錄">✕</button>
               </div>
-              ${noteRow}
-              ${photoRow}
-            </div>`;
+            </details>`;
           }).join('')}
         </div>
-      </div>
-    `).join('');
-
-    renderCollageBar();
+      </details>`;
+    }).join('');
   }
 
-  function removeVisitedPlaceByName(name) {
+  function removeVisitedPlaceByName(name, tripId = null) {
+    if (!window.confirm(`要移除「${name}」的旅遊紀錄嗎？照片與備註也會一併刪除。`)) return;
     const all = getVisitedPlaces();
+    const removed = all.filter((place) => visitedPlaceMatches(place, name, tripId));
     // 被移除紀錄的照片一併清 Storage（失敗靜默）
     if (typeof firebaseStorage !== 'undefined' && firebaseStorage) {
-      all.filter(p => p.name === name && Array.isArray(p.photos))
-        .forEach(p => p.photos.forEach(ph => { if (ph && ph.path) firebaseStorage.ref(ph.path).delete().catch(() => {}); }));
+      removed.filter((place) => Array.isArray(place.photos))
+        .forEach((place) => place.photos.forEach((photo) => {
+          if (photo && photo.path) firebaseStorage.ref(photo.path).delete().catch(() => {});
+        }));
     }
-    const places = all.filter(p => p.name !== name);
+    const places = all.filter((place) => !visitedPlaceMatches(place, name, tripId));
     saveVisitedPlaces(places); // 走統一出口，順修此處原本不同步 Firestore 的缺口
     renderTravelLog();
     refreshStopVisitedButtons();
@@ -9751,10 +10425,9 @@
   }
 
   // 找到同名造訪紀錄 → mutator 就地修改 → 存檔。照片增刪都走這裡。
-  function updateVisitedPlaceByName(name, mutator) {
+  function updateVisitedPlaceByName(name, mutator, tripId = null) {
     const places = getVisitedPlaces();
-    const norm = (name || '').replace(/\s/g, '').toLowerCase();
-    const place = places.find(p => (p.name || '').replace(/\s/g, '').toLowerCase() === norm);
+    const place = places.find((item) => visitedPlaceMatches(item, name, tripId));
     if (!place) return false;
     mutator(place);
     saveVisitedPlaces(places);
@@ -14836,6 +15509,7 @@
     const visible = (el) => el && getComputedStyle(el).display !== 'none';
     const openCls = (id) => { const el = document.getElementById(id); return el && el.classList.contains('open') ? el : null; };
     // 由「最上層/最 modal」往下嘗試，關掉第一個開著的就停
+    if (openCls('memoryStudioOverlay') && typeof closeMemoryStudio === 'function') { closeMemoryStudio(); return; }
     if (visible(document.getElementById('imgLightbox')) && typeof closeImageLightbox === 'function') { closeImageLightbox(); return; }
     if (visible(document.getElementById('noteModal'))) { closeNoteModal(); return; }
     if (visible(document.getElementById('stayModal'))) { closeStayModal(); return; }
@@ -14850,7 +15524,7 @@
   // 彈窗補 dialog 語意（螢幕報讀器才會宣告對話框情境）。
   // 本 script 標籤位於 HTML 中段，stayModal 等彈窗標記在其後 → 需等 DOM 解析完再跑。
   const _applyDialogRoles = () => {
-    ['deletePlaceOverlay', 'addPlaceOverlay', 'modifyOverlay', 'travelToolsOverlay', 'stayModal', 'noteModal', 'imgLightbox', 'loginOverlay', 'changePwdOverlay'].forEach((id) => {
+    ['memoryStudioOverlay', 'deletePlaceOverlay', 'addPlaceOverlay', 'modifyOverlay', 'travelToolsOverlay', 'stayModal', 'noteModal', 'imgLightbox', 'loginOverlay', 'changePwdOverlay'].forEach((id) => {
       const ov = document.getElementById(id);
       const modal = ov && ov.firstElementChild;
       if (modal && !modal.hasAttribute('role')) { modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); }
