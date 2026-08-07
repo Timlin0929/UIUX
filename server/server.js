@@ -24,6 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 // firebase-admin v14 起僅支援模組化 API（admin.credential.* 已移除）
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
@@ -73,6 +74,14 @@ const app = express();
 app.disable('x-powered-by'); // 不洩漏後端框架
 // 只信任 nginx 這一層代理（proxy 僅監聽 127.0.0.1，XFF 只可能由 nginx 設定，可信）
 app.set('trust proxy', 1);
+// 停車回報只會是幾百位元組。全域 5mb 的 JSON 解析在所有 rateLimit 之前跑，
+// 攻擊者可以對任何端點先塞大 JSON 消耗解析資源——限流擋不到解析本身。
+// 這道守衛必須排在 express.json 之前，靠 Content-Length 先擋掉，不進解析器。
+app.use('/api/parking-report', (req, res, next) => {
+  const len = Number(req.headers['content-length'] || 0);
+  if (len > 8 * 1024) return res.status(413).json({ error: 'payload too large' });
+  next();
+});
 app.use(express.json({ limit: '5mb' })); // 行程 prompt 可能較大
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'wanderai-proxy' }));
@@ -273,6 +282,175 @@ async function requireFirebaseUser(req, res, next) {
 
 // 邀請碼只能送到後端驗證。驗證成功後建立短效 join proof，Firestore Rules
 // 才允許該登入者讀取行程並把自己加入 memberEmails。
+/* ══ 停車回報（群眾外包停車點的寫入邊界）══════════════════════════
+   實作依據：docs/停車回報群眾外包-實作計畫.md 第四節。
+
+   為什麼不讓前端直寫 Firestore：
+   - Rules 表達不了「回報點必須在目的地 800m 內」這種需要反查行程的驗證
+   - 前端直寫沒有可靠的限流與重放防護
+   比照 generation_runs 的既有模式：集合對用戶端 read/write 全關，只由 Admin SDK 寫入。
+
+   ⚠ Admin SDK 繞過 Rules——這裡漏掉的驗證，Rules 不會補救。所有欄位一律由伺服器組裝，
+     絕不把 req.body 整包塞進 Firestore。 */
+
+const PARKING_REPORT_COLLECTION = 'parking_reports';
+const PARKING_REPORT_TYPES = new Set(['found', 'full', 'closed', 'none', 'wrong', 'missing']);
+const PARKING_REPORT_KINDS = new Set(['lot', 'roadside', 'temp']);
+const PARKING_GEOFENCE_METERS = 800;   // 超出視為與這一站無關（多半是住家或飯店）
+const PARKING_MAX_ACCURACY = 50;       // 計畫 5.3：更差的定位無法支撐 30m 群聚
+const PARKING_REVOTE_DAYS = 30;        // 同一人對同一地點的重複回報視為更新，不是新的一票
+
+// IP 層：擋粗糙攻擊，放在 token 驗證之前（未驗證的請求也要付代價）
+const parkingReportIpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+// UID 層：放在驗證之後，用帳號而非 IP 計算（換 IP 繞不過）
+const parkingReportUidLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // 未登入時退回 IP：必須用套件提供的 ipKeyGenerator，直接回 req.ip 會被
+  // express-rate-limit v7+ 的 IPv6 驗證擋下（ERR_ERL_KEY_GEN_IPV6）。
+  keyGenerator: (req, res) => (req.user && req.user.uid) || ipKeyGenerator(req, res),
+  message: { error: 'daily limit reached' }
+});
+
+function haversineMeters(a, b) {
+  const R = 6371000, rad = (x) => (x * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2
+    + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+/* 只接受真正的 JSON number。
+   刻意不用 Number(v)——Number(null)、Number('')、Number([]) 全都是 0，
+   於是「沒帶座標」會被當成 (0, 0)、「沒帶 accuracy」會被當成完美精度 0。
+   前者目前碰巧被地理圍籬擋下，但那是僥倖不是設計。 */
+function finiteNumber(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/* 地點鍵：用「站點座標」而非 tripId+stopId。
+   同一個實體地點在不同行程裡是不同的 stopId，若用後者當鍵，
+   同一個人跑兩趟就會被算成兩票，聚合門檻形同虛設。
+   4 位小數 ≈ 11m，與計畫 5.2 的群聚精度一致。 */
+function destKeyOf(lat, lng) {
+  return `d${(Math.round(lat * 1e4) / 1e4).toFixed(4)}_${(Math.round(lng * 1e4) / 1e4).toFixed(4)}`
+    .replace(/\./g, 'p').replace(/-/g, 'm');
+}
+
+app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, parkingReportUidLimiter, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
+  const body = req.body || {};
+
+  const tripId = String(body.tripId || '').trim();
+  const stopId = String(body.stopId || '').trim();
+  const type = String(body.type || '').trim();
+  const kind = String(body.kind || '').trim();
+  const note = String(body.note || '').trim().slice(0, 120);
+  const lat = finiteNumber(body.lat);
+  const lng = finiteNumber(body.lng);
+  const accuracy = finiteNumber(body.accuracy);
+  const adjusted = body.adjusted === true;
+
+  if (!tripId || !stopId) return res.status(400).json({ error: 'invalid trip or stop' });
+  if (!PARKING_REPORT_TYPES.has(type)) return res.status(400).json({ error: 'invalid type' });
+
+  // 只有「找到停車場」帶座標；其餘狀況沒有可標的點
+  const hasCoords = lat !== null && lng !== null;
+  if (type === 'found') {
+    if (!hasCoords) return res.status(400).json({ error: 'coordinates required' });
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({ error: 'coordinates out of range' });
+    }
+    if (!PARKING_REPORT_KINDS.has(kind)) return res.status(400).json({ error: 'invalid kind' });
+    if (accuracy === null || accuracy < 0 || accuracy > PARKING_MAX_ACCURACY) {
+      return res.status(400).json({ error: 'accuracy too low' });
+    }
+  }
+
+  // 目的地座標一律由伺服器反查。
+  // ★ 絕不接受前端傳來的目的地座標——攻擊者只要把它改成與假位置相同，
+  //   800m 圍籬就必定通過，等於沒有圍籬（計畫 1.4 假設 F）。
+  let destLat = null, destLng = null;
+  try {
+    const snap = await adminDb.collection('micro_trips').doc(tripId).get();
+    if (!snap.exists) return res.status(404).json({ error: 'trip not found' });
+    const data = snap.data() || {};
+    const email = normalizeEmail(req.user.email || '');
+    const allowed = isTripOwner(req.user, data)
+      || (email && (data.memberEmails || []).map(normalizeEmail).includes(email))
+      || (email && (data.editorEmails || []).map(normalizeEmail).includes(email));
+    if (!allowed) return res.status(403).json({ error: 'not your trip' });
+
+    const stop = (Array.isArray(data.stops) ? data.stops : []).find((s) => s && s.id === stopId);
+    if (!stop) return res.status(404).json({ error: 'stop not found' });
+    destLat = finiteNumber(stop.lat);
+    destLng = finiteNumber(stop.lng);
+    if (destLat === null || destLng === null) {
+      return res.status(422).json({ error: 'stop has no coordinates' });
+    }
+  } catch (err) {
+    console.error('[proxy] parking-report 反查目的地失敗：', err && err.message);
+    return res.status(500).json({ error: 'lookup failed' });
+  }
+
+  // 地理圍籬：同時做兩件事——濾掉配對雜訊，以及濾掉在家裡或飯店拍下的位置
+  let distance = null;
+  if (hasCoords) {
+    distance = haversineMeters({ lat, lng }, { lat: destLat, lng: destLng });
+    if (distance > PARKING_GEOFENCE_METERS) {
+      return res.status(422).json({ error: 'too far from destination' });
+    }
+  }
+
+  // 文件 ID＝地點＋使用者：同一人對同一地點永遠只有一筆，
+  // 聚合時「不同文件數」就等於「不同回報者數」，不必另外去重（計畫 6.6）。
+  const destKey = destKeyOf(destLat, destLng);
+  const docId = `${destKey}__${req.user.uid}`;
+  const now = Timestamp.now();
+
+  try {
+    const ref = adminDb.collection(PARKING_REPORT_COLLECTION).doc(docId);
+    const prev = await ref.get();
+    if (prev.exists) {
+      const prevAt = prev.data() && prev.data().at;
+      const prevMs = prevAt && typeof prevAt.toMillis === 'function' ? prevAt.toMillis() : 0;
+      const days = (Date.now() - prevMs) / 86400000;
+      if (days < PARKING_REVOTE_DAYS) {
+        // 30 天內重複回報＝更新自己的那一票，不是新增一票
+        await ref.set({ type, kind: kind || null, note, lat, lng, accuracy, adjusted, at: now, updatedAt: now }, { merge: true });
+        return res.json({ ok: true, updated: true, destKey });
+      }
+    }
+    // 欄位逐一指定，不把 req.body 展開進來
+    await ref.set({
+      uid: req.user.uid,
+      destKey,
+      tripId,
+      stopId,
+      type,
+      kind: kind || null,
+      note,
+      lat, lng, accuracy, adjusted,
+      distance: distance === null ? null : Math.round(distance),
+      at: now,
+      updatedAt: now
+    });
+    return res.json({ ok: true, created: true, destKey });
+  } catch (err) {
+    // 不要把座標或 body 寫進日誌
+    console.error('[proxy] parking-report 寫入失敗：', err && err.message);
+    return res.status(500).json({ error: 'write failed' });
+  }
+});
+
 app.post('/api/collab/invites/verify', collabLimiter, requireFirebaseUser, async (req, res) => {
   // 信箱驗證只屬於註冊提示；登入後的共編功能僅要求 token 具有 email。
   if (!req.user.email) {
