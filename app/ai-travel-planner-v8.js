@@ -543,14 +543,53 @@
   }
 
   // 從 TDX 停車場清單挑距 center ≤ 半徑、依距離排序的前幾筆候選
+  // ⚠ 候選物件會一路傳到渲染端，因此來源標記必須跟著走。
+  //   這裡原本只保留 lat/lng/name，社群回報點的 source/note 在這一步就被丟掉，
+  //   到了畫面上就無從分辨它是官方停車場還是旅伴回報的位置（見計畫書 1.2 缺口四）。
   function nearbyTdxParkings(center, list, maxMeters, limit = 3) {
     if (!center || !Array.isArray(list) || !list.length) return [];
     return list
-      .map((p) => ({ cand: { lat: p.lat, lng: p.lng, name: p.name }, d: measureDistanceMeters(center, p) }))
+      .map((p) => {
+        const cand = { lat: p.lat, lng: p.lng, name: p.name };
+        if (p.source) cand.parkingSource = p.source;          // 'community' 等
+        if (p.kind) cand.kind = p.kind;                        // 'lot' | 'roadside'
+        if (Number.isFinite(Number(p.reports))) cand.reports = Number(p.reports);
+        if (p.lastConfirmedAt) cand.lastConfirmedAt = p.lastConfirmedAt;
+        if (p.parkingNote) cand.parkingNote = p.parkingNote;
+        return { cand, d: measureDistanceMeters(center, p) };
+      })
       .filter((x) => x.d <= maxMeters)
       .sort((a, b) => a.d - b.d)
       .slice(0, limit)
       .map((x) => x.cand);
+  }
+
+  // 促進門檻：≥3 位不同回報者才算「正式」，才有資格插隊到景點資料之前。
+  // 與 docs/停車回報群眾外包-實作計畫.md 6.6 的聚合門檻對齊；那邊算 uid 數，這邊只看已促進的結果。
+  const COMMUNITY_PARKING_MIN_REPORTS = 3;
+
+  /** 取離 center 最近、且已達正式等級的社群停車點；沒有就回 null。 */
+  function pickPromotedCommunityParking(center) {
+    const list = getLocalParkingList();
+    if (!center || !Array.isArray(list) || !list.length) return null;
+    const promoted = list.filter((p) => p
+      && p.source === 'community'
+      && (Number(p.reports) || 0) >= COMMUNITY_PARKING_MIN_REPORTS
+      && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng)));
+    if (!promoted.length) return null;
+    return nearbyTdxParkings(center, promoted, PARKING_SEARCH_RADIUS_METERS, 1)[0] || null;
+  }
+
+  /**
+   * 社群回報點的說明文字。資料檔只存結構化欄位（source/kind/reports），
+   * 文案在這裡組，才不會把措辭烤進 parking-data.js（那個檔是自動產生的）。
+   */
+  function buildCommunityParkingNote(parking) {
+    if (!parking || parking.parkingSource !== 'community') return '';
+    const n = Number(parking.reports) || 0;
+    const who = n >= 2 ? `${n} 位旅伴曾停在這` : '1 位旅伴曾停在這';
+    const kind = parking.kind === 'roadside' ? '路邊停車格' : '';
+    return `${who}${kind ? `（${kind}）` : ''}，非官方停車場，請依現場標示為準。`;
   }
 
   function getExactCoordinateFromStop(stop = {}) {
@@ -14027,6 +14066,17 @@
     const finish = (coord) => { _parkingCoordCache.set(key, coord || null); return coord || null; };
 
     try {
+      // 0) 已促進的社群回報點（≥3 位不同回報者）排在最前面。
+      //    理由：getEmbeddedParkingHint 是文字啟發式——它比對景點描述裡有沒有「停車場」三個字，
+      //    命中時回傳的是「景點本身的座標」，並不是真的停車場位置。
+      //    而促進過的社群點是多位使用者實際停過、帶真實座標的位置，資訊品質嚴格較高。
+      //    僅限「正式」等級（reports >= 3）才插隊；低信心的社群點仍走原本的第二層。
+      const promoted = pickPromotedCommunityParking(center);
+      if (promoted) {
+        const chosenPromoted = await pickWalkableParking(center, [promoted]);
+        if (chosenPromoted) return finish(chosenPromoted);
+      }
+
       // 景點資料若已明確說明附設停車場，直接採用景點座標，避免被外部 API 的稀疏資料覆蓋。
       const embedded = getEmbeddedParkingHint(stop, center);
       if (embedded) return finish(embedded);
@@ -14741,16 +14791,23 @@
             // 停車樞紐：畫 🅿️ 停車點 + 停車點↔景點綠色虛線步行線
             if (destParking) {
               drawParkingMarker(i, destParking, renderToken);
-              if (destParking.parkingSource === 'stop-data') {
+              // 有來源說明就顯示（原本寫死只認 'stop-data'，社群點永遠顯示不出來）
+              const sourceNote = destParking.parkingSource === 'community'
+                ? buildCommunityParkingNote(destParking)
+                : (destParking.parkingSource === 'stop-data'
+                  ? (destParking.parkingNote || '請以現場標示為準')
+                  : '');
+              if (sourceNote) {
                 const note = stageDiv.querySelector('.stage-walk-note');
                 if (note) {
-                  note.textContent = `🅿️ ${destParking.name}：${destParking.parkingNote || '請以現場標示為準'}`;
+                  note.textContent = `🅿️ ${destParking.name}：${sourceNote}`;
                   note.style.display = 'block';
                 }
               }
               drawWalkOverlay(i, destParking, destination, renderToken).then((walk) => {
                 if (renderToken !== routeRenderToken || !walk) return;
-                if (walk.text && destParking.parkingSource !== 'stop-data') {
+                // 已經有來源說明的就不要被步行時間覆蓋掉——來源比步行秒數重要
+                if (walk.text && !sourceNote) {
                   const note = stageDiv.querySelector('.stage-walk-note');
                   if (note) {
                     note.textContent = `🅿️ 停車後步行約 ${walk.text} 到${shortStopName(destination.name || destination.title || '景點')}`;

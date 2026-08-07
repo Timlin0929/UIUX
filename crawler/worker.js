@@ -1341,6 +1341,13 @@ async function exportParkingLocal(db) {
     if (d.smallSpots) poi.smallSpots = d.smallSpots;
     if (d.motoSpots) poi.motoSpots = d.motoSpots;
     if (d.notes) poi.notes = d.notes;
+    // 社群回報促進而來的點：來源與信心必須跟著出到靜態檔，
+    // 否則前端無法把它跟官方停車場區分開（見 docs/停車回報群眾外包-實作計畫.md 1.2 缺口四）。
+    // ⚠ 個別回報的 note 一律不出——那是使用者寫的自由文字，不該進公開資料檔。
+    if (d.source) poi.source = d.source;                       // 'community'
+    if (d.kind) poi.kind = d.kind;                             // 'lot' | 'roadside'
+    if (Number.isFinite(d.reports)) poi.reports = d.reports;
+    if (d.lastConfirmedAt) poi.lastConfirmedAt = d.lastConfirmedAt;
     list.push(poi);
   });
   const payload = { __generatedAt: new Date().toISOString(), taitungCounty: list };
