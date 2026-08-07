@@ -21,6 +21,10 @@
   let parkingAdjustMarker = null;
   let parkingMainMarker = null;
   let parkingReportStopId = '';
+  // 待補座標的回報草稿。選「找到停車場」時先擱置，等使用者在地圖上標好位置再一起送出。
+  // 沒有座標的「找到停車場」對後續聚合毫無用處——它只會把警示關掉，卻不告訴任何人要去哪停
+  //（見 docs/停車回報群眾外包-實作計畫.md 3.1）。因此寧可不送，也不留一筆無法定位的回報。
+  let pendingParkingReport = null;
   let lastUserLocation = null;
   let currentTripMembers = null;   // 共編成員 map（members[ekey]）
   let currentTripOwnerName = '';
@@ -1125,19 +1129,32 @@
     )));
   }
 
+  // ⚠ 這是白名單映射：沒列在這裡的欄位會被靜默丟掉。新增回報欄位時務必一併加進來，
+  //   否則送出後立刻被 submitParkingReport 的 normalize 濾掉，且不會有任何錯誤訊息。
   function normalizeParkingReports(value) {
     if (!Array.isArray(value)) return [];
     return value.filter((report) => report && report.stopId && report.type)
-      .map((report) => ({
-        id: String(report.id || `${report.stopId}-${report.at || Date.now()}`),
-        stopId: String(report.stopId),
-        stopName: String(report.stopName || '景點'),
-        type: String(report.type),
-        note: String(report.note || '').slice(0, 240),
-        at: Number(report.at) || Date.now(),
-        uid: String(report.uid || ''),
-        displayName: String(report.displayName || '旅伴')
-      }))
+      .map((report) => {
+        const out = {
+          id: String(report.id || `${report.stopId}-${report.at || Date.now()}`),
+          stopId: String(report.stopId),
+          stopName: String(report.stopName || '景點'),
+          type: String(report.type),
+          note: String(report.note || '').slice(0, 240),
+          at: Number(report.at) || Date.now(),
+          uid: String(report.uid || ''),
+          displayName: String(report.displayName || '旅伴')
+        };
+        // 座標為選填：只有「找到停車場」會帶，其餘狀況沒有可標的點。
+        // 一律留 4 位小數（≈11m）——精度足以區分相鄰停車場，又不必保存到公尺級。
+        if (Number.isFinite(Number(report.lat)) && Number.isFinite(Number(report.lng))) {
+          out.lat = Math.round(Number(report.lat) * 1e4) / 1e4;
+          out.lng = Math.round(Number(report.lng) * 1e4) / 1e4;
+          out.accuracy = Math.max(0, Number(report.accuracy) || 0);
+          out.adjusted = Boolean(report.adjusted);
+        }
+        return out;
+      })
       .slice(-50);
   }
 
@@ -1324,6 +1341,12 @@
     document.body.classList.remove('parking-sheet-open');
     parkingDraft = null;
     parkingDraftStopId = '';
+    // 中途離開位置標記 → 那筆「找到停車場」拿不到座標，送出去對誰都沒用，直接作廢並說明。
+    // （saveParkingRecord 會在呼叫本函式之前先取走草稿，因此正常儲存不會誤觸這裡。）
+    if (pendingParkingReport) {
+      pendingParkingReport = null;
+      feedbackToast('未標記位置，這次回報沒有送出', 'orange');
+    }
   };
 
   window.appendParkingNote = function(text) {
@@ -1340,6 +1363,16 @@
     const previous = getParkingRecord(parkingDraftStopId);
     const noteInput = document.getElementById('parkingNoteInput');
     const savedAt = Date.now();
+    // 這一步標到的座標，同時也是「找到停車場」那筆回報要帶的座標。
+    // 必須在 closeParkingRecordSheet() 之前取走——那個函式會把草稿清掉（它代表「使用者放棄」的路徑）。
+    const savedStopId = parkingDraftStopId;
+    const savedCoords = {
+      lat: parkingDraft.lat, lng: parkingDraft.lng,
+      accuracy: parkingDraft.accuracy, adjusted: parkingDraftAdjusted
+    };
+    const pendingReport = (pendingParkingReport && pendingParkingReport.stopId === savedStopId)
+      ? pendingParkingReport : null;
+    pendingParkingReport = null;
     Object.entries(parkingRecords).forEach(([stopId, record]) => {
       if (stopId !== parkingDraftStopId && record && !record.releasedAt) {
         parkingRecords[stopId] = { ...record, releasedAt: savedAt };
@@ -1361,6 +1394,13 @@
     renderActiveParkingUI();
     renderItineraryDisplay();
     await persistParkingRecords();
+    if (pendingReport) {
+      const stop = (replanStops || []).find((item) => item.id === savedStopId);
+      if (stop) {
+        await commitParkingReport(stop, pendingReport.type, pendingReport.note, savedCoords);
+        return feedbackToast('🅿️ 停車位置已記錄，回報已送出', 'green');
+      }
+    }
     feedbackToast('🅿️ 停車位置已記錄', 'green');
   };
 
@@ -1395,11 +1435,12 @@
     parkingReportStopId = '';
   };
 
-  window.submitParkingReport = async function() {
-    const stop = (replanStops || []).find((item) => item.id === parkingReportStopId);
-    const type = document.getElementById('parkingReportType')?.value || 'found';
-    const note = String(document.getElementById('parkingReportNote')?.value || '').trim().slice(0, 240);
-    if (!stop) return window.closeParkingReportSheet();
+  /**
+   * 把一筆回報寫進 parkingReports 並落地。coords 為選填（只有「找到停車場」會帶）。
+   * 抽出來是因為有兩條路徑會用到：直接送出（無座標的狀況），
+   * 以及「找到停車場」標完位置後才回頭送出（見 saveParkingRecord）。
+   */
+  async function commitParkingReport(stop, type, note, coords) {
     const now = Date.now();
     let reporter = '';
     let uid = '';
@@ -1419,6 +1460,12 @@
       uid,
       displayName: reporter || '旅伴'
     };
+    if (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lng))) {
+      report.lat = Number(coords.lat);
+      report.lng = Number(coords.lng);
+      report.accuracy = Number(coords.accuracy) || 0;
+      report.adjusted = Boolean(coords.adjusted);
+    }
     if (existing >= 0) parkingReports[existing] = report;
     else parkingReports.push(report);
     parkingReports = normalizeParkingReports(parkingReports);
@@ -1427,10 +1474,31 @@
       stage.parkingSearched = true;
       stage.parkingFound = type === 'found';
     }
-    window.closeParkingReportSheet();
     renderItineraryDisplay();
     await persistParkingRecords();
-    feedbackToast('🅿️ 停車資訊回報已送出，已同步給同行者', 'green');
+  }
+
+  window.submitParkingReport = async function() {
+    const stop = (replanStops || []).find((item) => item.id === parkingReportStopId);
+    const type = document.getElementById('parkingReportType')?.value || 'found';
+    const note = String(document.getElementById('parkingReportNote')?.value || '').trim().slice(0, 240);
+    if (!stop) return window.closeParkingReportSheet();
+
+    // 「找到停車場」必須帶座標，否則這則回報只會把警示關掉，卻不告訴任何人要去哪停。
+    // 先把草稿擱著，轉去既有的位置標記流程；標好按儲存時才真正送出（saveParkingRecord）。
+    if (type === 'found') {
+      if (collabReadOnly) {
+        window.closeParkingReportSheet();
+        return feedbackToast('訪客或唯讀成員無法回報停車位置', 'orange');
+      }
+      pendingParkingReport = { stopId: stop.id, type, note };
+      window.closeParkingReportSheet();
+      return window.openParkingRecordSheet(stop.id);
+    }
+
+    window.closeParkingReportSheet();
+    await commitParkingReport(stop, type, note, null);
+    feedbackToast('🅿️ 已收到回報，謝謝', 'green');
   };
 
   window.openActiveParkingDetails = function() {
