@@ -30,11 +30,14 @@ function validate(body, dest) {
   if (!String(body.tripId || '').trim() || !String(body.stopId || '').trim()) return 'invalid trip or stop';
   if (!TYPES.has(type)) return 'invalid type';
   const hasCoords = lat !== null && lng !== null;
+  // 範圍檢查在 type 分支之外：非 found 也可能帶座標
+  if (hasCoords && (lat < -90 || lat > 90 || lng < -180 || lng > 180)) return 'coordinates out of range';
   if (type === 'found') {
     if (!hasCoords) return 'coordinates required';
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return 'coordinates out of range';
     if (!KINDS.has(kind)) return 'invalid kind';
     if (accuracy === null || accuracy < 0 || accuracy > MAX_ACC) return 'accuracy too low';
+  } else if (kind && !KINDS.has(kind)) {
+    return 'invalid kind';
   }
   if (hasCoords && haversineMeters({ lat, lng }, dest) > GEOFENCE) return 'too far from destination';
   return null;   // 通過
@@ -72,6 +75,19 @@ ok('1.5km 外被拒', validate({ ...base, lat: 22.8050, lng: 121.1200 }, DEST) =
 const spoof = { ...base, lat: 25.0330, lng: 121.5654, destLat: 25.0330, destLng: 121.5654 };
 ok('★ 偽造 destLat/destLng 無法繞過圍籬（台北座標被擋）',
   validate(spoof, DEST) === 'too far from destination');
+
+console.log('\n── 非 found 的旁路（Codex 審查抓到）──');
+// 經度 +360 落在同一條子午線上，Haversine 距離為 0——圍籬擋不住，
+// 只有明確的範圍檢查能擋，而原本的範圍檢查只在 found 分支裡。
+const wrap = { tripId: 't1', stopId: 's1', type: 'full', lat: DEST.lat, lng: DEST.lng + 360 };
+ok('★ 非 found 的經度 +360 被範圍檢查擋下（圍籬擋不到）',
+  validate(wrap, DEST) === 'coordinates out of range');
+ok('非 found 的緯度 91 也被擋',
+  validate({ tripId: 't1', stopId: 's1', type: 'full', lat: 91, lng: DEST.lng }, DEST) === 'coordinates out of range');
+ok('非 found 帶未知 kind 被拒',
+  validate({ tripId: 't1', stopId: 's1', type: 'full', kind: 'helicopter' }, DEST) === 'invalid kind');
+ok('非 found 不帶 kind 仍通過',
+  validate({ tripId: 't1', stopId: 's1', type: 'full' }, DEST) === null);
 
 console.log('\n── 地點鍵 ──');
 ok('同一地點的兩次回報產生相同 destKey',

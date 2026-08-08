@@ -82,6 +82,11 @@ app.use('/api/parking-report', (req, res, next) => {
   if (len > 8 * 1024) return res.status(413).json({ error: 'payload too large' });
   next();
 });
+// ⚠ 上面那道只看 Content-Length，chunked 傳輸可以不帶這個標頭就繞過去
+//   （Codex 審查抓到）。所以再掛一個「這條路由專用」的 8kb 解析器：
+//   body-parser 會設 req._body，後面的全域 5mb 解析器看到就直接跳過，
+//   真正的位元組數由這裡把關，不靠攻擊者自己宣告的長度。
+app.use('/api/parking-report', express.json({ limit: '8kb' }));
 app.use(express.json({ limit: '5mb' })); // 行程 prompt 可能較大
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'wanderai-proxy' }));
@@ -349,8 +354,10 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
   if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
   const body = req.body || {};
 
-  const tripId = String(body.tripId || '').trim();
-  const stopId = String(body.stopId || '').trim();
+  const tripId = String(body.tripId || '').trim().slice(0, 120);
+  // stopId 只留作事後對帳；比對目的地靠的是座標，所以這裡限長度就夠，
+  // 不必也不能要求它對得上（前端的 cstop-* 是每個 session 自己生的）。
+  const stopId = String(body.stopId || '').trim().slice(0, 120);
   const type = String(body.type || '').trim();
   const kind = String(body.kind || '').trim();
   const note = String(body.note || '').trim().slice(0, 120);
@@ -364,15 +371,21 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
 
   // 只有「找到停車場」帶座標；其餘狀況沒有可標的點
   const hasCoords = lat !== null && lng !== null;
+  // ⚠ 範圍檢查要在 type 分支「之外」——原本只檢查 found，於是 type: 'full'
+  //   可以塞 lng = 目的地經度 + 360：Haversine 的 sin(180°) = 0，圍籬照樣通過，
+  //   資料庫卻存進超出 [-180, 180] 的經度（Codex 審查抓到）。
+  if (hasCoords && (lat < -90 || lat > 90 || lng < -180 || lng > 180)) {
+    return res.status(400).json({ error: 'coordinates out of range' });
+  }
   if (type === 'found') {
     if (!hasCoords) return res.status(400).json({ error: 'coordinates required' });
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      return res.status(400).json({ error: 'coordinates out of range' });
-    }
     if (!PARKING_REPORT_KINDS.has(kind)) return res.status(400).json({ error: 'invalid kind' });
     if (accuracy === null || accuracy < 0 || accuracy > PARKING_MAX_ACCURACY) {
       return res.status(400).json({ error: 'accuracy too low' });
     }
+  } else if (kind && !PARKING_REPORT_KINDS.has(kind)) {
+    // 非 found 的 kind 沒有意義，但也不能讓任意字串寫進資料庫
+    return res.status(400).json({ error: 'invalid kind' });
   }
 
   // 目的地座標一律由伺服器反查。
@@ -435,6 +448,9 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
   const destKey = destKeyOf(destLat, destLng);
   const docId = `${destKey}__${req.user.uid}`;
   const now = Timestamp.now();
+  // accuracy 只在 found 走過上面的上下界檢查；其餘狀況一律不落地，
+  // 免得非法數值混進去污染日後的聚合統計。
+  const safeAccuracy = (type === 'found') ? accuracy : null;
 
   try {
     const ref = adminDb.collection(PARKING_REPORT_COLLECTION).doc(docId);
@@ -445,7 +461,7 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
       const days = (Date.now() - prevMs) / 86400000;
       if (days < PARKING_REVOTE_DAYS) {
         // 30 天內重複回報＝更新自己的那一票，不是新增一票
-        await ref.set({ type, kind: kind || null, note, lat, lng, accuracy, adjusted, at: now, updatedAt: now }, { merge: true });
+        await ref.set({ type, kind: kind || null, note, lat, lng, accuracy: safeAccuracy, adjusted, at: now, updatedAt: now }, { merge: true });
         return res.json({ ok: true, updated: true, destKey });
       }
     }
@@ -458,7 +474,7 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
       type,
       kind: kind || null,
       note,
-      lat, lng, accuracy, adjusted,
+      lat, lng, accuracy: safeAccuracy, adjusted,
       distance: distance === null ? null : Math.round(distance),
       at: now,
       updatedAt: now

@@ -570,6 +570,7 @@
      這一層讓「第一筆回報就對回報者本人有價值」，也是本功能第一個真的有人受益的時刻。 */
   let myParkingPoints = [];
   let myParkingPromise = null;
+  let myParkingUid = null;   // 這份快取屬於哪個帳號
 
   /* 快取的是 Promise 而不是布林旗標。
      ⚠ 原本寫成 `if (loaded) return; loaded = true; await fetch(...)`——
@@ -579,10 +580,19 @@
      存 Promise 後，後到的呼叫者會等同一個請求，而不是略過它。
      只發一次、失敗也不重試——這是加值資訊，不該拖慢每次畫路線。 */
   function loadMyParkingPoints() {
-    if (myParkingPromise) return myParkingPromise;
+    const uid = (firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.uid) || null;
+    /* ⚠ 快取必須綁在 uid 上（Codex 審查抓到）。
+       原本只看有沒有 Promise，於是頁面剛載入、Firebase 還沒恢復登入時
+       第一次呼叫就把「已完成的空 Promise」永久存起來——之後登入了也不會再去拿，
+       個人層級整個失效。而路線解析本來就常常跑在登入恢復之前。
+       綁 uid 還順便解掉同頁切帳號會看到前一個帳號停車點的問題。 */
+    if (myParkingPromise && myParkingUid === uid) return myParkingPromise;
+    myParkingUid = uid;
+    myParkingPoints = [];
+    if (!uid) { myParkingPromise = null; return Promise.resolve(myParkingPoints); }
     myParkingPromise = (async () => {
       const base = VERTEX_PROXY_BASE;
-      if (!base || !firebaseAuth || !firebaseAuth.currentUser) return myParkingPoints;
+      if (!base) return myParkingPoints;
       try {
         const token = await firebaseAuth.currentUser.getIdToken();
         const res = await fetch(`${base}/parking-reports/mine`, {
@@ -1513,8 +1523,9 @@
     if (pendingReport) {
       const stop = (replanStops || []).find((item) => item.id === savedStopId);
       if (stop) {
-        await commitParkingReport(stop, pendingReport.type, pendingReport.note, savedCoords);
-        return feedbackToast('🅿️ 停車位置已記錄，回報已送出', 'green');
+        const shared = await commitParkingReport(stop, pendingReport.type, pendingReport.note, savedCoords);
+        if (shared) return feedbackToast('🅿️ 停車位置已記錄，回報已送出', 'green');
+        return feedbackToast('🅿️ 停車位置已記錄；社群回報沒送出，稍後可再試一次', 'orange');
       }
     }
     feedbackToast('🅿️ 停車位置已記錄', 'green');
@@ -1592,8 +1603,9 @@
     renderItineraryDisplay();
     await persistParkingRecords();
     // 送一份到共用集合供跨使用者聚合（計畫第四節）。
-    // fire-and-forget：這是加值資料，失敗不該影響行程本身已經存好的回報。
-    sendParkingReportToBackend(stop, type, note, coords).catch(() => {});
+    // 失敗不影響行程本身已經存好的回報，但要回報給呼叫端——
+    // 使用者以為「已提供給未來訪客」卻其實沒送出，是不能默默吞掉的落差。
+    return sendParkingReportToBackend(stop, type, note, coords).catch(() => false);
   }
 
   /**
@@ -1623,11 +1635,18 @@
       payload.kind = 'lot';   // TODO：等 UI 加上「停車場／路邊格」選項後改由使用者指定（計畫 6.1）
     }
     const token = await firebaseAuth.currentUser.getIdToken();
-    await fetch(`${base}/parking-report`, {
+    const res = await fetch(`${base}/parking-report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify(payload)
     });
+    // ⚠ fetch 對 HTTP 4xx/5xx 不會 reject——不看 res.ok 的話，
+    //   被圍籬或限流擋掉的回報也會一路顯示成功（Codex 審查抓到）。
+    if (!res.ok) return false;
+    // 自己剛回報的點下一次解析就該看得到，讓快取失效
+    myParkingPromise = null;
+    myParkingUid = null;
+    return true;
   }
 
   window.submitParkingReport = async function() {
@@ -1651,8 +1670,9 @@
     }
 
     window.closeParkingReportSheet();
-    await commitParkingReport(stop, type, note, null);
-    feedbackToast('🅿️ 已收到回報，謝謝', 'green');
+    const shared = await commitParkingReport(stop, type, note, null);
+    if (shared) feedbackToast('🅿️ 已收到回報，謝謝', 'green');
+    else feedbackToast('🅿️ 已記在這趟行程；社群回報沒送出，稍後可再試一次', 'orange');
   };
 
   window.openActiveParkingDetails = function() {
