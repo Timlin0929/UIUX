@@ -569,23 +569,32 @@
      但同一個人再訪同一地點時，他自己上次停過的位置立即可用——不必等別人附議。
      這一層讓「第一筆回報就對回報者本人有價值」，也是本功能第一個真的有人受益的時刻。 */
   let myParkingPoints = [];
-  let myParkingLoaded = false;
+  let myParkingPromise = null;
 
-  async function loadMyParkingPoints() {
-    if (myParkingLoaded) return myParkingPoints;
-    myParkingLoaded = true;   // 失敗也不重試：這是加值資訊，不該拖慢每次畫路線
-    const base = VERTEX_PROXY_BASE;
-    if (!base || !firebaseAuth || !firebaseAuth.currentUser) return myParkingPoints;
-    try {
-      const token = await firebaseAuth.currentUser.getIdToken();
-      const res = await fetch(`${base}/parking-reports/mine`, {
-        headers: { Authorization: 'Bearer ' + token }
-      });
-      if (!res.ok) return myParkingPoints;
-      const data = await res.json();
-      myParkingPoints = Array.isArray(data.items) ? data.items : [];
-    } catch (_e) { /* 拿不到就當作沒有，不影響既有的四層解析 */ }
-    return myParkingPoints;
+  /* 快取的是 Promise 而不是布林旗標。
+     ⚠ 原本寫成 `if (loaded) return; loaded = true; await fetch(...)`——
+       旗標在 await 之前就設好，於是同一輪併發進來的其他呼叫者全部直接跳過，
+       拿到還是空的陣列。路線解析正是一次併發解析多個站點，
+       結果第一批站點永遠看不到自己的停車點（端到端測試才抓到）。
+     存 Promise 後，後到的呼叫者會等同一個請求，而不是略過它。
+     只發一次、失敗也不重試——這是加值資訊，不該拖慢每次畫路線。 */
+  function loadMyParkingPoints() {
+    if (myParkingPromise) return myParkingPromise;
+    myParkingPromise = (async () => {
+      const base = VERTEX_PROXY_BASE;
+      if (!base || !firebaseAuth || !firebaseAuth.currentUser) return myParkingPoints;
+      try {
+        const token = await firebaseAuth.currentUser.getIdToken();
+        const res = await fetch(`${base}/parking-reports/mine`, {
+          headers: { Authorization: 'Bearer ' + token }
+        });
+        if (!res.ok) return myParkingPoints;
+        const data = await res.json();
+        myParkingPoints = Array.isArray(data.items) ? data.items : [];
+      } catch (_e) { /* 拿不到就當作沒有，不影響既有的四層解析 */ }
+      return myParkingPoints;
+    })();
+    return myParkingPromise;
   }
 
   /** 取離 center 最近、我自己回報過的停車點 */
@@ -1582,6 +1591,43 @@
     // 提示改由 getLatestParkingReport() 從持久化的回報推導，效果撐得過重畫。
     renderItineraryDisplay();
     await persistParkingRecords();
+    // 送一份到共用集合供跨使用者聚合（計畫第四節）。
+    // fire-and-forget：這是加值資料，失敗不該影響行程本身已經存好的回報。
+    sendParkingReportToBackend(stop, type, note, coords).catch(() => {});
+  }
+
+  /**
+   * 把回報送進共用集合。走後端端點而非直寫 Firestore——
+   * 地理圍籬需要反查行程，Rules 表達不了；且直寫沒有可靠的限流。
+   * ★ 不送目的地座標讓後端「相信」，而是送站點座標讓後端「比對」：
+   *   後端會在這趟行程的 stops 裡找有沒有這個站，找到才用資料庫裡那筆的座標。
+   */
+  async function sendParkingReportToBackend(stop, type, note, coords) {
+    const base = VERTEX_PROXY_BASE;
+    if (!base || !firebaseAuth || !firebaseAuth.currentUser) return;
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+    const stopLat = Number(stop && stop.lat), stopLng = Number(stop && stop.lng);
+    if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) return;
+    const payload = {
+      tripId: currentItineraryId,
+      stopId: stop.id,
+      stopLat, stopLng,
+      type,
+      note: String(note || '').slice(0, 120)
+    };
+    if (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lng))) {
+      payload.lat = Number(coords.lat);
+      payload.lng = Number(coords.lng);
+      payload.accuracy = Number(coords.accuracy) || 0;
+      payload.adjusted = Boolean(coords.adjusted);
+      payload.kind = 'lot';   // TODO：等 UI 加上「停車場／路邊格」選項後改由使用者指定（計畫 6.1）
+    }
+    const token = await firebaseAuth.currentUser.getIdToken();
+    await fetch(`${base}/parking-report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify(payload)
+    });
   }
 
   window.submitParkingReport = async function() {
@@ -14848,7 +14894,9 @@
               if (sourceNote) {
                 const note = stageDiv.querySelector('.stage-walk-note');
                 if (note) {
-                  note.textContent = `🅿️ ${destParking.name}：${sourceNote}`;
+                  // 「我的停車點」沒有地名可寫，加上去只會變成「你上次停的位置：你上次停在這裡」
+                  const label = destParking.parkingSource === 'mine' ? '' : `${destParking.name}：`;
+                  note.textContent = `🅿️ ${label}${sourceNote}`;
                   note.style.display = 'block';
                 }
               }

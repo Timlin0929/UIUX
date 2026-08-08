@@ -389,13 +389,33 @@ app.post('/api/parking-report', parkingReportIpLimiter, requireFirebaseUser, par
       || (email && (data.editorEmails || []).map(normalizeEmail).includes(email));
     if (!allowed) return res.status(403).json({ error: 'not your trip' });
 
-    const stop = (Array.isArray(data.stops) ? data.stops : []).find((s) => s && s.id === stopId);
-    if (!stop) return res.status(404).json({ error: 'stop not found' });
-    destLat = finiteNumber(stop.lat);
-    destLng = finiteNumber(stop.lng);
-    if (destLat === null || destLng === null) {
-      return res.status(422).json({ error: 'stop has no coordinates' });
+    /* 找出這筆回報對應的站點。
+       ⚠ 不能用 stopId 比對——前端的 `cstop-*` 是每個 session 自己生成的，
+         Firestore 的 stops[] 裡根本沒有 id 欄位（端到端測試才發現）。
+
+       改為由前端宣告站點座標，後端**在這趟行程的 stops 裡找有沒有這個站**：
+       - 找得到 → 用「Firestore 裡那一筆的座標」當權威值，不用前端宣告的
+       - 找不到 → 拒絕
+       防偽造的性質因此保住：攻擊者無法憑空指定目的地，
+       他宣告的座標必須真的對應到一個他有權限的行程裡的站點。 */
+    const claimLat = finiteNumber(body.stopLat);
+    const claimLng = finiteNumber(body.stopLng);
+    if (claimLat === null || claimLng === null) {
+      return res.status(400).json({ error: 'stop coordinates required' });
     }
+    const STOP_MATCH_METERS = 50;   // 容忍前端與資料庫間的浮點誤差，但不足以指到另一個站
+    let matched = null, matchedDist = Infinity;
+    for (const s of (Array.isArray(data.stops) ? data.stops : [])) {
+      const sLat = finiteNumber(s && s.lat), sLng = finiteNumber(s && s.lng);
+      if (sLat === null || sLng === null) continue;
+      const d = haversineMeters({ lat: claimLat, lng: claimLng }, { lat: sLat, lng: sLng });
+      if (d < matchedDist) { matchedDist = d; matched = { lat: sLat, lng: sLng }; }
+    }
+    if (!matched || matchedDist > STOP_MATCH_METERS) {
+      return res.status(404).json({ error: 'stop not found' });
+    }
+    destLat = matched.lat;   // 一律用資料庫裡的值，不用前端宣告的
+    destLng = matched.lng;
   } catch (err) {
     console.error('[proxy] parking-report 反查目的地失敗：', err && err.message);
     return res.status(500).json({ error: 'lookup failed' });
