@@ -935,10 +935,57 @@
     return Boolean(window.google && google.maps && google.maps.places && google.maps.places.PlacesService);
   }
 
+  /* 地圖 SDK 實際呼叫計數（本次頁面開啟）。
+     為什麼這幾項用實測而不是推估：它們的次數取決於執行期才知道的結果——
+     停車場是第幾層資料源命中（景點資料／本地縣府資料／TDX／Places）、
+     候選要試幾個才有一個步行 ≤12 分、Places 查詢有沒有被本地快取短路。
+     推不出來，硬推只會給出一個看起來精確的錯數字。
+     反過來主路線是每段必打、次數只看行程結構，那個才適合推估
+     （見 estimateDirectionsUsage）。
+
+     計數與 _walkRouteCache／_parkingCoordCache 同生命週期（都不清空），
+     所以它代表「本次開啟這頁到目前為止」的量，重新整理就重來一輪——
+     這正好是這些呼叫真正的計費單位。 */
+  const mapsCallTally = {
+    walkOverlay: 0,      // 停車場↔景點步行線（Directions WALKING）
+    walkValidate: 0,     // 停車場候選的步行時間驗證（Directions WALKING）
+    placesNearby: 0,     // PlacesService.nearbySearch（全檔，含停車場候選）
+    placesText: 0,       // PlacesService.textSearch（全檔，含 nearbySearch 無結果的退回）
+    placesDetails: 0,    // PlacesService.getDetails（營業時間／詳細欄位）
+    geocode: 0           // Geocoder.geocode（地址 → 座標，另一個 SKU）
+  };
+
+  /* 計費方法 → mapsCallTally 的欄位。
+     ⚠ 計數包在「共用的那一個 PlacesService 實例」上，不是在各呼叫點各加一行。
+       全檔有 17 處呼叫 getPlacesService()，原本只有停車場那兩處有計數，
+       其餘 15 處全部漏掉——逐點加計數注定會漏，而且新增呼叫點時沒人會記得補。
+       包在實例上之後，任何經過 getPlacesService() 的呼叫都自動被算到。 */
+  const PLACES_BILLED_METHODS = {
+    nearbySearch: 'placesNearby',
+    textSearch: 'placesText',
+    getDetails: 'placesDetails'
+  };
+  function instrumentPlacesService(svc) {
+    if (!svc) return svc;
+    Object.keys(PLACES_BILLED_METHODS).forEach((method) => {
+      if (typeof svc[method] !== 'function') return;
+      const original = svc[method].bind(svc);
+      const field = PLACES_BILLED_METHODS[method];
+      svc[method] = function (...args) {
+        mapsCallTally[field] += 1;
+        if (window.WAI_COST) WAI_COST.countClientCall('placesLegacy');
+        return original(...args);
+      };
+    });
+    return svc;
+  }
+
   let placesServiceInstance = null;
   function getPlacesService() {
     if (placesServiceInstance || !hasGooglePlacesService()) return placesServiceInstance;
-    placesServiceInstance = new google.maps.places.PlacesService(document.createElement('div'));
+    placesServiceInstance = instrumentPlacesService(
+      new google.maps.places.PlacesService(document.createElement('div'))
+    );
     return placesServiceInstance;
   }
 
@@ -2182,6 +2229,9 @@
     const result = await new Promise((resolve) => {
       // 成本統計：Maps JS SDK 由瀏覽器直連 Google，後端看不到這些請求，只能在前端數。
       // 這個數字屬於「用戶端估算」，UI 上必須與後端權威數字分開標示。
+      // Geocoder 每次 new 一個新實例（不像 PlacesService 有共用實例可包），
+      // 所以這裡仍是手動計數；全檔只有這一處 geocode。
+      mapsCallTally.geocode += 1;
       if (window.WAI_COST) WAI_COST.countClientCall('geocoding');
       geocoder.geocode(
         {
@@ -4498,19 +4548,29 @@
     const basicRate = Number(rates && rates.directionsBasicUsd);
     const nearbyRate = Number(rates && rates.placesNearbySearchUsd);
     const textRate = Number(rates && rates.placesTextSearchUsd);
-    const priced = Number.isFinite(basicRate) && Number.isFinite(nearbyRate) && Number.isFinite(textRate);
+    const detailsRate = Number(rates && rates.placesDetailsUsd);
+    const geoRate = Number(rates && rates.geocodingUsd);
+    // 少任何一項費率就整個不報金額。用 0 代替缺漏的費率會低估，
+    // 而一個偏低但看起來精確的數字比「不知道」更糟。
+    const priced = [basicRate, nearbyRate, textRate, detailsRate, geoRate].every(Number.isFinite);
     const t = mapsCallTally;
     const walkCalls = t.walkOverlay + t.walkValidate;
-    const placesCalls = t.placesNearby + t.placesText;
+    const placesCalls = t.placesNearby + t.placesText + t.placesDetails;
     return {
       walkOverlay: t.walkOverlay,
       walkValidate: t.walkValidate,
       placesNearby: t.placesNearby,
       placesText: t.placesText,
+      placesDetails: t.placesDetails,
+      geocode: t.geocode,
       walkCalls, placesCalls,
-      total: walkCalls + placesCalls,
+      total: walkCalls + placesCalls + t.geocode,
       usd: priced
-        ? (walkCalls * basicRate + t.placesNearby * nearbyRate + t.placesText * textRate)
+        ? (walkCalls * basicRate
+          + t.placesNearby * nearbyRate
+          + t.placesText * textRate
+          + t.placesDetails * detailsRate
+          + t.geocode * geoRate)
         : null
     };
   }
@@ -4588,6 +4648,11 @@
     const twdOf = (usd) => (usd !== null && usd !== undefined && fxForEst) ? usd * fxForEst : null;
     const dirRedrawTwd = dirEst ? twdOf(dirEst.redrawUsd) : null;
     const tallyTwd = twdOf(tally.usd);
+    // 只列出真的發生過的細項——「含 0 次詳細資料」這種零值只是雜訊
+    const placesBreakdown = [
+      tally.placesText ? `${tally.placesText} 次文字搜尋` : '',
+      tally.placesDetails ? `${tally.placesDetails} 次詳細資料` : ''
+    ].filter(Boolean).join('、');
     // 地圖 API 小計＝主路線推估（1 次繪製）＋ 本次開啟已實際送出的停車場相關呼叫
     const mapsTwd = (dirRedrawTwd !== null || tallyTwd !== null)
       ? (dirRedrawTwd || 0) + (tallyTwd || 0)
@@ -4640,18 +4705,20 @@
             dirRedrawTwd !== null ? escapeHtml(fmtTwdAmount(dirRedrawTwd))
               : (dirEst.redrawUsd !== null ? 'US$' + dirEst.redrawUsd.toFixed(3) : '無費率')
           }</span></div>` : ''}
-          <div class="api-cost-row"><span>停車場候選查詢 · 實測</span><span>${tally.placesCalls} 次${
-            tally.placesText ? `（含 ${tally.placesText} 次文字搜尋退回）` : ''}</span></div>
+          <div class="api-cost-row"><span>Places 查詢 · 實測</span><span>${tally.placesCalls} 次${
+            placesBreakdown ? `（含 ${placesBreakdown}）` : ''}</span></div>
           <div class="api-cost-row"><span>停車場步行路線 · 實測</span><span>${tally.walkCalls} 次${
             tally.walkValidate ? `（含 ${tally.walkValidate} 次候選驗證）` : ''}</span></div>
+          ${tally.geocode ? `<div class="api-cost-row"><span>地址轉座標 · 實測</span><span>${tally.geocode} 次</span></div>` : ''}
           <div class="api-cost-note">
             <b>主路線</b>依行程站數與交通工具推算——每段必打，次數只看行程結構。切換交通工具、
             拖曳排序、重新規劃都會整條重畫，每重畫一次就多一份。
-            <b>停車場相關</b>則是本次開啟到目前為止的實際次數：它打幾次取決於停車場是第幾層資料源
-            命中（景點資料 → 台東本地資料 → TDX → Places，前三層零成本），推不出來只能實際數。
-            這些有快取，同一次開啟不會重複呼叫。${tally.placesCalls
-              ? '⚠ 候選查詢單價約是路線的 6 倍，是這裡最貴的一項。'
-              : '這趟沒走到 Places 那層，停車場查詢零成本。'}${dirEst && dirEst.freeCallsPerMonth
+            <b>其餘</b>是本次開啟到目前為止的實際次數。Places 查詢涵蓋整頁所有用途——
+            站點座標校正、營業時間、停車場候選都算在內；它打幾次取決於本地快取有沒有命中、
+            以及停車場是第幾層資料源命中（景點資料 → 台東本地資料 → TDX → Places，前三層零成本），
+            推不出來只能實際數。這些有快取，同一次開啟不會重複呼叫。${tally.placesCalls
+              ? '⚠ Places 單價約是路線的 6 倍，是這裡最貴的一項。'
+              : '這趟完全沒用到 Places，零成本。'}${dirEst && dirEst.freeCallsPerMonth
               ? `每月前 ${dirEst.freeCallsPerMonth.toLocaleString()} 次在免費額度內。`
               : ''}
           </div>
@@ -14171,21 +14238,8 @@
   const _parkingCoordCache = new Map();
   const _walkRouteCache = new Map();
 
-  /* 地圖 SDK 實際呼叫計數（本次頁面開啟）。
-     為什麼這幾項用實測而不是推估：它們的次數取決於執行期才知道的結果——
-     停車場是第幾層資料源命中（景點資料／本地縣府資料／TDX／Places）、
-     候選要試幾個才有一個步行 ≤12 分。推不出來，硬推只會給出一個看起來精確的錯數字。
-     反過來主路線是每段必打、次數只看行程結構，那個才適合推估。
-
-     計數與 _walkRouteCache／_parkingCoordCache 同生命週期（都不清空），
-     所以它代表「本次開啟這頁到目前為止」的量，重新整理就重來一輪——
-     這正好是這些呼叫真正的計費單位。 */
-  const mapsCallTally = {
-    walkOverlay: 0,      // 停車場↔景點步行線（Directions WALKING）
-    walkValidate: 0,     // 停車場候選的步行時間驗證（Directions WALKING）
-    placesNearby: 0,     // 停車場候選 nearbySearch
-    placesText: 0        // nearbySearch 無結果時的 textSearch 退回
-  };
+  // mapsCallTally 已移到檔案前段（緊鄰 instrumentPlacesService），因為計數包在
+  // 共用的 PlacesService 實例上，宣告必須早於那個包裝函式所在的區塊。
 
   function _coordKey(c) {
     return `${Number(c.lat).toFixed(4)},${Number(c.lng).toFixed(4)}`;
@@ -14314,15 +14368,12 @@
         .map((x) => x.cand);
     };
     return new Promise((resolve) => {
-      mapsCallTally.placesNearby += 1;
-      if (window.WAI_COST) WAI_COST.countClientCall('placesLegacy');
+      // 計數已移到 instrumentPlacesService（包在共用實例上），這裡不能再加，否則重複計。
       service.nearbySearch(
         { location: loc, radius: PARKING_SEARCH_RADIUS_METERS, type: 'parking', keyword: '停車場' },
         (res, status) => {
           const cands = (status === okStatus()) ? toCandidates(res) : [];
           if (cands.length) { resolve(cands); return; }
-          mapsCallTally.placesText += 1;
-          if (window.WAI_COST) WAI_COST.countClientCall('placesLegacy');
           service.textSearch(
             { query: '停車場', location: loc, radius: PARKING_SEARCH_RADIUS_METERS },
             (res2, status2) => resolve(status2 === okStatus() ? toCandidates(res2) : [])

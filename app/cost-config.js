@@ -39,8 +39,10 @@ window.WAI_COST_CONFIG = {
   // 因此放在前端設定檔、比照油價船票由人工維護即可。
   //   directionsAdvanced：請求帶即時路況（drivingOptions.departureTime）→ 汽車／機車段
   //   directionsBasic   ：不帶路況參數 → 走路／大眾運輸段、以及停車場↔景點的步行線
-  //   placesNearbySearch：停車場候選查詢（PlacesService.nearbySearch）
-  //   placesTextSearch  ：nearbySearch 無結果時的 textSearch 退回
+  //   placesNearbySearch：PlacesService.nearbySearch（停車場候選、景點座標校正…）
+  //   placesTextSearch  ：PlacesService.textSearch（站名精確定位、nearbySearch 無結果的退回…）
+  //   placesDetails     ：PlacesService.getDetails（營業時間等詳細欄位）
+  //   geocoding         ：Geocoder.geocode（地址 → 座標）
   // ⚠ Places 兩項每次約是 Directions 的 6 倍價，是這裡最貴的呼叫。
   //   停車場解析刻意做成四層退回（景點資料 → 台東本地資料 → TDX → Places），
   //   前三層都是零成本，就是為了盡量不走到 Places 這層。
@@ -52,6 +54,8 @@ window.WAI_COST_CONFIG = {
     directionsAdvancedUsd: 0.010,
     placesNearbySearchUsd: 0.032,
     placesTextSearchUsd: 0.032,
+    placesDetailsUsd: 0.017,
+    geocodingUsd: 0.005,
     freeCallsPerMonth: 10000
   },
   // 生成前（尚無站點）prompt 用的每模式「每日站間移動」粗估（每人每日，新台幣）。
