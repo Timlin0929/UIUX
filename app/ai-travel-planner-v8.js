@@ -2515,6 +2515,69 @@
     return s.duration || s.stayMin || fallback;
   }
 
+  /* ── App 端行程 → 網頁偏好（相容層）────────────────────────────
+     網頁端建立的行程把設定收在 trip.wizardData 裡；**App 端建立的行程沒有
+     wizardData**，同樣的設定散在文件頂層，而且時間窗口是它自己的字串格式：
+
+       transportMode: 'taxi'                                （頂層，非 wizardData）
+       appDays:       '2026/08/08 11:00 - 2026/08/08 17:00' （網頁沒有這個欄位）
+       days:          '6小時'   people: '2人'   budget: '舒適（每人 …）'
+
+     原本一律 `currentTripPreferences = trip.wizardData || {}`，App 行程就變成
+     空物件，於是每一個讀偏好的功能都靜靜退回網頁預設值——組員回報的
+     「App 設 11:00，網頁從 9:00 跑」與「主要交通工具顯示汽車，但每段寫計程車」
+     都是同一個根因，不是兩個獨立的 bug。
+     wizardData 若存在仍優先（網頁自己建立的行程行為完全不變）。 */
+  function parseAppDaysWindow(appDays) {
+    const text = String(appDays || '').trim();
+    // '2026/08/08 11:00 - 2026/08/08 17:00'（也接受 ～ 或 ~ 當分隔）
+    const m = text.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}:\d{2})\s*[-–~～]\s*(?:(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+)?(\d{1,2}:\d{2})$/);
+    if (!m) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    const startDate = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+    const endDate = m[5] ? `${m[5]}-${pad(m[6])}-${pad(m[7])}` : startDate;
+    // 跨日就是多日行程；App 的 days（'6小時'）只描述第一天，看不出跨日
+    const dayCount = Math.max(1, Math.min(7,
+      Math.round((new Date(endDate + 'T00:00:00') - new Date(startDate + 'T00:00:00')) / 86400000) + 1));
+    return { startDate, endDate, startTime: m[4], endTime: m[8], dayCount };
+  }
+
+  function derivePreferencesFromTrip(trip) {
+    if (!trip || typeof trip !== 'object') return {};
+    if (trip.wizardData && typeof trip.wizardData === 'object') return trip.wizardData;
+    const prefs = {};
+    // 交通工具：App 與網頁用同一套代碼（taxi/scooter/car/walk），直接沿用
+    if (trip.transportMode) prefs.transportMode = String(trip.transportMode).trim().toLowerCase();
+    const win = parseAppDaysWindow(trip.appDays);
+    if (win) {
+      prefs.startTime = win.startTime;
+      prefs.endTime = win.endTime;
+      prefs.departureDate = win.startDate;
+      if (win.dayCount > 1) {
+        prefs.days = `${win.dayCount}天`;      // getPrefsDayCount 認得「N天」
+        prefs.day2EndTime = win.endTime;       // 最後一天玩到幾點
+      }
+    }
+    if (trip.departureDate && !prefs.departureDate) prefs.departureDate = String(trip.departureDate);
+    // days 只在沒被跨日覆寫時採用；'6小時' 這種寫法 parseDurationMinutes 本來就認得
+    if (trip.days && !prefs.days) prefs.days = String(trip.days);
+    if (trip.people) prefs.people = String(trip.people);
+    if (trip.budget) prefs.budget = String(trip.budget);
+    if (trip.region) prefs.destination = String(trip.region);
+    prefs.__appDerived = true;
+    return prefs;
+  }
+
+  /* 推導出來的偏好只能留在記憶體，不可回寫成 wizardData——
+     一旦寫進去，derivePreferencesFromTrip 下次就會走「有 wizardData」那條路，
+     App 之後改 appDays／transportMode 都會被這份快照永遠遮住。
+     車輛是使用者在網頁上真的改的，屬例外，要留。 */
+  function prefsForLocalPersist() {
+    const p = currentTripPreferences || {};
+    if (!p.__appDerived) return p;
+    return p.transportMode ? { transportMode: p.transportMode } : {};
+  }
+
   // ── App 端（Android）共編欄位保留 ──
   // App 端在每個 stop 上寫自己的欄位（duration/time/order/stopId…，未來還會加）。
   // Firestore 的陣列無法逐元素 merge，網頁端存檔是整包覆寫 stops，
@@ -2644,7 +2707,8 @@
           currentTripMembers = trip.members || null;
           currentTripOwnerName = trip.ownerName || trip.organizer || '';
           currentTripShareToken = isGuestView ? (params.get('token') || '') : (trip.shareToken || '');
-          currentTripDepartureDate = (trip.wizardData && trip.wizardData.departureDate) || trip.departureDate || '';
+          // App 行程的出發日藏在 appDays 字串裡，交給相容層解（天氣頁與營業時間都靠它）
+          currentTripDepartureDate = derivePreferencesFromTrip(trip).departureDate || trip.departureDate || '';
           // 多人即時同步：訂閱這份共編行程，任一成員（owner/editor）改動後所有人立即重繪
           if (!isGuestView) startCollabTripLiveSync(trip.id || tripId);
         }
@@ -2683,7 +2747,7 @@
              heroTags[1].textContent = `📍 ${trip.region || '客製化行程'}`;
           }
           currentTripRegion = trip.region || currentTripRegion;
-          currentTripPreferences = trip.wizardData || {};
+          currentTripPreferences = derivePreferencesFromTrip(trip);
           renderMembersView(); // 旅伴頁：行程載入後即填好真實成員/邀請資料
           const bpDestEl = document.querySelector('.boarding-pass .bp-dest');
           if (bpDestEl) bpDestEl.textContent = trip.region || 'TRAVEL';
@@ -2947,8 +3011,11 @@
             // 注意：載入路徑不可寫回 Firestore——壓縮/enrich 的重算值一旦回寫，
             // 會把 App 端剛存的 stayMin/duration 覆蓋掉（雙端共編互洗資料）。
             // 壓縮結果留在記憶體，待使用者實際互動存檔時才一併寫回。
-            currentTripWindow.start = (trip.wizardData && trip.wizardData.startTime)
-              || (replanStops[0] && replanStops[0].time)
+            // ⚠ 第二順位要讀 trip.stops[0].time（Firestore 原始資料），不是 replanStops[0].time——
+            //   time 是 App 端欄位，載入時被收進 __appExtras，映射後的 stop 上根本沒有這個屬性，
+            //   所以這條退路從來沒有生效過，App 行程一律掉到 '09:00'。
+            currentTripWindow.start = (currentTripPreferences && currentTripPreferences.startTime)
+              || (trip.stops[0] && trip.stops[0].time)
               || '09:00';
             try {
               fitScheduleToTimeLimit();
@@ -2971,8 +3038,8 @@
                 : 0;
               return sum + stay + transit;
             }, 0);
-            const resolvedStartTime = (trip.wizardData && trip.wizardData.startTime)
-              || (replanStops[0] && replanStops[0].time)
+            const resolvedStartTime = (currentTripPreferences && currentTripPreferences.startTime)
+              || (trip.stops[0] && trip.stops[0].time)
               || '09:00';
             currentTripWindow.start = resolvedStartTime;
             const startTotalMin = clockToMinutes(resolvedStartTime) || (9 * 60);
@@ -7587,11 +7654,14 @@
       if (data.titleVersion !== undefined) updateLocalTripField(currentItineraryId, 'titleVersion', Number(data.titleVersion || 0));
     }
 
-    const remoteVehicle = String(data.wizardData && data.wizardData.transportMode || '').toLowerCase();
+    // App 端改車輛時寫的是頂層 transportMode（它沒有 wizardData），兩處都要讀才收得到
+    const remoteVehicle = String(
+      (data.wizardData && data.wizardData.transportMode) || data.transportMode || ''
+    ).toLowerCase();
     if (['taxi', 'scooter', 'car'].includes(remoteVehicle)) {
       if (remoteVehicle !== String(currentTripPreferences && currentTripPreferences.transportMode || '').toLowerCase()) {
         currentTripPreferences = { ...(currentTripPreferences || {}), transportMode: remoteVehicle };
-        updateLocalTripField(currentItineraryId, 'wizardData', currentTripPreferences);
+        updateLocalTripField(currentItineraryId, 'wizardData', prefsForLocalPersist());
         syncTripPrimaryVehicleSelect();
         hasStatusOrIndexChange = true;
       }
@@ -7878,6 +7948,7 @@
         // 共編行程的車輛欄位改在交易內以 base 判斷（見下），這裡只在非共編時直接寫。
         if (hasVehiclePref && !currentTripIsCollab) {
           fbPatch.wizardData = { ...(fbPatch.wizardData || {}), transportMode: vehiclePref };
+          fbPatch.transportMode = vehiclePref; // App 讀的是頂層欄位，兩處都要寫
         }
         const tripRef = firebaseDb.collection('micro_trips').doc(currentItineraryId);
         // UIUX#9：只在共編行程顯示同步狀態——個人行程以 localStorage 為準，
@@ -7893,13 +7964,18 @@
             const patch = { ...fbPatch, stops: committedStops };
             // 車輛欄位比照 stops 做三方判斷：只有「本地相對 base 真的改了」才覆寫，否則保留遠端，
             // 避免另一位成員剛改的車輛被本次 stop 存檔（帶著本地舊車輛）靜默蓋掉。
-            const remoteVehicle = String(remoteData.wizardData && remoteData.wizardData.transportMode || '').toLowerCase();
+            // App 建立的行程沒有 wizardData，車輛寫在頂層 transportMode——兩處都要看，
+            // 否則遠端明明有值卻被當成「沒有」，本地舊值就會蓋過去。
+            const remoteVehicle = String(
+              (remoteData.wizardData && remoteData.wizardData.transportMode) || remoteData.transportMode || ''
+            ).toLowerCase();
             const localVehicle = String(vehiclePref || '').toLowerCase();
             const baseVehicle = String(collabBaseVehicle || '').toLowerCase();
             const localChanged = hasVehiclePref && localVehicle && localVehicle !== baseVehicle;
             committedVehicle = localChanged ? localVehicle : remoteVehicle;
             if (['taxi', 'scooter', 'car'].includes(committedVehicle)) {
               patch.wizardData = { ...(patch.wizardData || {}), transportMode: committedVehicle };
+              patch.transportMode = committedVehicle; // App 端讀頂層，兩處一起寫才會雙向同步
             } else if (patch.wizardData) {
               delete patch.wizardData.transportMode; // 遠端與本地皆無有效車輛：不要覆寫
             }
@@ -7911,7 +7987,7 @@
             collabBaseVehicle = committedVehicle;
             if (committedVehicle !== String(currentTripPreferences && currentTripPreferences.transportMode || '').toLowerCase()) {
               currentTripPreferences = { ...(currentTripPreferences || {}), transportMode: committedVehicle };
-              updateLocalTripField(currentItineraryId, 'wizardData', currentTripPreferences);
+              updateLocalTripField(currentItineraryId, 'wizardData', prefsForLocalPersist());
               syncTripPrimaryVehicleSelect();
             }
           }
