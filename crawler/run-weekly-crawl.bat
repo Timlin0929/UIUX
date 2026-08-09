@@ -1,23 +1,25 @@
 @echo off
 chcp 65001 >nul
-REM ============================================================================
-REM WanderAI 每日爬蟲：把 verify:places 平均分散在一週的 7 天執行，並在 API
-REM 預算內停止（免費額度用完前就停，未處理者隔天的下一片自動續跑）。
-REM   - 切片：依星期幾跑 1/7 ~ 7/7（週日=1 ... 週六=7）。
-REM   - 預算：每天最多 CRAWL_MAX_CALLS 次 Google 呼叫，達上限即停。
-REM   - 跑完 verify 後重產 poi-data.js（export:local 不打 Google API、零費用）。
-REM Google Maps key 由 worker.js 自動從 ..\weather.env.js 載入。
-REM 由 Windows 工作排程每天 03:00 執行；輸出寫到 crawler\weekly-crawl.log。
-REM ============================================================================
+REM ===========================================================================
+REM WanderAI daily crawl: spread verify:places across the 7 days of the week and
+REM stop inside the API budget (unprocessed items resume in the next slice).
+REM   - Slice: 1/7 .. 7/7 by weekday (Sunday=1 ... Saturday=7).
+REM   - Budget: at most CRAWL_MAX_CALLS Google calls per day.
+REM   - After verify, regenerate poi-data.js (export:local hits no Google API).
+REM Run by Windows Task Scheduler at 03:00; output goes to weekly-crawl.log.
+REM
+REM ASCII ONLY - see the note in run-food-crawl.bat. Chinese comments here made
+REM cmd.exe lose its byte offset and eat the start of a following line.
+REM ===========================================================================
 set "FIREBASE_SERVICE_ACCOUNT_PATH=C:\Users\USER\Desktop\UIUX\crawler\serviceAccount.json"
 cd /d "C:\Users\USER\Desktop\UIUX\crawler"
-REM 金鑰：優先用 crawler-key.local.bat（爬蟲專用、gitignored）；weather.env.js 是瀏覽器限制鍵，伺服器端會 403。
 if exist "crawler-key.local.bat" call "crawler-key.local.bat"
+if not defined GOOGLE_MAPS_API_KEY echo [%date% %time%] WARNING: crawler key not loaded>> "weekly-crawl.log"
 
-REM 每天的 API 呼叫上限。請依你的免費額度調整（見 README「每日分散爬蟲」）。
+REM Daily API call cap. Adjust to your free quota (see README).
 if not defined CRAWL_MAX_CALLS set "CRAWL_MAX_CALLS=120"
 
-REM 依星期幾決定今天跑哪一片（Sunday=0 -> 1，... Saturday=6 -> 7）。
+REM Which slice runs today (Sunday=0 -> 1, ... Saturday=6 -> 7).
 for /f %%i in ('powershell -NoProfile -Command "[int]((Get-Date).DayOfWeek) + 1"') do set "DOW=%%i"
 
 echo [%date% %time%] weekly verify slice %DOW%/7 (max %CRAWL_MAX_CALLS% calls) start>> "weekly-crawl.log"
