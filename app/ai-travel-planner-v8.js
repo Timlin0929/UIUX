@@ -2565,6 +2565,91 @@
     return s.duration || s.stayMin || fallback;
   }
 
+  /* ── 共編角色判定（必須與 firestore.rules 的 isEditor 同口徑）──────
+     組員回報「給了權限還是不能編輯」。原因是三個地方對「誰能編輯」的定義不一致：
+
+       rules 的 isEditor : ownerUid／ownerEmail／userEmail
+                           ＋ editorEmails 陣列
+                           ＋ members[key].role == 'editor'（舊制）
+       App 授權時寫入    : editorEmails ＋ members[key].role（有時只寫其中一個）
+       網頁 UI（原本）   : 只看 members[key].role
+
+     網頁是三者裡最窄的，所以只要授權落在 editorEmails 而沒同步進 members，
+     畫面就顯示唯讀、按鈕全鎖——但那個人其實寫得進去。使用者看到的就是
+     「明明給了權限卻不能編輯」。
+
+     另一個更常見的失敗：身分原本只從 localStorage 的 wai_user 取。
+     那份快取可能過期或根本沒有（換裝置、清資料、走別條登入流程），
+     email 一旦取空，連擁有者自己都會被判成 viewer。改以 Firebase Auth
+     的當前使用者為主、localStorage 為輔。 */
+  /* ── 站間交通時間的跨端互通 ──────────────────────────────────
+     組員回報「交通時間沒有對齊」。兩端把同一份資料存在不同地方：
+
+       網頁：每個 stop 自己的 transitMin（到下一站要幾分鐘）
+       App ：行程層級的 transitMins = { sig, mins[] }
+              sig = 各站 stopId 用 "|" 串起來；mins[i] = 第 i 段的分鐘數
+              （n 站 → n-1 段；App 寫這份時 stop.transitMin 通常是空的）
+
+     兩邊都不讀對方的，所以同一份行程在兩端顯示的抵達時刻不一樣。
+     sig 的用途是「站序有沒有被動過」——對不上就代表 mins 已經過期，寧可不用。 */
+  // 回傳 stopId → 該站到下一站的分鐘數。刻意用 stopId 當鍵而不是索引：
+  // 載入過程會做合併／港口正規化，站數與順序可能跟原始 trip.stops 不同，
+  // 用索引對會靜靜錯位（錯位比沒有更糟，因為看起來是有值的）。
+  function readAppTransitMins(trip) {
+    const tm = trip && trip.transitMins;
+    if (!tm || !Array.isArray(tm.mins)) return null;
+    const stops = Array.isArray(trip.stops) ? trip.stops : [];
+    const ids = stops.map((s) => s && s.stopId);
+    if (!ids.length || ids.some((x) => !x)) return null;      // 有站沒有 stopId 就無法比對
+    if (String(tm.sig || '') !== ids.join('|')) return null;  // 站序已變，mins 過期
+    const map = new Map();
+    ids.forEach((id, i) => { if (i < tm.mins.length) map.set(id, tm.mins[i]); });
+    return map;
+  }
+
+  /* 反向：把網頁算出的每段時間寫回 App 的格式。
+     只有「每一站都有 stopId」時才寫——缺 id 就組不出 App 認得的 sig，
+     寫一份對不上的進去只會讓 App 拿到過期資料，不如不寫（它會自己重算）。 */
+  function buildAppTransitMins(stopsSnapshot) {
+    const ids = stopsSnapshot.map((s) => s && s.stopId);
+    if (!ids.length || ids.some((x) => !x)) return null;
+    const mins = stopsSnapshot.slice(0, -1).map((s) => {
+      const v = normalizeTransitMinutesValue(s && s.transitMin);
+      return v === null ? 0 : Math.round(v);
+    });
+    return { sig: ids.join('|'), mins };
+  }
+
+  function memberKeyOf(email) {
+    return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+  }
+  function currentUserIdentity() {
+    let email = '';
+    let uid = '';
+    if (typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser) {
+      email = firebaseAuth.currentUser.email || '';
+      uid = firebaseAuth.currentUser.uid || '';
+    }
+    if (!email) {
+      try {
+        const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
+        email = (u && u.currentUser && u.currentUser.email) || '';
+      } catch (_e) {}
+    }
+    return { email: String(email || '').trim().toLowerCase(), uid };
+  }
+  function resolveCollabRole(trip) {
+    if (!trip) return 'viewer';
+    const { email, uid } = currentUserIdentity();
+    const eq = (a) => !!email && String(a || '').trim().toLowerCase() === email;
+    if ((uid && trip.ownerUid === uid) || eq(trip.ownerEmail) || eq(trip.userEmail)) return 'owner';
+    if (Array.isArray(trip.editorEmails) && trip.editorEmails.some(eq)) return 'editor';
+    const mem = trip.members && trip.members[memberKeyOf(email)];
+    if (mem && (mem.role === 'owner' || mem.role === 'editor')) return mem.role;
+    // Firebase 抓不到文件時的離線退路，仍以本機快取的角色為準
+    return (mem && mem.role) || trip.role || 'viewer';
+  }
+
   /* ── App 端行程 → 網頁偏好（相容層）────────────────────────────
      網頁端建立的行程把設定收在 trip.wizardData 裡；**App 端建立的行程沒有
      wizardData**，同樣的設定散在文件頂層，而且時間窗口是它自己的字串格式：
@@ -2743,13 +2828,7 @@
 
         // 多人共作：依角色決定唯讀。訪客一律唯讀；登入者非 owner/editor 也唯讀。
         if (trip && trip.collab) {
-          let myEmail = '';
-          try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (_e) {}
-          const ekey = String(myEmail || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
-          const mem = trip.members && trip.members[ekey];
-          // 角色以 members[ekey] 為權威（變更 B 已確保抓到含 members 的最新文件）；
-          // 本機 trip.role 僅作 Firebase 抓不到時的離線退路。
-          collabRole = isGuestView ? 'guest' : ((mem && mem.role) || trip.role || 'viewer');
+          collabRole = isGuestView ? 'guest' : resolveCollabRole(trip);
           collabReadOnly = isGuestView || !(collabRole === 'owner' || collabRole === 'editor');
           if (collabReadOnly) showCollabReadOnlyBanner(collabRole);
           // 旅伴頁用：存下共編成員/擁有者/邀請資訊
@@ -2843,6 +2922,8 @@
               if (typeof s.desc === 'string') s.desc = sanitizeHarborDesc(s.desc);
             });
 
+            // App 把每段交通時間存在行程層級（transitMins），逐站的 transitMin 通常是空的
+            const appTransitMins = readAppTransitMins(trip);
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
               const assignedPinId = `ai-pin-loaded-${idx}`;
               const stableStopId = getStableCollabStopId(s, idx);
@@ -2920,7 +3001,11 @@
                   : await resolveStopCoordinatesAsync(s, idx, trip.region, currentTripTitle);
               }
               const normalizedTransitMode = normalizeTransitMode(s.transitMode);
-              const persistedTransitMin = normalizeTransitMinutesValue(s.transitMin);
+              // stop 自己沒有 transitMin 時，退回 App 存在行程層級的 transitMins（見 readAppTransitMins）。
+              // 沒有這一步，App 排的行程在網頁上每段都會被重算成不一樣的分鐘數，抵達時刻整條對不上。
+              const persistedTransitMin = normalizeTransitMinutesValue(
+                s.transitMin ?? ((appTransitMins && s.stopId) ? appTransitMins.get(s.stopId) : null)
+              );
 
               // Only place a pin when the stop has a real resolved position.
               // safeLatLng falls back to the trip centre when pos is null,
@@ -7748,24 +7833,23 @@
       heroTitleEl.innerHTML = escapeHtml(currentTripTitle) + statusSuffix;
     }
 
-    if (data.members) {
-      currentTripMembers = data.members;
-      if (collabRole !== 'guest') {
-        let myEmail = '';
-        try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (_e) {}
-        const ekey = String(myEmail || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
-        const mem = data.members[ekey];
-        const newRole = (mem && mem.role) || 'viewer';
-        if (newRole !== collabRole) {
-          collabRole = newRole;
-          const wasReadOnly = collabReadOnly;
-          collabReadOnly = !(newRole === 'owner' || newRole === 'editor');
-          const banner = document.getElementById('collabRoBanner');
-          if (!collabReadOnly && banner) { banner.remove(); document.body.style.paddingTop = ''; }
-          if (collabReadOnly && !banner) showCollabReadOnlyBanner(newRole);
-          if (wasReadOnly !== collabReadOnly && isReplanning) renderReplanBoard();
-        }
+    if (data.members) currentTripMembers = data.members;
+    /* 角色重算不能只在 data.members 有變時做——App 端授權有可能只動 editorEmails，
+       那種快照裡 members 沒變，原本就整段跳過，權限給了畫面也不會解鎖。
+       改用與載入時同一支 resolveCollabRole（＝與 rules 同口徑）。 */
+    if (collabRole !== 'guest') {
+      const newRole = resolveCollabRole(data);
+      if (newRole !== collabRole) {
+        collabRole = newRole;
+        const wasReadOnly = collabReadOnly;
+        collabReadOnly = !(newRole === 'owner' || newRole === 'editor');
+        const banner = document.getElementById('collabRoBanner');
+        if (!collabReadOnly && banner) { banner.remove(); document.body.style.paddingTop = ''; }
+        if (collabReadOnly && !banner) showCollabReadOnlyBanner(newRole);
+        if (wasReadOnly !== collabReadOnly && isReplanning) renderReplanBoard();
       }
+    }
+    if (data.members) {
       const membersView = document.getElementById('view-members');
       if (membersView && membersView.classList.contains('active')) renderMembersView();
     }
@@ -7925,6 +8009,8 @@
     tripUserDirty = true; // 走到這裡＝有互動觸發的存檔，之後的自動回填（如路線 transitMin）才允許跟著存
 
     const stopsSnapshot = replanStops.map(serializeStopForPersistence);
+    // 同一份時間也寫成 App 的格式，否則網頁改完站序或停留時間，App 那邊還是舊分鐘數
+    const appTransitMinsPatch = buildAppTransitMins(stopsSnapshot);
 
     // 全程主要交通工具偏好（計程車/機車/汽車）一併保存，重新載入後仍生效
     const vehiclePref = String(currentTripPreferences?.transportMode || '').toLowerCase();
@@ -8002,6 +8088,8 @@
         // 只在拿到真實 email 時才寫，避免未登入時用空值覆蓋既有文件的正確 userEmail。
         // 共編行程不由 persist 改 userEmail：否則 editor 存檔會把擁有者 email 換成自己（連帶影響刪除權限）。
         if (userEmail && !currentTripIsCollab) fbPatch.userEmail = userEmail;
+        // App 讀行程層級的 transitMins；缺 stopId 組不出它認得的 sig 時就不寫（讓 App 自己重算）
+        if (appTransitMinsPatch) fbPatch.transitMins = appTransitMinsPatch;
         fbPatch.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
         // 共編行程：標記這次變更是誰改的，讓其他成員的即時同步能顯示「XX 更新了行程」
         if (currentTripIsCollab && userEmail) {
@@ -8029,6 +8117,11 @@
             const remoteData = remoteSnap.exists ? (remoteSnap.data() || {}) : {};
             committedStops = mergeCollabStops(remoteData.stops || [], collabBaseStops, stopsSnapshot);
             const patch = { ...fbPatch, stops: committedStops };
+            // 三方合併後的站序才是真正寫進去的那份——transitMins 的 sig 必須跟著它算，
+            // 否則 sig 對不上 committedStops，App 會判定過期而整份丟掉。
+            const mergedTransit = buildAppTransitMins(committedStops);
+            if (mergedTransit) patch.transitMins = mergedTransit;
+            else delete patch.transitMins;
             // 車輛欄位比照 stops 做三方判斷：只有「本地相對 base 真的改了」才覆寫，否則保留遠端，
             // 避免另一位成員剛改的車輛被本次 stop 存檔（帶著本地舊車輛）靜默蓋掉。
             // App 建立的行程沒有 wizardData，車輛寫在頂層 transportMode——兩處都要看，
