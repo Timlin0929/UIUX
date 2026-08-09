@@ -2,9 +2,21 @@
 # 用途：不用打指令就能查看／啟動／停止／重啟 server.js（Vertex 代理 + 停車回報端點）。
 # 執行：雙擊 proxy-control.bat，或 powershell -ExecutionPolicy Bypass -File proxy-control.ps1
 
+# Invoke-WebRequest 會在主控台畫進度列（「讀取 Web 回應…」）。健康檢查每 3 秒跑一次，
+# 那行字就會不停閃。這裡把進度串流關掉——它是狀態列，不是錯誤訊息，關掉不影響結果。
+$ProgressPreference = 'SilentlyContinue'
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# 藏起 powershell 的黑底主控台視窗（真正要看的是下面那個 GUI）。
+# 刻意等到 ShowDialog 之前才藏（見檔尾）：若腳本在那之前就掛了，
+# 錯誤訊息還留在主控台上看得到，不會變成「雙擊沒反應」。
+Add-Type -Namespace WinConsole -Name Native -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
 
 $ServerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogDir    = Join-Path $ServerDir 'logs'
@@ -207,5 +219,8 @@ $form.Add_Shown({
 })
 # 關掉視窗不會停掉代理——這是刻意的，代理要在背景繼續服務網站。
 $form.Add_FormClosing({ $timer.Stop() })
+
+# 走到這裡代表 GUI 建好了，主控台已無用處——藏起來（0 = SW_HIDE）
+try { [void][WinConsole.Native]::ShowWindow([WinConsole.Native]::GetConsoleWindow(), 0) } catch {}
 
 [void]$form.ShowDialog()
