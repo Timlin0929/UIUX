@@ -22,6 +22,7 @@ $ServerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogDir    = Join-Path $ServerDir 'logs'
 $OutLog    = Join-Path $LogDir 'proxy.out.log'
 $ErrLog    = Join-Path $LogDir 'proxy.err.log'
+$UiLog     = Join-Path $LogDir 'control-ui.log'   # 控制台自己的操作／錯誤記錄
 $Port      = 3001
 $HealthUrl = "http://127.0.0.1:$Port/api/health"
 
@@ -54,10 +55,14 @@ function Test-ProxyHealth {
 function Start-Proxy {
   if ((Get-ProxyPid) -ne 0) { Write-Log '已經在執行中，略過啟動。'; return }
   Write-Log '啟動中…'
+  <#  改為呼叫 start-proxy.bat，不要在這裡另寫一份啟動邏輯：
+      - 開機自動啟動的工作排程跑的就是那支，兩邊共用同一份才不會各自壞掉
+      - 它用 >> 附加寫記錄；原本的 Start-Process -RedirectStandard* 每次啟動都會
+        「截斷」記錄檔，等於把上一次當掉的證據清乾淨——記錄檔正是為了那個而存在的
+      - 它本來就有「已在監聽就跳過」的判斷，重複觸發是安全的  #>
   try {
-    Start-Process -FilePath 'node' -ArgumentList 'server.js' `
-      -WorkingDirectory $ServerDir -WindowStyle Hidden `
-      -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -ErrorAction Stop | Out-Null
+    Start-Process -FilePath (Join-Path $ServerDir 'start-proxy.bat') `
+      -WorkingDirectory $ServerDir -WindowStyle Hidden -ErrorAction Stop | Out-Null
   } catch {
     Write-Log "啟動失敗：$($_.Exception.Message)"
     return
@@ -168,22 +173,36 @@ $logBox.Text = "工作目錄：$ServerDir`r`n連接埠：$Port（僅 127.0.0.1�
 $form.Controls.Add($logBox)
 
 function Write-Log($msg) {
-  $logBox.AppendText("[{0}] {1}`r`n" -f (Get-Date -Format 'HH:mm:ss'), $msg)
+  $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg
+  $logBox.AppendText($line + "`r`n")
+  # 同時落地。畫面上的記錄關掉視窗就沒了，出事時要回頭查得到。
+  try { Add-Content -Path $UiLog -Value $line -Encoding UTF8 -ErrorAction Stop } catch {}
   [System.Windows.Forms.Application]::DoEvents()
 }
 
-# 按鈕動作期間鎖住 UI，避免重複點擊造成兩個 node 搶同一個 port。
-function Invoke-Guarded($action) {
+<#  按鈕動作期間鎖住 UI，避免重複點擊造成兩個 node 搶同一個 port。
+    ⚠ try/catch 是必要的，不是保險：PowerShell 的 WinForms 事件處理常式若丟例外，
+      例外會寫到錯誤串流然後被吃掉——而主控台已經藏起來，於是按鈕按下去毫無反應、
+      記錄也沒有半行，完全查不到原因（這個控制台第一版就是這樣壞掉的）。
+      這裡把例外抓下來寫進畫面與檔案，讓失敗看得見。 #>
+function Invoke-Guarded($action, $label) {
   $btnRestart.Enabled = $false; $btnStart.Enabled = $false; $btnStop.Enabled = $false
-  try { & $action } finally {
+  try {
+    & $action
+  } catch {
+    Write-Log ("『$label』發生例外：" + $_.Exception.Message)
+    Write-Log ("  位置：" + $_.InvocationInfo.PositionMessage.Trim())
+  } finally {
     $btnRestart.Enabled = $true; $btnStart.Enabled = $true; $btnStop.Enabled = $true
-    Update-Status
+    try { Update-Status } catch { Write-Log ('狀態更新失敗：' + $_.Exception.Message) }
   }
 }
 
-$btnRestart.Add_Click({ Invoke-Guarded { Restart-Proxy } })
-$btnStart.Add_Click({   Invoke-Guarded { Start-Proxy } })
-$btnStop.Add_Click({    Invoke-Guarded { Stop-Proxy } })
+# 動作直接寫在處理常式裡，不再包一層 scriptblock 參數——少一層間接就少一處
+# 可能出錯又看不見的地方。
+$btnRestart.Add_Click({ Invoke-Guarded { Restart-Proxy } '重新啟動' })
+$btnStart.Add_Click({   Invoke-Guarded { Start-Proxy } '啟動' })
+$btnStop.Add_Click({    Invoke-Guarded { Stop-Proxy } '停止' })
 $btnLog.Add_Click({
   # 錯誤記錄優先——會來看記錄多半是出事了
   if ((Test-Path $ErrLog) -and (Get-Item $ErrLog).Length -gt 0) { Start-Process notepad.exe $ErrLog }
