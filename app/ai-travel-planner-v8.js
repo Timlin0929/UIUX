@@ -800,7 +800,11 @@
       /座標已加入行程/,
       /^AI 建議的專屬景點$/,
       /^AI 建議的客製化景點$/,
-      /^這裡會顯示導覽說明。$/
+      /^這裡會顯示導覽說明。$/,
+      // App 端手機新增景點時只寫這個佔位字串（全形・或半形·或無分隔都算），
+      // 判成「有意義」的話卡片就會把這五個字當介紹顯示（組員回報的空介紹）。
+      /^新增\s*[・·･]?\s*景點$/,
+      /^新增$/
     ].some((pattern) => pattern.test(value));
   }
 
@@ -2459,7 +2463,10 @@
     for (let idx = 0; idx < replanStops.length; idx += 1) {
       if (rebuildToken !== mapRebuildToken) return false;
       const stop = replanStops[idx];
-      const pinId = stop.mapPinId || `auto-pin-${idx + 1}`;
+      // 缺 mapPinId 才用身分推導當後備。既有值保留：載入與共編同步都已改成指派
+      // 身分式 id，剛新增的站則帶著自己的 ai-pin-序號（pinData 也用同一把 key）。
+      // 後備原本是 auto-pin-${idx+1}（索引式，正是錯位來源），改成身分式。
+      const pinId = stop.mapPinId || stopPinId(stop, idx);
       stop.mapPinId = pinId;
 
       // 鎖定座標的站點（如離島返程港口）直接使用指定座標，不查 Firebase 或地理編碼
@@ -2756,6 +2763,17 @@
     return `cstop-${(hash >>> 0).toString(36)}`;
   }
 
+  /* 地圖 pin 的 id 由「景點的穩定身分」產生，不用陣列索引。
+     ⚠ 原本用索引（ai-pin-loaded-${idx} / auto-pin-${idx+1}）——App 在中間插入或
+       重排景點後，索引和景點就對不上，pinData/marker 全部錯位，於是「點南田卻跳出
+       原住民」（組員回報，Firestore 存的 mapPinId 已證實錯位）。
+     改用 collabStopId 之後，每個景點的 pin id 綁死自己的身分，插入／重排都不會亂。
+     所有指派 pin id 的地方都要走這支，pinData／markers／mapPinLocations／stop.mapPinId
+     才會用同一把 key。 */
+  function stopPinId(stop, index) {
+    return `pin-${getStableCollabStopId(stop, index)}`;
+  }
+
   // 港口/端點站描述清理：去掉完整「（含 …）」，再移除尾端未閉合的破碎括號片段
   // （如 AI desc 末端殘留「…探索（s…」沒有對應的右括號），避免顯示亂碼。
   function sanitizeHarborDesc(desc) {
@@ -2925,7 +2943,7 @@
             // App 把每段交通時間存在行程層級（transitMins），逐站的 transitMin 通常是空的
             const appTransitMins = readAppTransitMins(trip);
             replanStops = await Promise.all(normalizedStops.map(async (s, idx) => {
-              const assignedPinId = `ai-pin-loaded-${idx}`;
+              const assignedPinId = stopPinId(s, idx);   // 身分式，不用索引（見 stopPinId 說明）
               const stableStopId = getStableCollabStopId(s, idx);
 
               // 座標鎖定的站點（如離島港口）：直接使用指定座標，跳過 Firebase 查詢
@@ -5423,7 +5441,8 @@
           <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(1)" aria-label="下一張">›</button>
         </div>
       </div>
-      <div class="memory-studio-actions"><button type="button" class="memory-primary-btn" onclick="memoryStartSave()">保存九張</button></div>`;
+      <div class="memory-inline-note"><p>下一步會把大圖切成九張，逐張提供下載按鈕（依發布順序命名），下載後再上傳到 IG。</p></div>
+      <div class="memory-studio-actions"><button type="button" class="memory-primary-btn" onclick="memoryStartSave()">保存九張並下載</button></div>`;
     paintMemoryGridPreview();
   }
 
@@ -7207,7 +7226,41 @@
     });
   }
 
+  /* App 端打卡只把 checkedInAt 寫在景點物件上，不會進網頁的造訪儲存（wai_visited_places）。
+     旅記只讀那個儲存，於是「手機打卡過的景點」在旅記看不到、也沒有照片上傳入口
+     （組員回報的鯉魚山就是這樣）。這裡把「有 checkedInAt 但造訪儲存還沒有」的景點補進去，
+     補進之後旅記自然顯示、照片上傳入口（addPhotoForVisitedPlace）也一起有了。
+     起訖點不計入。只在真的有新增時才寫回，穩態下就是一次讀取＋走訪，不會反覆寫檔。 */
+  function reconcileCheckinsIntoVisited() {
+    if (!Array.isArray(replanStops)) return false;
+    const tripId = String(currentItineraryId || '');
+    if (!tripId || tripId === 'TRIP-EMPTY') return false;
+    const places = getVisitedPlaces();
+    let added = false;
+    replanStops.forEach((stop) => {
+      if (!stop || !stop.checkedInAt) return;
+      if (stop.type === 'start' || stop.type === 'end') return;
+      if (places.some((p) => visitedPlaceMatches(p, stop.name, tripId))) return;
+      const ts = Number(stop.checkedInAt) || Date.now();
+      places.push({
+        name: stop.name,
+        region: currentTripRegion || '',
+        visitDate: new Date(ts).toISOString().slice(0, 10),
+        tripId,
+        tripTitle: currentTripTitle || '',
+        emoji: stop.emoji || '📍',
+        gpsVerified: null,   // App 打卡沒帶 GPS 驗證資訊
+        photos: [],
+        note: ''
+      });
+      added = true;
+    });
+    if (added) saveVisitedPlaces(places);
+    return added;
+  }
+
   function renderTravelLog() {
+    reconcileCheckinsIntoVisited();
     const activeTripId = String(currentItineraryId || '');
     const places = (!activeTripId || activeTripId === 'TRIP-EMPTY')
       ? []
@@ -7865,6 +7918,9 @@
       return {
         id: stableStopId,
         collabStopId: stableStopId,
+        // ★ 不沿用快照裡的 s.mapPinId——那可能是索引式的過期值，正是「點 A 跳 B」的來源。
+        //   改由身分推導，與載入路徑一致。
+        mapPinId: stopPinId(s, idx),
         emoji: s.emoji || '📍',
         name: s.name || '景點',
         type: s.type || null,
@@ -7873,7 +7929,6 @@
         transitMode: normalizeTransitMode(s.transitMode),
         transitModeManual: s.transitModeManual === true,
         parkWalkMin: normalizeTransitMinutesValue(s.parkWalkMin),
-        mapPinId: s.mapPinId || null,
         scenicCoordinates: s.scenicCoordinates || pos || null,
         _lockedCoordinates: s._lockedCoordinates || null,
         placeId: s.placeId || null,
@@ -8063,7 +8118,10 @@
       scenicCoordinates: stop.scenicCoordinates || null,
       _lockedCoordinates: stop._lockedCoordinates || null,
       nearbyToiletLocations: stop.nearbyToiletLocations || [],
-      mapPinId: stop.mapPinId || null,
+      // 存「身分式」pin id，不存 stop.mapPinId 的執行期值——剛新增的站帶的是
+      // ai-pin-序號（跨 session 沒意義），存進去只會變成下一輪的過期值。存身分式後，
+      // 這份 mapPinId 永遠對得上載入時重算的值，App 端也拿到穩定值（不是把欄位拿掉）。
+      mapPinId: stopPinId(stop, index),
       manualStartMin: stop.manualStartMin ?? null,
       manualEndMin: stop.manualEndMin ?? null,
       placeId: stop.placeId || null,
@@ -11881,200 +11939,6 @@
     return parsed;
   }
 
-  // ══════════════════════════════════════════════════
-  // AI 遊記（F6）：以本行程的打卡紀錄（含個人備註）生成第一人稱遊記。
-  // 存 localStorage（wai_trip_journals，tripId → {title,body,createdAt}），同行程重生成即覆蓋。
-  // ══════════════════════════════════════════════════
-  const TRIP_JOURNAL_KEY = 'wai_trip_journals';
-  let tripJournalGenerating = false;
-
-  function getLocalTripJournalMap() {
-    try { return JSON.parse(localStorage.getItem(TRIP_JOURNAL_KEY) || '{}'); } catch { return {}; }
-  }
-  function getLocalTripJournal(tripId) {
-    const map = getLocalTripJournalMap();
-    return (tripId && map[tripId]) ? map[tripId] : null;
-  }
-  function saveLocalTripJournal(tripId, journal) {
-    if (!tripId) return;
-    try {
-      const map = getLocalTripJournalMap();
-      map[tripId] = journal;
-      localStorage.setItem(TRIP_JOURNAL_KEY, JSON.stringify(map));
-    } catch (e) { console.warn('Save trip journal failed:', e); }
-  }
-
-  // 蒐集遊記素材：本行程的打卡景點（名稱／日期／備註／照片數）＋行程偏好＋既有評分
-  function collectJournalMaterial() {
-    const visited = getVisitedPlaces().filter(p => p && p.tripId && p.tripId === currentItineraryId);
-    const feedback = getLocalTripFeedback(currentItineraryId);
-    return {
-      tripTitle: currentTripTitle || '我的微旅行',
-      prefs: currentTripPreferences || {},
-      feedback: feedback,
-      places: visited.map(p => ({
-        name: p.name || '',
-        visitDate: p.visitDate || '',
-        note: (p.note || '').slice(0, 300),
-        photoCount: Array.isArray(p.photos) ? p.photos.length : 0
-      }))
-    };
-  }
-
-  function buildJournalPrompt(material) {
-    const lines = [];
-    lines.push('你是旅遊作家。請根據以下「真實造訪紀錄」，以第一人稱、繁體中文撰寫一篇 300-500 字的遊記。');
-    lines.push('【嚴格規則】');
-    lines.push('1. 只能寫下列實際造訪的景點，嚴禁虛構任何未列出的景點、店家或事件。');
-    lines.push('2. 若景點附有「我的備註」，務必自然地將備註內容寫進遊記（那是我當下的真實感受）。');
-    lines.push('3. 文風溫暖流暢、有畫面感，避免流水帳；可依造訪日期安排敘事順序。');
-    lines.push('4. 僅回傳 JSON：{"title":"遊記標題(15字內)","body":"遊記內文(300-500字，可用\\n分段)"}，不要 markdown。');
-    lines.push('');
-    lines.push(`【行程名稱】${material.tripTitle}`);
-    const pf = material.prefs || {};
-    const prefBits = [];
-    if (pf.people) prefBits.push(`同行：${pf.people}`);
-    if (pf.theme) prefBits.push(`風格：${pf.theme}`);
-    if (Array.isArray(pf.interests) && pf.interests.length) prefBits.push(`興趣：${pf.interests.join('、')}`);
-    if (prefBits.length) lines.push(`【行程背景】${prefBits.join('；')}`);
-    if (material.feedback && material.feedback.tripRating) {
-      lines.push(`【我對這趟旅程的整體評分】${material.feedback.tripRating}/5${material.feedback.comment ? `；我的心得：「${material.feedback.comment}」` : ''}`);
-    }
-    lines.push('【實際造訪紀錄】');
-    material.places.forEach((p, i) => {
-      const bits = [`${i + 1}. ${p.name}`];
-      if (p.visitDate) bits.push(`造訪日：${p.visitDate}`);
-      if (p.photoCount) bits.push(`拍了 ${p.photoCount} 張照片`);
-      if (p.note) bits.push(`我的備註：「${p.note}」`);
-      lines.push(bits.join('｜'));
-    });
-    return lines.join('\n');
-  }
-
-  async function generateTripJournal(material) {
-    const vertex = getVertexConfig();
-    let endpoint;
-    if (vertex.ready) {
-      endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
-    } else {
-      const apiKey = ensureGeminiApiKey();
-      if (!apiKey) throw new Error('尚未設定 API Key。');
-      endpoint = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-    }
-    const payload = {
-      contents: [{ role: 'user', parts: [{ text: buildJournalPrompt(material) }] }],
-      generationConfig: buildGenConfig({ temperature: 0.9, maxOutputTokens: 2048 })
-    };
-    const response = await fetchReplanWithTimeout(endpoint, {
-      method: 'POST',
-      headers: await vertexAuthHeaders(),
-      body: JSON.stringify(payload)
-    }, 60000);
-    if (!response.ok) throw vertexHttpError(response.status, '遊記生成失敗');
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const parsed = safeParseJson(text);
-    if (!parsed || !parsed.body) throw new Error('AI 回傳格式不是有效遊記 JSON。');
-    return {
-      title: String(parsed.title || material.tripTitle || '我的遊記').slice(0, 40),
-      body: String(parsed.body).slice(0, 2000),
-      createdAt: Date.now()
-    };
-  }
-
-  function renderJournalOverlay(state) {
-    // state: { loading, journal, error, hasSaved }
-    let overlay = document.getElementById('journal-overlay');
-    if (!overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'journal-overlay';
-      overlay.className = 'journal-overlay';
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) window.closeTripJournal(); });
-      document.body.appendChild(overlay);
-    }
-    const j = state.journal;
-    let inner = '';
-    if (state.loading) {
-      inner = `<div class="journal-title">📖 AI 遊記生成中…</div>
-        <div class="journal-body" style="text-align:center;padding:32px 0;">✨ 正在把你的打卡與備註寫成遊記，請稍候（約 10–20 秒）…</div>`;
-    } else if (state.error) {
-      inner = `<div class="journal-title">📖 遊記生成失敗</div>
-        <div class="journal-body">${escapeHtml(state.error)}</div>
-        <div class="journal-actions">
-          <button class="travel-btn primary" onclick="regenTripJournal()">🔁 再試一次</button>
-          <button class="travel-btn" onclick="closeTripJournal()">關閉</button>
-        </div>`;
-    } else if (j) {
-      inner = `<div class="journal-title">📖 ${escapeHtml(j.title)}</div>
-        <div class="journal-sub">${state.hasSaved ? '已儲存的遊記' : '剛出爐的遊記'}${j.createdAt ? ' · ' + new Date(j.createdAt).toLocaleDateString('zh-TW') : ''}</div>
-        <div class="journal-body">${escapeHtml(j.body).replace(/\n/g, '<br>')}</div>
-        <div class="journal-actions">
-          <button class="travel-btn" onclick="copyTripJournal()">📋 複製</button>
-          <button class="travel-btn primary" onclick="saveTripJournal()">💾 儲存</button>
-          <button class="travel-btn" onclick="regenTripJournal()" ${tripJournalGenerating ? 'disabled' : ''}>🔁 重新生成</button>
-          <button class="travel-btn" onclick="closeTripJournal()">關閉</button>
-        </div>`;
-    }
-    overlay.innerHTML = `<div class="journal-card">${inner}</div>`;
-    requestAnimationFrame(() => overlay.classList.add('open'));
-  }
-
-  let currentJournalDraft = null;
-
-  window.openTripJournal = function() {
-    const material = collectJournalMaterial();
-    if (!material.places.length) {
-      feedbackToast('這趟行程還沒有打卡紀錄，先在景點按「📌 去過了」再來生成遊記吧！', 'orange');
-      return;
-    }
-    const saved = getLocalTripJournal(currentItineraryId);
-    if (saved) {
-      currentJournalDraft = saved;
-      renderJournalOverlay({ journal: saved, hasSaved: true });
-      return;
-    }
-    window.regenTripJournal();
-  };
-
-  window.regenTripJournal = async function() {
-    if (tripJournalGenerating) return;
-    const material = collectJournalMaterial();
-    if (!material.places.length) { feedbackToast('這趟行程還沒有打卡紀錄。', 'orange'); return; }
-    tripJournalGenerating = true;
-    renderJournalOverlay({ loading: true });
-    try {
-      const journal = await generateTripJournal(material);
-      currentJournalDraft = journal;
-      tripJournalGenerating = false;
-      renderJournalOverlay({ journal, hasSaved: false });
-    } catch (e) {
-      tripJournalGenerating = false;
-      console.warn('Trip journal generation failed:', e);
-      renderJournalOverlay({ error: (e && e.message) || '生成失敗，請稍後再試。' });
-    }
-  };
-
-  window.saveTripJournal = function() {
-    if (!currentJournalDraft) return;
-    saveLocalTripJournal(currentItineraryId, currentJournalDraft);
-    feedbackToast('遊記已儲存，下次開啟直接顯示。', 'green');
-  };
-
-  window.copyTripJournal = function() {
-    if (!currentJournalDraft) return;
-    const text = `${currentJournalDraft.title}\n\n${currentJournalDraft.body}`;
-    const done = () => feedbackToast('遊記已複製到剪貼簿。', 'green');
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done).catch(() => feedbackToast('複製失敗，請手動選取文字。', 'orange'));
-    } else {
-      feedbackToast('此瀏覽器不支援自動複製，請手動選取文字。', 'orange');
-    }
-  };
-
-  window.closeTripJournal = function() {
-    const overlay = document.getElementById('journal-overlay');
-    if (overlay) overlay.classList.remove('open');
-  };
 
   // 從本地靜態檔 window.WAI_POI_DATA（爬蟲 npm run export:local 產生）取某目的地的景點清單。
   // dest 正規化：精確鍵 → 去掉「縣/市」後綴 → 與既有鍵互相包含比對。無資料回 []。
