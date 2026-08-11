@@ -5127,8 +5127,14 @@
 
   function selectedMemoryPhotos() {
     if (!memoryStudioState) return [];
-    const selected = memoryStudioState.selectedPhotoIds;
-    return memoryStudioState.material.photos.filter((photo) => selected.has(photo.id)).slice(0, 9);
+    // ⚠ 要照 selectedPhotoIds 這個 Set 的「插入順序」回傳，不能用 material.photos 的原順序過濾。
+    //   「設為底圖」是把該張挪到 Set 最前面來指定主視覺——若這裡改回原順序，
+    //   使用者點了「設為底圖」預覽卻不會變（組員回報：點了沒反應）。第一張＝底圖。
+    const byId = new Map(memoryStudioState.material.photos.map((p) => [p.id, p]));
+    return Array.from(memoryStudioState.selectedPhotoIds)
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .slice(0, 1 + MEMORY_CARD_LAYOUT.length);
   }
 
   function loadMemoryImage(photo) {
@@ -5324,7 +5330,7 @@
           <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
           <span>顯示切線與安全區</span>
         </label>
-        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>第 1 張鋪滿整張大圖，之後最多 4 張疊成卡片</span></div>
+        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>★ 底圖那張會鋪滿整張大圖，其餘最多 4 張疊成小卡片</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           ${photos.map((photo) => {
             const active = selected.has(photo.id);
@@ -5333,9 +5339,9 @@
               <button type="button" class="memory-photo-item${active ? ' selected' : ''}${isHero ? ' is-hero' : ''}"
                 onclick="memoryTogglePhoto('${jsAttrStr(photo.id)}')" aria-pressed="${active}" aria-label="${active ? '移除' : '加入'}照片：${escapeHtml(photo.spotName)}">
                 <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.spotName)}" loading="lazy">
-                <span>${isHero ? '★ 主視覺' : (active ? '✓ 使用中' : '＋ 加入')}</span>
+                <span>${isHero ? '★ 底圖' : (active ? '✓ 使用中' : '＋ 加入')}</span>
               </button>
-              ${active && !isHero ? `<button type="button" class="memory-hero-btn" onclick="memorySetHero('${jsAttrStr(photo.id)}')">設為主視覺</button>` : ''}
+              ${active && !isHero ? `<button type="button" class="memory-hero-btn" onclick="memorySetHero('${jsAttrStr(photo.id)}')">設為底圖</button>` : ''}
             </div>`;
           }).join('')}
         </div>
