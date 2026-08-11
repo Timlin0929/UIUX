@@ -4896,6 +4896,7 @@
 
      卡片分成上下兩群，中間留一條橫向走廊給標題——標題才不會壓在卡片上，
      主照片也才露得出來（第一版卡片太大太滿，整張看起來只剩卡片、看不到底圖）。 */
+  // 這兩個是「預設版面」的模板；實際使用的是 memoryStudioState.layout（可被拖曳與 AI 改動）。
   const MEMORY_CARD_LAYOUT = [
     { cx: 0.30, cy: 0.26, w: 0.34, angle: -5 },
     { cx: 0.72, cy: 0.30, w: 0.30, angle: 4 },
@@ -4903,6 +4904,20 @@
     { cx: 0.70, cy: 0.76, w: 0.28, angle: 6 }
   ];
   const MEMORY_TITLE_BAND = { cy: 0.50, w: 0.56, h: 0.11 };  // 落在中列內，只跨垂直切線
+
+  // 每次開工具都拿一份全新的可變副本，別讓編輯改到模板常數本身。
+  function defaultMemoryLayout() {
+    return {
+      cards: MEMORY_CARD_LAYOUT.map((c) => ({ ...c })),
+      title: { ...MEMORY_TITLE_BAND }
+    };
+  }
+  // 讀目前版面；state 還沒建好時退回預設，讓純描繪路徑也能用。
+  function currentMemoryLayout() {
+    return (memoryStudioState && memoryStudioState.layout) || defaultMemoryLayout();
+  }
+  const MEMORY_CARD_MIN_W = 0.14;   // 卡片寬（正規化）上下限，避免縮到看不見或蓋滿整張
+  const MEMORY_CARD_MAX_W = 0.60;
 
   let memoryStudioState = null;
   let memoryStudioBound = false;
@@ -5025,7 +5040,9 @@
       photoLoadFailures: [],
       previewOrder: 1,
       saveRunId: 0,
-      audioMode: 'original'
+      audioMode: 'original',
+      layout: defaultMemoryLayout(),   // 可被拖曳/縮放與 AI 改動的版面
+      aiBusy: false
     };
     setMemoryStudioOpen(true);
     renderMemoryStudio();
@@ -5249,6 +5266,7 @@
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     const scale = width / MEMORY_MASTER.w;   // 版面數值以輸出尺寸為基準，預覽等比縮小
+    const layout = currentMemoryLayout();    // 可被拖曳/AI 改動的版面
 
     // ① 底層：主照片鋪滿整張畫布——這是「一張大圖」的來源
     const hero = loaded[0];
@@ -5267,19 +5285,19 @@
     ctx.fillRect(0, 0, width, height);
 
     // ③ 其餘照片：傾斜卡片，每一張都刻意壓在切線上
-    const cards = loaded.slice(1, 1 + MEMORY_CARD_LAYOUT.length);
+    const cards = loaded.slice(1, 1 + layout.cards.length);
     cards.forEach((item, i) => {
-      const spec = MEMORY_CARD_LAYOUT[i];
+      const spec = layout.cards[i];
       const cardW = spec.w * width;
       const cardH = cardW * (MEMORY_TILE.h / MEMORY_TILE.w);
       drawMemoryCard(ctx, item.img, spec.cx * width, spec.cy * height, cardW, cardH, spec.angle, scale);
     });
 
     // ④ 標題：整張只有一組。放在中列之內，只跨垂直切線不跨水平切線
-    const bandH = MEMORY_TITLE_BAND.h * height;
-    const bandW = MEMORY_TITLE_BAND.w * width;
+    const bandH = layout.title.h * height;
+    const bandW = layout.title.w * width;
     const bandX = (width - bandW) / 2;
-    const bandY = MEMORY_TITLE_BAND.cy * height - bandH / 2;
+    const bandY = layout.title.cy * height - bandH / 2;
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.4)';
     ctx.shadowBlur = 40 * scale;
@@ -5325,11 +5343,21 @@
       <div class="memory-grid-editor">
         <div class="memory-canvas-wrap" aria-label="4 比 5 的九宮格主視覺預覽">
           <canvas id="memoryMasterCanvas" class="memory-master-canvas" width="${MEMORY_PREVIEW.w}" height="${MEMORY_PREVIEW.h}"></canvas>
+          <div id="memoryLayoutOverlay" class="memory-layout-overlay" aria-hidden="true"></div>
         </div>
-        <label class="memory-grid-toggle">
-          <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
-          <span>顯示切線與安全區</span>
-        </label>
+        <div class="memory-edit-bar">
+          <label class="memory-grid-toggle">
+            <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
+            <span>顯示切線</span>
+          </label>
+          <span class="memory-edit-hint">拖曳小卡可移動、拉角可縮放</span>
+          <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
+        </div>
+        <div class="memory-ai-box">
+          <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="跟 AI 說怎麼調，例如「卡片放大一點」「標題往上」"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
+          <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">✨ 調整</button>
+        </div>
         <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>★ 底圖那張會鋪滿整張大圖，其餘最多 4 張疊成小卡片</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           ${photos.map((photo) => {
@@ -5353,23 +5381,199 @@
     paintMemoryEditorCanvas();
   }
 
-  async function paintMemoryEditorCanvas() {
+  async function paintMemoryEditorCanvas(rebuildHandles = true) {
     const state = memoryStudioState;
     const target = document.getElementById('memoryMasterCanvas');
     if (!state || !target || state.step !== 'grid') return;
-    const ctx = target.getContext('2d');
-    ctx.fillStyle = '#F0EDE6';
-    ctx.fillRect(0, 0, target.width, target.height);
-    ctx.fillStyle = '#5A5750';
-    ctx.font = '700 32px "Noto Sans TC", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('載入照片中…', target.width / 2, target.height / 2);
-    ctx.textAlign = 'start';
+    // 拖曳中的即時重繪不要再閃「載入照片中…」（第一次載入才顯示）
+    if (rebuildHandles) {
+      const ctx = target.getContext('2d');
+      ctx.fillStyle = '#F0EDE6';
+      ctx.fillRect(0, 0, target.width, target.height);
+      ctx.fillStyle = '#5A5750';
+      ctx.font = '700 32px "Noto Sans TC", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('載入照片中…', target.width / 2, target.height / 2);
+      ctx.textAlign = 'start';
+    }
     const canvas = await buildMemoryMasterCanvas(MEMORY_PREVIEW.w, MEMORY_PREVIEW.h, state.gridVisible);
     if (!canvas || memoryStudioState !== state || state.step !== 'grid') return;
     const current = document.getElementById('memoryMasterCanvas');
     if (!current) return;
     current.getContext('2d').drawImage(canvas, 0, 0);
+    if (rebuildHandles) renderMemoryLayoutHandles();
+  }
+
+  // 拖曳中節流：一個 rAF 只重繪一次畫布（handles 靠 DOM 直接移動，不重建）
+  let _memoryRepaintRaf = 0;
+  function scheduleMemoryEditorRepaint() {
+    if (_memoryRepaintRaf) return;
+    _memoryRepaintRaf = requestAnimationFrame(() => {
+      _memoryRepaintRaf = 0;
+      paintMemoryEditorCanvas(false);
+    });
+  }
+
+  /* 在畫布上疊一層可拖曳/縮放的控制框，一張卡一個。
+     只放「實際會被畫出來的卡片」的把手——照片不夠 4 張時，多的把手不顯示，
+     免得使用者拖一個根本不存在的卡片。底圖（第一張）不給把手：它鋪滿整張，移不了。 */
+  function renderMemoryLayoutHandles() {
+    const overlay = document.getElementById('memoryLayoutOverlay');
+    const state = memoryStudioState;
+    if (!overlay || !state) return;
+    overlay.innerHTML = '';
+    const usedCards = Math.max(0, Math.min(state.layout.cards.length, selectedMemoryPhotos().length - 1));
+    for (let i = 0; i < usedCards; i += 1) {
+      const spec = state.layout.cards[i];
+      const handle = document.createElement('div');
+      handle.className = 'memory-card-handle';
+      handle.dataset.cardIndex = String(i);
+      handle.style.left = (spec.cx * 100) + '%';
+      handle.style.top = (spec.cy * 100) + '%';
+      handle.style.width = (spec.w * 100) + '%';
+      // 卡片是 4:5，高＝寬 × (tile 高/寬)，但 overlay 本身也是 4:5，所以百分比要乘回比例
+      handle.style.aspectRatio = `${MEMORY_TILE.w} / ${MEMORY_TILE.h}`;
+      handle.style.transform = `translate(-50%, -50%) rotate(${spec.angle}deg)`;
+      handle.innerHTML = `<span class="memory-card-handle-no">${i + 2}</span>`
+        + `<span class="memory-card-grip" data-role="resize" aria-hidden="true"></span>`;
+      bindMemoryCardHandle(handle, i);
+      overlay.appendChild(handle);
+    }
+  }
+
+  function bindMemoryCardHandle(handle, index) {
+    const overlay = handle.parentElement;
+    let mode = null, startX = 0, startY = 0, startCx = 0, startCy = 0, startW = 0, boxW = 1, boxH = 1;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    const onDown = (e, resize) => {
+      const state = memoryStudioState;
+      if (!state) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = overlay.getBoundingClientRect();
+      boxW = rect.width || 1; boxH = rect.height || 1;
+      mode = resize ? 'resize' : 'move';
+      startX = e.clientX; startY = e.clientY;
+      const spec = state.layout.cards[index];
+      startCx = spec.cx; startCy = spec.cy; startW = spec.w;
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('dragging');
+    };
+    const onMove = (e) => {
+      const state = memoryStudioState;
+      if (!mode || !state) return;
+      const spec = state.layout.cards[index];
+      if (mode === 'move') {
+        spec.cx = clamp(startCx + (e.clientX - startX) / boxW, 0.06, 0.94);
+        spec.cy = clamp(startCy + (e.clientY - startY) / boxH, 0.06, 0.94);
+        handle.style.left = (spec.cx * 100) + '%';
+        handle.style.top = (spec.cy * 100) + '%';
+      } else {
+        // 往右／往下拖都放大；取兩軸較大的位移，手感較自然
+        const d = Math.max((e.clientX - startX) / boxW, (e.clientY - startY) / boxH);
+        spec.w = clamp(startW + d * 2, MEMORY_CARD_MIN_W, MEMORY_CARD_MAX_W);
+        handle.style.width = (spec.w * 100) + '%';
+      }
+      scheduleMemoryEditorRepaint();
+    };
+    const onUp = (e) => {
+      if (!mode) return;
+      mode = null;
+      handle.classList.remove('dragging');
+      try { handle.releasePointerCapture(e.pointerId); } catch (_e) {}
+      paintMemoryEditorCanvas(false);   // 收尾補一次乾淨重繪
+    };
+
+    const grip = handle.querySelector('[data-role="resize"]');
+    grip.addEventListener('pointerdown', (e) => onDown(e, true));
+    handle.addEventListener('pointerdown', (e) => { if (e.target !== grip) onDown(e, false); });
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+  }
+
+  function memoryResetLayout() {
+    if (!memoryStudioState) return;
+    memoryStudioState.layout = defaultMemoryLayout();
+    paintMemoryEditorCanvas(true);
+    feedbackToast('版面已重設', 'green');
+  }
+
+  /* #3 方向A：打字叫 AI 調「版面參數」，不碰影像內容——照片還是使用者的真實照片，
+     AI 只回傳位置/大小/角度/標題帶的數字。零影像生成成本。 */
+  function buildMemoryAiPrompt(payload, instruction, usedCards) {
+    return [
+      `你是版面編排助手。使用者在編輯一張 IG 九宮格大圖：一張底圖鋪滿背景，上面疊著 ${usedCards} 張傾斜小卡片，中間有一條標題帶。`,
+      '座標：cx/cy 是卡片中心（0~1，0=左/上，1=右/下）；w 是卡片寬佔整張的比例（0.14~0.60）；angle 是傾斜角（-20~20 度）。',
+      '標題帶 titleBand：cy 中心高度、w 寬、h 高（皆 0~1 比例）。',
+      `目前版面：${JSON.stringify(payload)}`,
+      `使用者的要求：「${instruction}」`,
+      '請依要求微調，並遵守：卡片盡量壓在三等分切線（1/3、2/3）上以維持「一張圖被切開」的效果；卡片不要完全重疊；數值不可超出上述範圍。',
+      `只回傳 JSON：{"cards":[{"cx":,"cy":,"w":,"angle":}...共 ${usedCards} 張，順序不變],"titleBand":{"cy":,"w":,"h":}}，不要任何說明文字或 markdown。`
+    ].join('\n');
+  }
+
+  // 套用前一律夾限——AI 回什麼都不能讓卡片飛出畫面或縮到看不見；壞值就保留原值。
+  function applyAiMemoryLayout(out) {
+    const layout = memoryStudioState.layout;
+    const clamp = (v, lo, hi, fb) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fb; };
+    (out.cards || []).slice(0, layout.cards.length).forEach((c, i) => {
+      const cur = layout.cards[i];
+      cur.cx = clamp(c.cx, 0.06, 0.94, cur.cx);
+      cur.cy = clamp(c.cy, 0.06, 0.94, cur.cy);
+      cur.w = clamp(c.w, MEMORY_CARD_MIN_W, MEMORY_CARD_MAX_W, cur.w);
+      cur.angle = clamp(c.angle, -20, 20, cur.angle);
+    });
+    if (out.titleBand) {
+      const t = layout.title;
+      t.cy = clamp(out.titleBand.cy, 0.12, 0.88, t.cy);
+      t.w = clamp(out.titleBand.w, 0.3, 0.9, t.w);
+      t.h = clamp(out.titleBand.h, 0.06, 0.2, t.h);
+    }
+  }
+
+  async function memoryAiEdit() {
+    const state = memoryStudioState;
+    if (!state || state.aiBusy) return;
+    const input = document.getElementById('memoryAiInput');
+    const instruction = String((input && input.value) || '').trim().slice(0, 200);
+    if (!instruction) { feedbackToast('先輸入想調整的內容', 'orange'); return; }
+    const vertex = getVertexConfig();
+    if (!vertex.ready) { feedbackToast('尚未設定 AI 服務，無法使用', 'orange'); return; }
+
+    state.aiBusy = true;
+    const btn = document.querySelector('.memory-ai-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '思考中…'; }
+    try {
+      const usedCards = Math.max(0, Math.min(state.layout.cards.length, selectedMemoryPhotos().length - 1));
+      const payload = { cards: state.layout.cards.slice(0, usedCards), titleBand: state.layout.title };
+      const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: await vertexAuthHeaders(),
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: buildMemoryAiPrompt(payload, instruction, usedCards) }] }],
+          generationConfig: buildGenConfig({ temperature: 0.3, maxOutputTokens: 1024, thinking: 0 })
+        })
+      });
+      if (!res.ok) throw vertexHttpError(res.status, 'AI 調整失敗');
+      const data = await res.json();
+      if (memoryStudioState !== state) return;   // 期間關掉工具就放棄
+      const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+      const parsed = safeParseJson(text);
+      if (!parsed || !Array.isArray(parsed.cards)) throw new Error('AI 回傳的格式看不懂，請換個說法再試');
+      applyAiMemoryLayout(parsed);
+      if (input) input.value = '';
+      paintMemoryEditorCanvas(true);
+      feedbackToast('已依你的描述調整版面', 'green');
+    } catch (e) {
+      feedbackToast((e && e.message) || 'AI 調整失敗，請再試一次', 'orange');
+    } finally {
+      if (memoryStudioState === state) state.aiBusy = false;
+      const b = document.querySelector('.memory-ai-btn');
+      if (b) { b.disabled = false; b.textContent = '✨ 調整'; }
+    }
   }
 
   function memoryToggleGrid(checked) {
@@ -5725,6 +5929,8 @@
     memoryRetryFailed,
     memoryOpenGuide,
     memorySetAudioMode,
+    memoryResetLayout,
+    memoryAiEdit,
     exportTripCollage
   });
 

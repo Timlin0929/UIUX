@@ -5902,6 +5902,7 @@ button.notif-item { cursor: pointer; }
 .memory-grid-editor { min-width: 0; }
 
 .memory-canvas-wrap {
+  position: relative;   /* 讓 .memory-layout-overlay 定位其上 */
   width: min(100%, 540px);
   /* 4/5＝IG 個人主頁格子的比例（3 格 × 4:5 = 12:15 = 4:5）。
      和 JS 的 MEMORY_TILE 必須一致，否則預覽跟實際輸出會對不上。 */
@@ -5913,6 +5914,52 @@ button.notif-item { cursor: pointer; }
   background: var(--surface2);
   box-shadow: 0 14px 34px rgba(26, 24, 20, .12);
 }
+
+/* 拖曳/縮放控制層：疊在畫布上，一張卡一個框 */
+.memory-layout-overlay { position: absolute; inset: 0; pointer-events: none; }
+.memory-card-handle {
+  position: absolute;
+  pointer-events: auto;
+  box-sizing: border-box;
+  border: 2px dashed rgba(255,255,255,.9);
+  border-radius: 6px;
+  background: rgba(47,111,79,.10);
+  cursor: grab;
+  touch-action: none;   /* 讓 pointer 拖曳不被瀏覽器捲動搶走 */
+  transition: border-color .12s;
+}
+.memory-card-handle.dragging { cursor: grabbing; border-color: var(--accent2, #2f6f4f); background: rgba(47,111,79,.2); }
+.memory-card-handle-no {
+  position: absolute; top: 2px; left: 4px;
+  font-size: 12px; font-weight: 800; color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.7);
+}
+.memory-card-grip {
+  position: absolute; right: -9px; bottom: -9px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--accent2, #2f6f4f);
+  cursor: nwse-resize; touch-action: none;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4);
+}
+
+.memory-edit-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 6px; }
+.memory-edit-hint { font-size: 12px; color: var(--ink3); flex: 1 1 auto; }
+.memory-edit-reset { padding: 6px 12px; font-size: 13px; }
+
+.memory-ai-box { display: flex; gap: 8px; margin-bottom: 8px; }
+.memory-ai-input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 10px 12px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); color: var(--ink);
+}
+.memory-ai-input:focus { outline: none; border-color: var(--accent); }
+.memory-ai-btn {
+  flex: 0 0 auto; padding: 10px 14px; font-size: 14px; font-weight: 700;
+  border: 0; border-radius: 10px; cursor: pointer;
+  background: var(--accent2, #2f6f4f); color: #fff;
+}
+.memory-ai-btn:disabled { opacity: .6; cursor: default; }
 
 .memory-canvas-wrap canvas,
 .memory-master-canvas {
