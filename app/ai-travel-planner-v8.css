@@ -5913,7 +5913,9 @@ button.notif-item { cursor: pointer; }
 
 .memory-canvas-wrap {
   width: min(100%, 540px);
-  aspect-ratio: 3 / 4;
+  /* 4/5＝IG 個人主頁格子的比例（3 格 × 4:5 = 12:15 = 4:5）。
+     和 JS 的 MEMORY_TILE 必須一致，否則預覽跟實際輸出會對不上。 */
+  aspect-ratio: 4 / 5;
   margin-inline: auto;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -5997,6 +5999,37 @@ button.notif-item { cursor: pointer; }
 }
 
 .memory-photo-item.selected { border-color: var(--accent); }
+
+/* 主視覺那張要一眼看得出來——它決定整張大圖的底 */
+.memory-photo-item.is-hero {
+  border-color: var(--accent2, #2f6f4f);
+  box-shadow: 0 0 0 3px rgba(47, 111, 79, .22);
+}
+
+/* 照片＋「設為主視覺」小鈕垂直堆在一起，仍維持橫向捲動 */
+.memory-photo-slot {
+  flex: 0 0 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scroll-snap-align: start;
+}
+
+.memory-photo-slot .memory-photo-item { flex: 0 0 112px; }
+
+.memory-hero-btn {
+  min-height: 28px;
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--ink2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.memory-hero-btn:hover { color: var(--ink); border-color: var(--accent); }
 
 .memory-photo-item img {
   display: block;
@@ -6097,7 +6130,7 @@ button.notif-item { cursor: pointer; }
 
 .memory-grid-preview {
   width: min(100%, 540px);
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 4 / 5;   /* 同 .memory-canvas-wrap，見該處說明 */
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-template-rows: repeat(3, minmax(0, 1fr));

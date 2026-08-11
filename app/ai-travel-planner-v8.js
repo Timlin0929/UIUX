@@ -4857,6 +4857,35 @@
     { order: 9, row: 1, col: 1, position: '左上角', suffix: 'post-last' }
   ];
 
+  /* IG 個人主頁的格子是直立長方形（4:5）。輸出比例必須跟它一致——
+     若輸出 3:4，主頁會再自動裁一次，每格上下各被吃掉一條，
+     大圖的連續性剛好斷在每一條切線上，而且斷得很不明顯（看起來只是「有點怪」）。
+     要改比例只改這裡；下面所有畫布尺寸都由它推導。 */
+  const MEMORY_TILE = { w: 1080, h: 1350 };                 // 每一則貼文的輸出尺寸
+  const MEMORY_MASTER = { w: MEMORY_TILE.w * 3, h: MEMORY_TILE.h * 3 };
+  const MEMORY_PREVIEW = { w: 864, h: 1080 };               // 編輯／預覽用的縮小版（同比例）
+  const MEMORY_PREVIEW_TILE = { w: MEMORY_PREVIEW.w / 3, h: MEMORY_PREVIEW.h / 3 };
+
+  /* 主視覺版面（方案 B：主照片鋪滿 ＋ 其他照片以卡片跨格疊放）。
+     座標是 0–1 的比例，乘上畫布尺寸使用。
+
+     ⚠ 兩條規則，改版時別破壞：
+     1. 卡片要「刻意跨過」切線（1/3、2/3）。跨切線正是讓人一眼看出
+        「這是一張被切開的大圖」而不是九張各自為政的照片——這就是這次要修的東西。
+     2. 文字只准跨「垂直」切線，不准跨「水平」切線。橫向被切，字仍讀得下去；
+        縱向被切會把字高攔腰砍斷，那張貼文單獨看就是壞的。
+     在 4:5 的畫布上放 4:5 的卡片時，正規化後的寬高相等，所以下面 w 同時也是高。
+
+     卡片分成上下兩群，中間留一條橫向走廊給標題——標題才不會壓在卡片上，
+     主照片也才露得出來（第一版卡片太大太滿，整張看起來只剩卡片、看不到底圖）。 */
+  const MEMORY_CARD_LAYOUT = [
+    { cx: 0.30, cy: 0.26, w: 0.34, angle: -5 },
+    { cx: 0.72, cy: 0.30, w: 0.30, angle: 4 },
+    { cx: 0.27, cy: 0.72, w: 0.30, angle: -3 },
+    { cx: 0.70, cy: 0.76, w: 0.28, angle: 6 }
+  ];
+  const MEMORY_TITLE_BAND = { cy: 0.50, w: 0.56, h: 0.11 };  // 落在中列內，只跨垂直切線
+
   let memoryStudioState = null;
   let memoryStudioBound = false;
 
@@ -5131,34 +5160,125 @@
     return value === text ? value : value + '…';
   }
 
-  async function buildMemoryMasterCanvas(width = 810, height = 1080, showGrid = false) {
+  // 主視覺標題：行程名稱。取不到就退回中性字樣，不要印出空白塊。
+  function memoryMasterTitle() {
+    const t = String(currentTripTitle || '').trim();
+    return t || '旅程回憶';
+  }
+  // 副標：地區 · 天數 · 出發日，有幾項就放幾項
+  function memoryMasterSubtitle() {
+    const parts = [];
+    const region = String(currentTripRegion || '').trim();
+    if (region) parts.push(region);
+    const days = String((currentTripPreferences && currentTripPreferences.days) || '').trim();
+    if (days) parts.push(days);
+    const date = String(currentTripDepartureDate || '').trim();
+    if (date) parts.push(date.replace(/-/g, '.'));
+    return parts.join(' · ');
+  }
+
+  // 圓角矩形（卡片與標題塊共用）
+  function memoryRoundRect(ctx, x, y, w, h, r) {
+    const radius = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + w, y, x + w, y + h, radius);
+    ctx.arcTo(x + w, y + h, x, y + h, radius);
+    ctx.arcTo(x, y + h, x, y, radius);
+    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.closePath();
+  }
+
+  // 一張傾斜的照片卡（白框＋陰影），中心點與角度由版面表給
+  function drawMemoryCard(ctx, img, cx, cy, cardW, cardH, angleDeg, scale) {
+    const border = Math.max(2, 14 * scale);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((angleDeg * Math.PI) / 180);
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 42 * scale;
+    ctx.shadowOffsetY = 16 * scale;
+    ctx.fillStyle = '#FFFFFF';
+    memoryRoundRect(ctx, -cardW / 2 - border, -cardH / 2 - border,
+      cardW + border * 2, cardH + border * 2, 18 * scale);
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.save();
+    memoryRoundRect(ctx, -cardW / 2, -cardH / 2, cardW, cardH, 10 * scale);
+    ctx.clip();
+    drawCover(ctx, img, -cardW / 2, -cardH / 2, cardW, cardH);
+    ctx.restore();
+    ctx.restore();
+  }
+
+  /* 主視覺＝「一張完整構圖」，不是九張照片各佔一格。
+     舊版是 for(0..8) 每格 drawCover 一張＋每格自己的標籤，所以切出來就是
+     九張不相干的照片——那不是切壞了，是根本沒有一張大圖存在過。
+
+     現在：主照片全幅鋪滿當底，其餘照片以傾斜卡片跨過切線疊在上面，
+     標題只出現一次。切線只是「切線」，底下的構圖是連續的。 */
+  async function buildMemoryMasterCanvas(width = MEMORY_PREVIEW.w, height = MEMORY_PREVIEW.h, showGrid = false) {
     const loaded = await ensureSelectedMemoryImages();
     if (!loaded.length) return null;
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#F7F5F0';
+    const scale = width / MEMORY_MASTER.w;   // 版面數值以輸出尺寸為基準，預覽等比縮小
+
+    // ① 底層：主照片鋪滿整張畫布——這是「一張大圖」的來源
+    const hero = loaded[0];
+    ctx.fillStyle = '#1A1814';
     ctx.fillRect(0, 0, width, height);
-    const cellW = width / 3;
-    const cellH = height / 3;
-    for (let index = 0; index < 9; index += 1) {
-      const x = (index % 3) * cellW;
-      const y = Math.floor(index / 3) * cellH;
-      // 少於九張時循環使用真實照片；不生成或替換任何使用者素材。
-      const item = loaded[index % loaded.length];
-      drawCover(ctx, item.img, x, y, cellW, cellH);
-      const gradient = ctx.createLinearGradient(0, y + cellH * 0.55, 0, y + cellH);
-      gradient.addColorStop(0, 'rgba(0,0,0,0)');
-      gradient.addColorStop(1, 'rgba(0,0,0,0.58)');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(x, y, cellW, cellH);
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = `700 ${Math.max(15, Math.round(width / 54))}px "Noto Sans TC", "PingFang TC", sans-serif`;
-      const label = fitCanvasText(ctx, item.photo.spotName, cellW - width / 28);
-      ctx.fillText(label, x + width / 56, y + cellH - height / 54);
+    drawCover(ctx, hero.img, 0, 0, width, height);
+
+    // ② 壓暗：讓疊在上面的卡片與標題浮得出來，順便統一整張的色調
+    ctx.fillStyle = 'rgba(20,17,14,0.34)';
+    ctx.fillRect(0, 0, width, height);
+    const veil = ctx.createLinearGradient(0, 0, 0, height);
+    veil.addColorStop(0, 'rgba(20,17,14,0.42)');
+    veil.addColorStop(0.45, 'rgba(20,17,14,0.05)');
+    veil.addColorStop(1, 'rgba(20,17,14,0.55)');
+    ctx.fillStyle = veil;
+    ctx.fillRect(0, 0, width, height);
+
+    // ③ 其餘照片：傾斜卡片，每一張都刻意壓在切線上
+    const cards = loaded.slice(1, 1 + MEMORY_CARD_LAYOUT.length);
+    cards.forEach((item, i) => {
+      const spec = MEMORY_CARD_LAYOUT[i];
+      const cardW = spec.w * width;
+      const cardH = cardW * (MEMORY_TILE.h / MEMORY_TILE.w);
+      drawMemoryCard(ctx, item.img, spec.cx * width, spec.cy * height, cardW, cardH, spec.angle, scale);
+    });
+
+    // ④ 標題：整張只有一組。放在中列之內，只跨垂直切線不跨水平切線
+    const bandH = MEMORY_TITLE_BAND.h * height;
+    const bandW = MEMORY_TITLE_BAND.w * width;
+    const bandX = (width - bandW) / 2;
+    const bandY = MEMORY_TITLE_BAND.cy * height - bandH / 2;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = 40 * scale;
+    ctx.fillStyle = 'rgba(20,17,14,0.72)';
+    memoryRoundRect(ctx, bandX, bandY, bandW, bandH, 16 * scale);
+    ctx.fill();
+    ctx.restore();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+    ctx.fillText(fitCanvasText(ctx, memoryMasterTitle(), bandW - 80 * scale),
+      width / 2, bandY + bandH * 0.52);
+    const sub = memoryMasterSubtitle();
+    if (sub) {
+      ctx.fillStyle = 'rgba(255,255,255,0.78)';
+      ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+      ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), width / 2, bandY + bandH * 0.85);
     }
+    ctx.textAlign = 'start';
+
     if (showGrid) {
+      const cellW = width / 3;
+      const cellH = height / 3;
       const band = Math.max(2, width * (40 / 3240));
       ctx.fillStyle = 'rgba(232,115,58,0.2)';
       [cellW, cellW * 2].forEach((x) => ctx.fillRect(x - band, 0, band * 2, height));
@@ -5175,27 +5295,33 @@
     setMemoryStudioHeader('IG 個人檔案大圖', '1 / 3　主視覺', true);
     const photos = memoryStudioState.material.photos;
     const selected = memoryStudioState.selectedPhotoIds;
+    // Set 保留插入順序，所以「第一個被選的」就是主視覺
+    const heroId = selected.size ? Array.from(selected)[0] : null;
     body.innerHTML = `
       <div class="memory-grid-editor">
-        <div class="memory-canvas-wrap" aria-label="3 比 4 的九宮格主視覺預覽">
-          <canvas id="memoryMasterCanvas" class="memory-master-canvas" width="810" height="1080"></canvas>
+        <div class="memory-canvas-wrap" aria-label="4 比 5 的九宮格主視覺預覽">
+          <canvas id="memoryMasterCanvas" class="memory-master-canvas" width="${MEMORY_PREVIEW.w}" height="${MEMORY_PREVIEW.h}"></canvas>
         </div>
         <label class="memory-grid-toggle">
           <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
           <span>顯示切線與安全區</span>
         </label>
-        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/9）</strong><span>點照片即可移除或補回</span></div>
+        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>第 1 張鋪滿整張大圖，之後最多 4 張疊成卡片</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           ${photos.map((photo) => {
             const active = selected.has(photo.id);
-            return `<button type="button" class="memory-photo-item${active ? ' selected' : ''}"
-              onclick="memoryTogglePhoto('${jsAttrStr(photo.id)}')" aria-pressed="${active}" aria-label="${active ? '移除' : '加入'}照片：${escapeHtml(photo.spotName)}">
-              <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.spotName)}" loading="lazy">
-              <span>${active ? '✓ 使用中' : '＋ 加入'}</span>
-            </button>`;
+            const isHero = active && heroId === photo.id;
+            return `<div class="memory-photo-slot">
+              <button type="button" class="memory-photo-item${active ? ' selected' : ''}${isHero ? ' is-hero' : ''}"
+                onclick="memoryTogglePhoto('${jsAttrStr(photo.id)}')" aria-pressed="${active}" aria-label="${active ? '移除' : '加入'}照片：${escapeHtml(photo.spotName)}">
+                <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.spotName)}" loading="lazy">
+                <span>${isHero ? '★ 主視覺' : (active ? '✓ 使用中' : '＋ 加入')}</span>
+              </button>
+              ${active && !isHero ? `<button type="button" class="memory-hero-btn" onclick="memorySetHero('${jsAttrStr(photo.id)}')">設為主視覺</button>` : ''}
+            </div>`;
           }).join('')}
         </div>
-        ${selected.size < 9 ? `<div class="memory-inline-note"><p>目前有 ${selected.size} 張照片；少於 9 張時會重複使用真實照片填滿九格。</p><button type="button" class="memory-secondary-btn" onclick="closeMemoryStudio()">返回旅記加照片</button></div>` : ''}
+        ${selected.size < 2 ? `<div class="memory-inline-note"><p>目前只有 ${selected.size} 張照片。只有主照片也能做，但多幾張才有疊卡片的層次。</p><button type="button" class="memory-secondary-btn" onclick="closeMemoryStudio()">返回旅記加照片</button></div>` : ''}
         <div class="memory-studio-actions">
           <button type="button" class="memory-primary-btn" onclick="memoryGoPreview()" ${selected.size ? '' : 'disabled'}>下一步：預覽九張</button>
         </div>
@@ -5215,7 +5341,7 @@
     ctx.textAlign = 'center';
     ctx.fillText('載入照片中…', target.width / 2, target.height / 2);
     ctx.textAlign = 'start';
-    const canvas = await buildMemoryMasterCanvas(810, 1080, state.gridVisible);
+    const canvas = await buildMemoryMasterCanvas(MEMORY_PREVIEW.w, MEMORY_PREVIEW.h, state.gridVisible);
     if (!canvas || memoryStudioState !== state || state.step !== 'grid') return;
     const current = document.getElementById('memoryMasterCanvas');
     if (!current) return;
@@ -5228,14 +5354,29 @@
     paintMemoryEditorCanvas();
   }
 
+  // 把某張照片挪到選取順序的最前面＝指定它當鋪滿整張大圖的主照片
+  function memorySetHero(photoId) {
+    if (!memoryStudioState) return;
+    const selected = memoryStudioState.selectedPhotoIds;
+    if (!selected.has(photoId)) return;
+    const rest = Array.from(selected).filter((id) => id !== photoId);
+    memoryStudioState.selectedPhotoIds = new Set([photoId, ...rest]);
+    memoryStudioState.masterCanvas = null;
+    revokeMemorySlices(memoryStudioState);
+    renderMemoryGridEditor(document.getElementById('memoryStudioBody'));
+  }
+
   function memoryTogglePhoto(photoId) {
     if (!memoryStudioState) return;
     const selected = memoryStudioState.selectedPhotoIds;
     if (selected.has(photoId)) {
       selected.delete(photoId);
     } else {
-      if (selected.size >= 9) {
-        feedbackToast('最多選擇 9 張照片；請先移除一張再加入', 'orange');
+      // 版面用得到的是「1 張主照片 ＋ 最多 4 張卡片」。上限從 9 改成 5：
+      // 舊版一格一張才需要九張，現在多選的那幾張根本不會出現在圖上，
+      // 讓使用者以為選了有用是騙他。
+      if (selected.size >= 1 + MEMORY_CARD_LAYOUT.length) {
+        feedbackToast(`這個版面最多用 ${1 + MEMORY_CARD_LAYOUT.length} 張；請先移除一張再加入`, 'orange');
         return;
       }
       selected.add(photoId);
@@ -5269,16 +5410,16 @@
     body.innerHTML = `
       <div class="memory-preview-copy">
         <strong>發布後你的個人檔案會長這樣</strong>
-        <p>格線位置是最終畫面；數字是發布次序。</p>
+        <p>這是同一張大圖被切成九塊；格線是切的位置，數字是發布次序。</p>
       </div>
       <div id="memoryGridPreview" class="memory-grid-preview" aria-label="九宮格最終排列"></div>
       <div class="memory-guide-card"><strong>由右下角開始發布</strong><p>第 1 張在右下角，最後一張在左上角，主頁才會正確排列。</p></div>
-      ${failedNames.length ? `<div class="memory-guide-card memory-guide-warning"><strong>有 ${failedNames.length} 張照片未載入</strong><p>已略過：${escapeHtml(failedNames.join('、'))}。九宮格會以其餘已載入的真實照片補足。</p></div>` : ''}
+      ${failedNames.length ? `<div class="memory-guide-card memory-guide-warning"><strong>有 ${failedNames.length} 張照片未載入</strong><p>已略過：${escapeHtml(failedNames.join('、'))}。大圖會以其餘已載入的真實照片組成。</p></div>` : ''}
       <div class="memory-single-preview">
         <div class="memory-single-head"><strong>單張檢視</strong><span id="memorySinglePosition"></span></div>
         <div class="memory-single-stage">
           <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(-1)" aria-label="上一張">‹</button>
-          <canvas id="memorySingleCanvas" width="270" height="360" aria-label="目前單張預覽"></canvas>
+          <canvas id="memorySingleCanvas" width="${Math.round(MEMORY_PREVIEW_TILE.w)}" height="${Math.round(MEMORY_PREVIEW_TILE.h)}" aria-label="目前單張預覽"></canvas>
           <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(1)" aria-label="下一張">›</button>
         </div>
       </div>
@@ -5289,7 +5430,7 @@
   async function paintMemoryGridPreview() {
     const state = memoryStudioState;
     if (!state || state.step !== 'preview') return;
-    const master = await buildMemoryMasterCanvas(810, 1080, false);
+    const master = await buildMemoryMasterCanvas(MEMORY_PREVIEW.w, MEMORY_PREVIEW.h, false);
     if (!master || memoryStudioState !== state || state.step !== 'preview') return;
     state.masterCanvas = master;
     const host = document.getElementById('memoryGridPreview');
@@ -5299,10 +5440,13 @@
       for (let col = 1; col <= 3; col += 1) {
         const meta = MEMORY_GRID_ORDER.find((item) => item.row === row && item.col === col);
         const canvas = document.createElement('canvas');
-        canvas.width = 270;
-        canvas.height = 360;
+        canvas.width = Math.round(MEMORY_PREVIEW_TILE.w);
+        canvas.height = Math.round(MEMORY_PREVIEW_TILE.h);
         canvas.setAttribute('aria-label', `第 ${meta.order} 張，${meta.position}`);
-        canvas.getContext('2d').drawImage(master, (col - 1) * 270, (row - 1) * 360, 270, 360, 0, 0, 270, 360);
+        canvas.getContext('2d').drawImage(master,
+          (col - 1) * MEMORY_PREVIEW_TILE.w, (row - 1) * MEMORY_PREVIEW_TILE.h,
+          MEMORY_PREVIEW_TILE.w, MEMORY_PREVIEW_TILE.h,
+          0, 0, canvas.width, canvas.height);
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'memory-grid-cell';
@@ -5379,7 +5523,7 @@
     } else {
       state.failedOrders = state.failedOrders.filter((order) => !targetOrders.includes(order));
     }
-    const master = await buildMemoryMasterCanvas(3240, 4320, false);
+    const master = await buildMemoryMasterCanvas(MEMORY_MASTER.w, MEMORY_MASTER.h, false);
     if (!master || memoryStudioState !== state || state.saveRunId !== runId) {
       if (memoryStudioState !== state || state.saveRunId !== runId) return;
       state.failedOrders = targetOrders.slice();
@@ -5391,18 +5535,18 @@
       if (memoryStudioState !== state || state.saveRunId !== runId) return;
       const meta = MEMORY_GRID_ORDER.find((item) => item.order === order);
       const cell = document.createElement('canvas');
-      cell.width = 1080;
-      cell.height = 1440;
+      cell.width = MEMORY_TILE.w;
+      cell.height = MEMORY_TILE.h;
       cell.getContext('2d').drawImage(
         master,
-        (meta.col - 1) * 1080,
-        (meta.row - 1) * 1440,
-        1080,
-        1440,
+        (meta.col - 1) * MEMORY_TILE.w,
+        (meta.row - 1) * MEMORY_TILE.h,
+        MEMORY_TILE.w,
+        MEMORY_TILE.h,
         0,
         0,
-        1080,
-        1440
+        MEMORY_TILE.w,
+        MEMORY_TILE.h
       );
       const blob = await canvasToJpegBlob(cell, 0.9);
       if (memoryStudioState !== state || state.saveRunId !== runId) return;
@@ -5548,6 +5692,7 @@
     memoryChooseMode,
     memoryToggleGrid,
     memoryTogglePhoto,
+    memorySetHero,
     memoryGoPreview,
     memoryShiftPreview,
     memoryStartSave,
