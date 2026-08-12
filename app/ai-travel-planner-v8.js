@@ -4909,7 +4909,7 @@
   function defaultMemoryLayout() {
     return {
       cards: MEMORY_CARD_LAYOUT.map((c) => ({ ...c })),
-      title: { ...MEMORY_TITLE_BAND }
+      title: { ...MEMORY_TITLE_BAND, visible: true }   // visible=false → 整條標題帶不畫
     };
   }
   // 讀目前版面；state 還沒建好時退回預設，讓純描繪路徑也能用。
@@ -5293,30 +5293,33 @@
       drawMemoryCard(ctx, item.img, spec.cx * width, spec.cy * height, cardW, cardH, spec.angle, scale);
     });
 
-    // ④ 標題：整張只有一組。放在中列之內，只跨垂直切線不跨水平切線
-    const bandH = layout.title.h * height;
-    const bandW = layout.title.w * width;
-    const bandX = (width - bandW) / 2;
-    const bandY = layout.title.cy * height - bandH / 2;
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.4)';
-    ctx.shadowBlur = 40 * scale;
-    ctx.fillStyle = 'rgba(20,17,14,0.72)';
-    memoryRoundRect(ctx, bandX, bandY, bandW, bandH, 16 * scale);
-    ctx.fill();
-    ctx.restore();
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
-    ctx.fillText(fitCanvasText(ctx, memoryMasterTitle(), bandW - 80 * scale),
-      width / 2, bandY + bandH * 0.52);
-    const sub = memoryMasterSubtitle();
-    if (sub) {
-      ctx.fillStyle = 'rgba(255,255,255,0.78)';
-      ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
-      ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), width / 2, bandY + bandH * 0.85);
+    // ④ 標題：整張只有一組。放在中列之內，只跨垂直切線不跨水平切線。
+    //    visible=false（使用者叫 AI 或自己關掉）時整條不畫。
+    if (layout.title.visible !== false) {
+      const bandH = layout.title.h * height;
+      const bandW = layout.title.w * width;
+      const bandX = (width - bandW) / 2;
+      const bandY = layout.title.cy * height - bandH / 2;
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+      ctx.shadowBlur = 40 * scale;
+      ctx.fillStyle = 'rgba(20,17,14,0.72)';
+      memoryRoundRect(ctx, bandX, bandY, bandW, bandH, 16 * scale);
+      ctx.fill();
+      ctx.restore();
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+      ctx.fillText(fitCanvasText(ctx, memoryMasterTitle(), bandW - 80 * scale),
+        width / 2, bandY + bandH * 0.52);
+      const sub = memoryMasterSubtitle();
+      if (sub) {
+        ctx.fillStyle = 'rgba(255,255,255,0.78)';
+        ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+        ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), width / 2, bandY + bandH * 0.85);
+      }
+      ctx.textAlign = 'start';
     }
-    ctx.textAlign = 'start';
 
     if (showGrid) {
       const cellW = width / 3;
@@ -5350,9 +5353,13 @@
             <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
             <span>顯示切線</span>
           </label>
-          <span class="memory-edit-hint">拖曳小卡可移動、拉角可縮放</span>
+          <label class="memory-grid-toggle">
+            <input type="checkbox" ${memoryStudioState.layout.title.visible !== false ? 'checked' : ''} onchange="memoryToggleTitle(this.checked)">
+            <span>顯示標題</span>
+          </label>
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
         </div>
+        <span class="memory-edit-hint">拖曳小卡可移動、拉右下角可縮放</span>
         <div class="memory-ai-box">
           <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="跟 AI 說怎麼調，例如「卡片放大一點」「標題往上」"
             onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
@@ -5442,7 +5449,6 @@
   }
 
   function bindMemoryCardHandle(handle, index) {
-    const overlay = handle.parentElement;
     let mode = null, startX = 0, startY = 0, startCx = 0, startCy = 0, startW = 0, boxW = 1, boxH = 1;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -5451,6 +5457,10 @@
       if (!state) return;
       e.preventDefault();
       e.stopPropagation();
+      // ⚠ 在事件當下才讀 overlay——bind 是在 appendChild 之前跑的，
+      //   若在 bind 時抓 handle.parentElement 會是 null，一拖就 getBoundingClientRect 爆掉。
+      const overlay = handle.parentElement;
+      if (!overlay) return;
       const rect = overlay.getBoundingClientRect();
       boxW = rect.width || 1; boxH = rect.height || 1;
       mode = resize ? 'resize' : 'move';
@@ -5500,17 +5510,23 @@
     feedbackToast('版面已重設', 'green');
   }
 
+  function memoryToggleTitle(checked) {
+    if (!memoryStudioState) return;
+    memoryStudioState.layout.title.visible = !!checked;
+    paintMemoryEditorCanvas(false);   // 只重繪畫布，不重建把手（勾選框自己已更新）
+  }
+
   /* #3 方向A：打字叫 AI 調「版面參數」，不碰影像內容——照片還是使用者的真實照片，
      AI 只回傳位置/大小/角度/標題帶的數字。零影像生成成本。 */
   function buildMemoryAiPrompt(payload, instruction, usedCards) {
     return [
       `你是版面編排助手。使用者在編輯一張 IG 九宮格大圖：一張底圖鋪滿背景，上面疊著 ${usedCards} 張傾斜小卡片，中間有一條標題帶。`,
       '座標：cx/cy 是卡片中心（0~1，0=左/上，1=右/下）；w 是卡片寬佔整張的比例（0.14~0.60）；angle 是傾斜角（-20~20 度）。',
-      '標題帶 titleBand：cy 中心高度、w 寬、h 高（皆 0~1 比例）。',
+      '標題帶 titleBand：cy 中心高度、w 寬、h 高（皆 0~1 比例）；visible 是布林值——使用者若說「移除/不要/隱藏標題」就回 false，說「顯示/加回標題」就回 true。',
       `目前版面：${JSON.stringify(payload)}`,
       `使用者的要求：「${instruction}」`,
-      '請依要求微調，並遵守：卡片盡量壓在三等分切線（1/3、2/3）上以維持「一張圖被切開」的效果；卡片不要完全重疊；數值不可超出上述範圍。',
-      `只回傳 JSON：{"cards":[{"cx":,"cy":,"w":,"angle":}...共 ${usedCards} 張，順序不變],"titleBand":{"cy":,"w":,"h":}}，不要任何說明文字或 markdown。`
+      '請依要求微調，並遵守：卡片盡量壓在三等分切線（1/3、2/3）上以維持「一張圖被切開」的效果；卡片不要完全重疊；數值不可超出上述範圍。沒被要求動到的部分就沿用目前的值。',
+      `只回傳 JSON：{"cards":[{"cx":,"cy":,"w":,"angle":}...共 ${usedCards} 張，順序不變],"titleBand":{"cy":,"w":,"h":,"visible":}}，不要任何說明文字或 markdown。`
     ].join('\n');
   }
 
@@ -5530,6 +5546,7 @@
       t.cy = clamp(out.titleBand.cy, 0.12, 0.88, t.cy);
       t.w = clamp(out.titleBand.w, 0.3, 0.9, t.w);
       t.h = clamp(out.titleBand.h, 0.06, 0.2, t.h);
+      if (typeof out.titleBand.visible === 'boolean') t.visible = out.titleBand.visible;
     }
   }
 
@@ -5930,6 +5947,7 @@
     memoryOpenGuide,
     memorySetAudioMode,
     memoryResetLayout,
+    memoryToggleTitle,
     memoryAiEdit,
     exportTripCollage
   });
