@@ -5946,6 +5946,30 @@ button.notif-item { cursor: pointer; }
 .memory-edit-hint { font-size: 12px; color: var(--ink3); flex: 1 1 auto; }
 .memory-edit-reset { padding: 6px 12px; font-size: 13px; }
 
+.memory-title-row { display: flex; gap: 8px; margin: 8px 0; }
+.memory-title-font {
+  flex: 0 0 auto; padding: 10px 8px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); color: var(--ink); cursor: pointer;
+}
+.memory-ai-details { margin-bottom: 8px; }
+.memory-ai-details > summary {
+  cursor: pointer; font-size: 13px; color: var(--ink2);
+  padding: 6px 0; list-style: none; user-select: none;
+}
+.memory-ai-details > summary::-webkit-details-marker { display: none; }
+.memory-ai-details[open] > summary { color: var(--ink); font-weight: 600; }
+
+/* 「加入照片」磚：跟其他照片同尺寸的虛線佔位鈕 */
+.memory-photo-add {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  border: 2px dashed var(--border) !important;
+  background: var(--surface2); color: var(--ink2);
+  font-size: 11px; line-height: 1.2;
+}
+.memory-photo-add-plus { font-size: 22px; font-weight: 300; }
+.memory-photo-add:hover { border-color: var(--accent) !important; color: var(--accent); }
+
 .memory-ai-box { display: flex; gap: 8px; margin-bottom: 8px; }
 .memory-ai-input {
   flex: 1 1 auto; min-width: 0;

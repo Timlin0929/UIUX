@@ -4909,9 +4909,16 @@
   function defaultMemoryLayout() {
     return {
       cards: MEMORY_CARD_LAYOUT.map((c) => ({ ...c })),
-      title: { ...MEMORY_TITLE_BAND, visible: true }   // visible=false → 整條標題帶不畫
+      // visible=false → 整條標題帶不畫；text='' → 用行程名稱當預設；font=字體家族
+      title: { ...MEMORY_TITLE_BAND, visible: true, text: '', font: 'sans' }
     };
   }
+  // 標題可用的字體：都是 HTML <head> 真的載入、且含中文字符的家族。
+  // DM Serif Display 沒有中文字符，故不列入（中文會掉回系統字型）。
+  const MEMORY_TITLE_FONTS = {
+    sans: '"Noto Sans TC", "PingFang TC", sans-serif',
+    serif: '"Noto Serif TC", "Songti TC", serif'
+  };
   // 讀目前版面；state 還沒建好時退回預設，讓純描繪路徑也能用。
   function currentMemoryLayout() {
     return (memoryStudioState && memoryStudioState.layout) || defaultMemoryLayout();
@@ -5054,6 +5061,10 @@
     if (memoryStudioState) memoryStudioState.saveRunId += 1;
     setMemoryStudioOpen(false);
     revokeMemorySlices(memoryStudioState);
+    // 使用者上傳的照片是 blob: URL，關工具時要 revoke，否則留在記憶體
+    if (memoryStudioState && Array.isArray(memoryStudioState.uploadedUrls)) {
+      memoryStudioState.uploadedUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (_e) {} });
+    }
     memoryStudioState = null;
   }
 
@@ -5201,8 +5212,10 @@
     return value === text ? value : value + '…';
   }
 
-  // 主視覺標題：行程名稱。取不到就退回中性字樣，不要印出空白塊。
+  // 主視覺標題：使用者自填優先，沒填就用行程名稱，都沒有才退回中性字樣。
   function memoryMasterTitle() {
+    const custom = String((memoryStudioState && memoryStudioState.layout.title.text) || '').trim();
+    if (custom) return custom;
     const t = String(currentTripTitle || '').trim();
     return t || '旅程回憶';
   }
@@ -5307,15 +5320,16 @@
       memoryRoundRect(ctx, bandX, bandY, bandW, bandH, 16 * scale);
       ctx.fill();
       ctx.restore();
+      const titleFont = MEMORY_TITLE_FONTS[layout.title.font] || MEMORY_TITLE_FONTS.sans;
       ctx.textAlign = 'center';
       ctx.fillStyle = '#FFFFFF';
-      ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+      ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px ${titleFont}`;
       ctx.fillText(fitCanvasText(ctx, memoryMasterTitle(), bandW - 80 * scale),
         width / 2, bandY + bandH * 0.52);
       const sub = memoryMasterSubtitle();
       if (sub) {
         ctx.fillStyle = 'rgba(255,255,255,0.78)';
-        ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px "Noto Sans TC", "PingFang TC", sans-serif`;
+        ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px ${titleFont}`;
         ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), width / 2, bandY + bandH * 0.85);
       }
       ctx.textAlign = 'start';
@@ -5360,13 +5374,33 @@
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
         </div>
         <span class="memory-edit-hint">拖曳小卡可移動、拉右下角可縮放</span>
-        <div class="memory-ai-box">
-          <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="跟 AI 說怎麼調，例如「卡片放大一點」「標題往上」"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
-          <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">✨ 調整</button>
+        <div class="memory-title-row">
+          <input type="text" id="memoryTitleInput" class="memory-ai-input" maxlength="30"
+            value="${escapeHtml(memoryStudioState.layout.title.text || '')}"
+            placeholder="標題（留空用行程名稱：${escapeHtml(currentTripTitle || '旅程回憶')}）"
+            oninput="memorySetTitleText(this.value)">
+          <select id="memoryTitleFont" class="memory-title-font" onchange="memorySetTitleFont(this.value)" aria-label="標題字體">
+            <option value="sans" ${memoryStudioState.layout.title.font === 'serif' ? '' : 'selected'}>黑體</option>
+            <option value="serif" ${memoryStudioState.layout.title.font === 'serif' ? 'selected' : ''}>襯線</option>
+          </select>
         </div>
+        <details class="memory-ai-details">
+          <summary>✨ 或請 AI 幫忙調（選用）</summary>
+          <div class="memory-ai-box">
+            <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="例如「卡片放大一點」「標題往上」「移除標題」"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
+            <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">送出</button>
+          </div>
+        </details>
         <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>★ 底圖那張會鋪滿整張大圖，其餘最多 4 張疊成小卡片</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
+          <div class="memory-photo-slot">
+            <button type="button" class="memory-photo-item memory-photo-add" onclick="document.getElementById('memoryUploadInput').click()" aria-label="從裝置加入照片">
+              <span class="memory-photo-add-plus">＋</span>
+              <span>加入照片</span>
+            </button>
+          </div>
+          <input type="file" id="memoryUploadInput" accept="image/*" hidden onchange="memoryAddUploadedPhoto(this.files)">
           ${photos.map((photo) => {
             const active = selected.has(photo.id);
             const isHero = active && heroId === photo.id;
@@ -5514,6 +5548,43 @@
     if (!memoryStudioState) return;
     memoryStudioState.layout.title.visible = !!checked;
     paintMemoryEditorCanvas(false);   // 只重繪畫布，不重建把手（勾選框自己已更新）
+  }
+
+  // 只重繪畫布、不重建整個編輯器——否則輸入框會失焦、打不了字
+  function memorySetTitleText(value) {
+    if (!memoryStudioState) return;
+    memoryStudioState.layout.title.text = String(value || '').slice(0, 30);
+    paintMemoryEditorCanvas(false);
+  }
+  function memorySetTitleFont(font) {
+    if (!memoryStudioState) return;
+    memoryStudioState.layout.title.font = (font === 'serif') ? 'serif' : 'sans';
+    paintMemoryEditorCanvas(false);
+  }
+
+  /* 從裝置加入自己的照片。blob: URL 是同源，畫到 canvas 不會 taint，之後仍可匯出。
+     只存活在這次編輯（不寫回旅記造訪紀錄）；關工具時 revoke 掉，不留記憶體。 */
+  function memoryAddUploadedPhoto(files) {
+    const state = memoryStudioState;
+    const file = files && files[0];
+    const input = document.getElementById('memoryUploadInput');
+    if (input) input.value = '';   // 清空才能再選同一個檔
+    if (!state || !file) return;
+    if (!/^image\//.test(file.type)) { feedbackToast('請選擇圖片檔', 'orange'); return; }
+    if (file.size > 12 * 1024 * 1024) { feedbackToast('圖片太大（上限 12MB）', 'orange'); return; }
+    const url = URL.createObjectURL(file);
+    if (!Array.isArray(state.uploadedUrls)) state.uploadedUrls = [];
+    state.uploadedUrls.push(url);
+    const photo = { id: `up-${Date.now()}-${state.uploadedUrls.length}`, spotName: '我的照片', url, ts: Date.now(), uploaded: true };
+    state.material.photos.push(photo);
+    // 有空位就自動選進來（第一張＝底圖）；滿了就只加進清單，讓使用者自己換
+    if (state.selectedPhotoIds.size < 1 + MEMORY_CARD_LAYOUT.length) {
+      state.selectedPhotoIds.add(photo.id);
+      feedbackToast('已加入並選用', 'green');
+    } else {
+      feedbackToast('已加入清單；要用它請先移除一張再點選', 'orange');
+    }
+    renderMemoryGridEditor(document.getElementById('memoryStudioBody'));
   }
 
   /* #3 方向A：打字叫 AI 調「版面參數」，不碰影像內容——照片還是使用者的真實照片，
@@ -5948,6 +6019,9 @@
     memorySetAudioMode,
     memoryResetLayout,
     memoryToggleTitle,
+    memorySetTitleText,
+    memorySetTitleFont,
+    memoryAddUploadedPhoto,
     memoryAiEdit,
     exportTripCollage
   });
