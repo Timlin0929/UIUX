@@ -4909,8 +4909,8 @@
   function defaultMemoryLayout() {
     return {
       cards: MEMORY_CARD_LAYOUT.map((c) => ({ ...c })),
-      // visible=false → 整條標題帶不畫；text='' → 用行程名稱當預設；font=字體家族
-      title: { ...MEMORY_TITLE_BAND, visible: true, text: '', font: 'sans' }
+      // cx=水平中心（0.5＝置中）；visible=false → 整條不畫；text='' → 用行程名稱；font=字體家族
+      title: { ...MEMORY_TITLE_BAND, cx: 0.5, visible: true, text: '', font: 'sans' }
     };
   }
   // 標題可用的字體：都是 HTML <head> 真的載入、且含中文字符的家族。
@@ -5306,12 +5306,14 @@
       drawMemoryCard(ctx, item.img, spec.cx * width, spec.cy * height, cardW, cardH, spec.angle, scale);
     });
 
-    // ④ 標題：整張只有一組。放在中列之內，只跨垂直切線不跨水平切線。
-    //    visible=false（使用者叫 AI 或自己關掉）時整條不畫。
-    if (layout.title.visible !== false) {
+    // ④ 標題：整張只有一組，位置由 cx/cy 決定（可左右也可上下移動）。
+    //    visible=false 時不畫；編輯中也不畫——那時由 HTML 輸入框代替，
+    //    否則畫布的字會透出來跟輸入框的字疊在一起（使用者回報「兩個字疊著、很亂」）。
+    if (layout.title.visible !== false && !(memoryStudioState && memoryStudioState.titleEditing)) {
       const bandH = layout.title.h * height;
       const bandW = layout.title.w * width;
-      const bandX = (width - bandW) / 2;
+      const cx = (typeof layout.title.cx === 'number' ? layout.title.cx : 0.5) * width;
+      const bandX = cx - bandW / 2;
       const bandY = layout.title.cy * height - bandH / 2;
       ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.4)';
@@ -5325,12 +5327,12 @@
       ctx.fillStyle = '#FFFFFF';
       ctx.font = `700 ${Math.max(14, Math.round(120 * scale))}px ${titleFont}`;
       ctx.fillText(fitCanvasText(ctx, memoryMasterTitle(), bandW - 80 * scale),
-        width / 2, bandY + bandH * 0.52);
+        cx, bandY + bandH * 0.52);
       const sub = memoryMasterSubtitle();
       if (sub) {
         ctx.fillStyle = 'rgba(255,255,255,0.78)';
         ctx.font = `500 ${Math.max(10, Math.round(58 * scale))}px ${titleFont}`;
-        ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), width / 2, bandY + bandH * 0.85);
+        ctx.fillText(fitCanvasText(ctx, sub, bandW - 80 * scale), cx, bandY + bandH * 0.85);
       }
       ctx.textAlign = 'start';
     }
@@ -5469,7 +5471,9 @@
     renderMemoryTitleHandle(overlay);
   }
 
-  /* 標題＝畫布上的文字物件（Canva/PPT 那種）：點一下進入編輯、拖曳可上下移動。
+  const memoryTitleCx = (t) => (typeof t.cx === 'number' ? t.cx : 0.5);
+
+  /* 標題＝畫布上的文字物件（Canva/PPT 那種）：點一下進入編輯、拖曳可四處移動。
      沒有「顯示標題」勾選框——標題關掉後，這裡改放一個「＋ 加標題」的幽靈鈕。 */
   function renderMemoryTitleHandle(overlay) {
     const state = memoryStudioState;
@@ -5479,7 +5483,7 @@
       add.type = 'button';
       add.className = 'memory-title-add';
       add.textContent = '＋ 加標題';
-      add.style.left = '50%';
+      add.style.left = (memoryTitleCx(t) * 100) + '%';
       add.style.top = (t.cy * 100) + '%';
       add.onclick = () => { t.visible = true; paintMemoryEditorCanvas(true); };
       overlay.appendChild(add);
@@ -5487,18 +5491,19 @@
     }
     const box = document.createElement('div');
     box.className = 'memory-title-handle';
-    box.style.left = '50%';
+    box.style.left = (memoryTitleCx(t) * 100) + '%';
     box.style.top = (t.cy * 100) + '%';
     box.style.width = (t.w * 100) + '%';
     box.style.height = (t.h * 100) + '%';
-    box.title = '點一下改標題文字';
+    box.title = '點一下改標題文字，拖曳可移動';
+    box.innerHTML = '<span class="memory-title-handle-hint">點我改標題</span>';
     overlay.appendChild(box);
     bindMemoryTitleHandle(box);
   }
 
-  // 標題框：拖曳＝上下移動（改 cy，水平置中不動）；沒拖動的單擊＝進入文字編輯
+  // 標題框：拖曳＝四處移動（改 cx/cy）；沒拖動的單擊＝進入文字編輯
   function bindMemoryTitleHandle(box) {
-    let moved = false, startY = 0, startCy = 0, boxH = 1, dragging = false;
+    let moved = false, startX = 0, startY = 0, startCx = 0.5, startCy = 0, boxW = 1, boxH = 1, dragging = false;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const onDown = (e) => {
       const state = memoryStudioState;
@@ -5507,18 +5512,22 @@
       if (box.classList.contains('editing')) return;
       const overlay = box.parentElement;
       if (!overlay) return;
-      boxH = overlay.getBoundingClientRect().height || 1;
+      const rect = overlay.getBoundingClientRect();
+      boxW = rect.width || 1; boxH = rect.height || 1;
       dragging = true; moved = false;
-      startY = e.clientY; startCy = state.layout.title.cy;
+      startX = e.clientX; startY = e.clientY;
+      startCx = memoryTitleCx(state.layout.title); startCy = state.layout.title.cy;
       box.setPointerCapture(e.pointerId);
     };
     const onMove = (e) => {
       const state = memoryStudioState;
       if (!dragging || !state) return;
-      const dy = (e.clientY - startY) / boxH;
-      if (Math.abs(e.clientY - startY) > 4) moved = true;
-      state.layout.title.cy = clamp(startCy + dy, 0.12, 0.88);
-      box.style.top = (state.layout.title.cy * 100) + '%';
+      if (Math.abs(e.clientX - startX) > 4 || Math.abs(e.clientY - startY) > 4) moved = true;
+      const t = state.layout.title;
+      t.cx = clamp(startCx + (e.clientX - startX) / boxW, 0.12, 0.88);
+      t.cy = clamp(startCy + (e.clientY - startY) / boxH, 0.12, 0.88);
+      box.style.left = (t.cx * 100) + '%';
+      box.style.top = (t.cy * 100) + '%';
       scheduleMemoryEditorRepaint();
     };
     const onUp = (e) => {
@@ -5540,6 +5549,9 @@
     if (!state || box.querySelector('.memory-title-edit')) return;
     const t = state.layout.title;
     box.classList.add('editing');
+    // 編輯時把畫布上的標題藏起來，只留輸入框——否則兩份文字疊在一起很亂
+    state.titleEditing = true;
+    paintMemoryEditorCanvas(false);
 
     const toolbar = document.createElement('div');
     toolbar.className = 'memory-title-toolbar';
@@ -5558,6 +5570,7 @@
     const finish = () => {
       box.classList.remove('editing');
       toolbar.remove(); input.remove();
+      state.titleEditing = false;      // 恢復畫布上的標題
       paintMemoryEditorCanvas(true);   // 重建把手（回到一般狀態）
     };
     input.addEventListener('input', () => { t.text = input.value.slice(0, 30); paintMemoryEditorCanvas(false); });
@@ -5678,11 +5691,11 @@
     return [
       `你是版面編排助手。使用者在編輯一張 IG 九宮格大圖：一張底圖鋪滿背景，上面疊著 ${usedCards} 張傾斜小卡片，中間有一條標題帶。`,
       '座標：cx/cy 是卡片中心（0~1，0=左/上，1=右/下）；w 是卡片寬佔整張的比例（0.14~0.60）；angle 是傾斜角（-20~20 度）。',
-      '標題帶 titleBand：cy 中心高度、w 寬、h 高（皆 0~1 比例）；visible 是布林值——使用者若說「移除/不要/隱藏標題」就回 false，說「顯示/加回標題」就回 true。',
+      '標題帶 titleBand：cx 中心水平位置、cy 中心高度、w 寬、h 高（皆 0~1 比例）；visible 是布林值——使用者若說「移除/不要/隱藏標題」就回 false，說「顯示/加回標題」就回 true。',
       `目前版面：${JSON.stringify(payload)}`,
       `使用者的要求：「${instruction}」`,
       '請依要求微調，並遵守：卡片盡量壓在三等分切線（1/3、2/3）上以維持「一張圖被切開」的效果；卡片不要完全重疊；數值不可超出上述範圍。沒被要求動到的部分就沿用目前的值。',
-      `只回傳 JSON：{"cards":[{"cx":,"cy":,"w":,"angle":}...共 ${usedCards} 張，順序不變],"titleBand":{"cy":,"w":,"h":,"visible":}}，不要任何說明文字或 markdown。`
+      `只回傳 JSON：{"cards":[{"cx":,"cy":,"w":,"angle":}...共 ${usedCards} 張，順序不變],"titleBand":{"cx":,"cy":,"w":,"h":,"visible":}}，不要任何說明文字或 markdown。`
     ].join('\n');
   }
 
@@ -5699,6 +5712,7 @@
     });
     if (out.titleBand) {
       const t = layout.title;
+      t.cx = clamp(out.titleBand.cx, 0.12, 0.88, typeof t.cx === 'number' ? t.cx : 0.5);
       t.cy = clamp(out.titleBand.cy, 0.12, 0.88, t.cy);
       t.w = clamp(out.titleBand.w, 0.3, 0.9, t.w);
       t.h = clamp(out.titleBand.h, 0.06, 0.2, t.h);

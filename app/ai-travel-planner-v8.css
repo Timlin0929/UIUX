@@ -5955,7 +5955,12 @@ button.notif-item { cursor: pointer; }
   display: flex; align-items: center; justify-content: center;
 }
 .memory-title-handle:hover { background: rgba(0,0,0,.18); }
-.memory-title-handle.editing { cursor: default; border-color: var(--accent2, #2f6f4f); }
+.memory-title-handle.editing { cursor: default; border-color: var(--accent2, #2f6f4f); background: transparent; }
+.memory-title-handle-hint {
+  font-size: 11px; color: rgba(255,255,255,.85); font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0,0,0,.7); pointer-events: none; user-select: none;
+}
+.memory-title-handle.editing .memory-title-handle-hint { display: none; }
 .memory-title-add {
   position: absolute; transform: translate(-50%, -50%);
   pointer-events: auto; padding: 6px 12px; font-size: 13px; font-weight: 600;
@@ -5964,10 +5969,11 @@ button.notif-item { cursor: pointer; }
 }
 .memory-title-add:hover { background: rgba(0,0,0,.55); }
 .memory-title-edit {
-  width: 92%; text-align: center; box-sizing: border-box;
-  background: rgba(0,0,0,.5); color: #fff; font-weight: 700; font-size: 15px;
-  border: 0; border-radius: 4px; padding: 4px 6px; outline: 2px solid var(--accent2, #2f6f4f);
+  width: 96%; text-align: center; box-sizing: border-box;
+  background: rgba(20,17,14,.82); color: #fff; font-weight: 700; font-size: 15px;
+  border: 0; border-radius: 6px; padding: 6px 8px; outline: 2px solid var(--accent2, #2f6f4f);
 }
+.memory-title-edit::placeholder { color: rgba(255,255,255,.55); font-weight: 400; }
 .memory-title-toolbar {
   position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
   display: flex; gap: 4px; white-space: nowrap; pointer-events: auto;
