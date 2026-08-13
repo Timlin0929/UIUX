@@ -5951,16 +5951,17 @@ button.notif-item { cursor: pointer; }
   position: absolute; transform: translate(-50%, -50%);
   pointer-events: auto; touch-action: none;
   border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
-  background: rgba(0,0,0,.10); cursor: text;
+  background: rgba(0,0,0,.10); cursor: move;   /* 空白處＝移動游標 */
   display: flex; align-items: center; justify-content: center;
 }
 .memory-title-handle:hover { background: rgba(0,0,0,.18); }
 .memory-title-handle.editing { cursor: default; border-color: var(--accent2, #2f6f4f); background: transparent; }
-.memory-title-handle-hint {
-  font-size: 11px; color: rgba(255,255,255,.85); font-weight: 600;
-  text-shadow: 0 1px 3px rgba(0,0,0,.7); pointer-events: none; user-select: none;
+/* 隱形、佔著文字 footprint 的 span：滑到文字上才變 I 字游標 */
+.memory-title-texthit {
+  color: transparent; cursor: text; pointer-events: auto; user-select: none;
+  font-weight: 700; white-space: nowrap; max-width: 96%; overflow: hidden; line-height: 1;
 }
-.memory-title-handle.editing .memory-title-handle-hint { display: none; }
+.memory-title-handle.editing .memory-title-texthit { display: none; }
 .memory-title-add {
   position: absolute; transform: translate(-50%, -50%);
   pointer-events: auto; padding: 6px 12px; font-size: 13px; font-weight: 600;

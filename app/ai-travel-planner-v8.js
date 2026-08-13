@@ -5495,9 +5495,18 @@
     box.style.top = (t.cy * 100) + '%';
     box.style.width = (t.w * 100) + '%';
     box.style.height = (t.h * 100) + '%';
-    box.title = '點一下改標題文字，拖曳可移動';
-    box.innerHTML = '<span class="memory-title-handle-hint">點我改標題</span>';
+    box.title = '點文字可改字、拖曳可移動';
+    // 放一個「隱形、但佔著標題文字footprint」的 span：滑鼠移到文字上才顯示 I 字游標，
+    // 移到空白處則是移動游標（box 本身 cursor:move）。文字畫在 canvas 上、DOM 沒有實體
+    // 可 hover，所以用這個透明 span 逼近它的範圍。
+    const hit = document.createElement('span');
+    hit.className = 'memory-title-texthit';
+    hit.textContent = memoryMasterTitle();
+    box.appendChild(hit);
     overlay.appendChild(box);
+    // 字級對齊 canvas 標題（120px @ 主畫布尺度）→ 依 overlay 實際寬度換算，footprint 才吻合
+    const ow = overlay.getBoundingClientRect().width || MEMORY_PREVIEW.w;
+    hit.style.fontSize = Math.max(10, 120 * ow / MEMORY_MASTER.w) + 'px';
     bindMemoryTitleHandle(box);
   }
 
