@@ -5037,7 +5037,10 @@
       tripId,
       material,
       step: 'modes',
-      selectedPhotoIds: new Set(material.photos.slice(-9).map((photo) => photo.id)),
+      // 這個版面只用得到「1 張底圖 + 4 張小卡」＝5 張，預設就只選 5 張。
+      // （原本 slice(-9) 是九宮格早期一格一張時的殘留，導致「使用的照片 9/5」的壞標籤，
+      //   而且多選的 4 張根本不會出現在畫面上，卻被算進去也被選著——組員回報的 bug。）
+      selectedPhotoIds: new Set(material.photos.slice(-(1 + MEMORY_CARD_LAYOUT.length)).map((photo) => photo.id)),
       gridVisible: true,
       imageCache: new Map(),
       imagePromises: new Map(),
@@ -5377,7 +5380,7 @@
             onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
           <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">送出</button>
         </div>
-        <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>★ 底圖那張會鋪滿整張大圖，其餘最多 4 張疊成小卡片</span></div>
+        <div class="memory-photo-head"><strong>底圖 ${selected.size >= 1 ? 1 : 0} 張 · 小卡 ${Math.max(0, selected.size - 1)}/${MEMORY_CARD_LAYOUT.length}</strong><span>★ 底圖鋪滿整張大圖，小卡疊在上面</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           <div class="memory-photo-slot">
             <button type="button" class="memory-photo-item memory-photo-add" onclick="document.getElementById('memoryUploadInput').click()" aria-label="從裝置加入照片">
