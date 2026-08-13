@@ -5987,14 +5987,6 @@ button.notif-item { cursor: pointer; }
 }
 .memory-title-toolbar button.on { background: var(--accent2, #2f6f4f); color: #fff; }
 .memory-title-toolbar button.danger { color: #c0392b; }
-.memory-ai-details { margin-bottom: 8px; }
-.memory-ai-details > summary {
-  cursor: pointer; font-size: 13px; color: var(--ink2);
-  padding: 6px 0; list-style: none; user-select: none;
-}
-.memory-ai-details > summary::-webkit-details-marker { display: none; }
-.memory-ai-details[open] > summary { color: var(--ink); font-weight: 600; }
-
 /* 「加入照片」磚：跟其他照片同尺寸的虛線佔位鈕 */
 .memory-photo-add {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;

@@ -5372,14 +5372,11 @@
           <span class="memory-edit-hint">點標題可改字、拖小卡可移動、拉角可縮放</span>
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
         </div>
-        <details class="memory-ai-details">
-          <summary>✨ 或請 AI 幫忙調（選用）</summary>
-          <div class="memory-ai-box">
-            <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="例如「卡片放大一點」「標題往上」「移除標題」"
-              onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
-            <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">送出</button>
-          </div>
-        </details>
+        <div class="memory-ai-box">
+          <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="✨ 也能打字叫 AI 調，例如「卡片放大一點」「標題往上」「移除標題」"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
+          <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">送出</button>
+        </div>
         <div class="memory-photo-head"><strong>使用的照片（${selected.size}/5）</strong><span>★ 底圖那張會鋪滿整張大圖，其餘最多 4 張疊成小卡片</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           <div class="memory-photo-slot">
