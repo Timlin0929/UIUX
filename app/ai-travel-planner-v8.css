@@ -5946,12 +5946,40 @@ button.notif-item { cursor: pointer; }
 .memory-edit-hint { font-size: 12px; color: var(--ink3); flex: 1 1 auto; }
 .memory-edit-reset { padding: 6px 12px; font-size: 13px; }
 
-.memory-title-row { display: flex; gap: 8px; margin: 8px 0; }
-.memory-title-font {
-  flex: 0 0 auto; padding: 10px 8px; font-size: 14px;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); color: var(--ink); cursor: pointer;
+/* 標題＝畫布上的文字物件（Canva 風）：點一下編輯、拖曳移動 */
+.memory-title-handle {
+  position: absolute; transform: translate(-50%, -50%);
+  pointer-events: auto; touch-action: none;
+  border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
+  background: rgba(0,0,0,.10); cursor: text;
+  display: flex; align-items: center; justify-content: center;
 }
+.memory-title-handle:hover { background: rgba(0,0,0,.18); }
+.memory-title-handle.editing { cursor: default; border-color: var(--accent2, #2f6f4f); }
+.memory-title-add {
+  position: absolute; transform: translate(-50%, -50%);
+  pointer-events: auto; padding: 6px 12px; font-size: 13px; font-weight: 600;
+  border: 1px dashed rgba(255,255,255,.9); border-radius: 8px;
+  background: rgba(0,0,0,.38); color: #fff; cursor: pointer;
+}
+.memory-title-add:hover { background: rgba(0,0,0,.55); }
+.memory-title-edit {
+  width: 92%; text-align: center; box-sizing: border-box;
+  background: rgba(0,0,0,.5); color: #fff; font-weight: 700; font-size: 15px;
+  border: 0; border-radius: 4px; padding: 4px 6px; outline: 2px solid var(--accent2, #2f6f4f);
+}
+.memory-title-toolbar {
+  position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px; white-space: nowrap; pointer-events: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px; box-shadow: 0 4px 14px rgba(0,0,0,.25);
+}
+.memory-title-toolbar button {
+  border: 0; background: transparent; padding: 4px 9px; font-size: 12px;
+  border-radius: 6px; cursor: pointer; color: var(--ink2);
+}
+.memory-title-toolbar button.on { background: var(--accent2, #2f6f4f); color: #fff; }
+.memory-title-toolbar button.danger { color: #c0392b; }
 .memory-ai-details { margin-bottom: 8px; }
 .memory-ai-details > summary {
   cursor: pointer; font-size: 13px; color: var(--ink2);

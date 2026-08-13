@@ -5367,22 +5367,8 @@
             <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
             <span>顯示切線</span>
           </label>
-          <label class="memory-grid-toggle">
-            <input type="checkbox" ${memoryStudioState.layout.title.visible !== false ? 'checked' : ''} onchange="memoryToggleTitle(this.checked)">
-            <span>顯示標題</span>
-          </label>
+          <span class="memory-edit-hint">點標題可改字、拖小卡可移動、拉角可縮放</span>
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
-        </div>
-        <span class="memory-edit-hint">拖曳小卡可移動、拉右下角可縮放</span>
-        <div class="memory-title-row">
-          <input type="text" id="memoryTitleInput" class="memory-ai-input" maxlength="30"
-            value="${escapeHtml(memoryStudioState.layout.title.text || '')}"
-            placeholder="標題（留空用行程名稱：${escapeHtml(currentTripTitle || '旅程回憶')}）"
-            oninput="memorySetTitleText(this.value)">
-          <select id="memoryTitleFont" class="memory-title-font" onchange="memorySetTitleFont(this.value)" aria-label="標題字體">
-            <option value="sans" ${memoryStudioState.layout.title.font === 'serif' ? '' : 'selected'}>黑體</option>
-            <option value="serif" ${memoryStudioState.layout.title.font === 'serif' ? 'selected' : ''}>襯線</option>
-          </select>
         </div>
         <details class="memory-ai-details">
           <summary>✨ 或請 AI 幫忙調（選用）</summary>
@@ -5480,6 +5466,122 @@
       bindMemoryCardHandle(handle, i);
       overlay.appendChild(handle);
     }
+    renderMemoryTitleHandle(overlay);
+  }
+
+  /* 標題＝畫布上的文字物件（Canva/PPT 那種）：點一下進入編輯、拖曳可上下移動。
+     沒有「顯示標題」勾選框——標題關掉後，這裡改放一個「＋ 加標題」的幽靈鈕。 */
+  function renderMemoryTitleHandle(overlay) {
+    const state = memoryStudioState;
+    const t = state.layout.title;
+    if (t.visible === false) {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'memory-title-add';
+      add.textContent = '＋ 加標題';
+      add.style.left = '50%';
+      add.style.top = (t.cy * 100) + '%';
+      add.onclick = () => { t.visible = true; paintMemoryEditorCanvas(true); };
+      overlay.appendChild(add);
+      return;
+    }
+    const box = document.createElement('div');
+    box.className = 'memory-title-handle';
+    box.style.left = '50%';
+    box.style.top = (t.cy * 100) + '%';
+    box.style.width = (t.w * 100) + '%';
+    box.style.height = (t.h * 100) + '%';
+    box.title = '點一下改標題文字';
+    overlay.appendChild(box);
+    bindMemoryTitleHandle(box);
+  }
+
+  // 標題框：拖曳＝上下移動（改 cy，水平置中不動）；沒拖動的單擊＝進入文字編輯
+  function bindMemoryTitleHandle(box) {
+    let moved = false, startY = 0, startCy = 0, boxH = 1, dragging = false;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const onDown = (e) => {
+      const state = memoryStudioState;
+      if (!state) return;
+      // 編輯中就別再啟動拖曳——點進輸入框的事件會冒泡到這裡，會邊打字邊拖動
+      if (box.classList.contains('editing')) return;
+      const overlay = box.parentElement;
+      if (!overlay) return;
+      boxH = overlay.getBoundingClientRect().height || 1;
+      dragging = true; moved = false;
+      startY = e.clientY; startCy = state.layout.title.cy;
+      box.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e) => {
+      const state = memoryStudioState;
+      if (!dragging || !state) return;
+      const dy = (e.clientY - startY) / boxH;
+      if (Math.abs(e.clientY - startY) > 4) moved = true;
+      state.layout.title.cy = clamp(startCy + dy, 0.12, 0.88);
+      box.style.top = (state.layout.title.cy * 100) + '%';
+      scheduleMemoryEditorRepaint();
+    };
+    const onUp = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      try { box.releasePointerCapture(e.pointerId); } catch (_e) {}
+      if (!moved) enterMemoryTitleEdit(box);   // 沒拖動＝單擊 → 編輯文字
+      else paintMemoryEditorCanvas(false);
+    };
+    box.addEventListener('pointerdown', onDown);
+    box.addEventListener('pointermove', onMove);
+    box.addEventListener('pointerup', onUp);
+    box.addEventListener('pointercancel', onUp);
+  }
+
+  // 點標題 → 就地變成可打字的輸入框，上面浮一排小工具（字體切換／移除標題）
+  function enterMemoryTitleEdit(box) {
+    const state = memoryStudioState;
+    if (!state || box.querySelector('.memory-title-edit')) return;
+    const t = state.layout.title;
+    box.classList.add('editing');
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'memory-title-toolbar';
+    toolbar.innerHTML = `
+      <button type="button" data-font="sans" class="${t.font === 'serif' ? '' : 'on'}">黑體</button>
+      <button type="button" data-font="serif" class="${t.font === 'serif' ? 'on' : ''}">襯線</button>
+      <button type="button" data-role="remove" class="danger">移除</button>`;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'memory-title-edit';
+    input.maxLength = 30;
+    input.value = t.text || '';
+    input.placeholder = currentTripTitle || '旅程回憶';
+
+    const finish = () => {
+      box.classList.remove('editing');
+      toolbar.remove(); input.remove();
+      paintMemoryEditorCanvas(true);   // 重建把手（回到一般狀態）
+    };
+    input.addEventListener('input', () => { t.text = input.value.slice(0, 30); paintMemoryEditorCanvas(false); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+    input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== toolbar && !toolbar.contains(document.activeElement)) finish(); }, 120));
+    // 工具列用 mousedown 阻止輸入框失焦，才能連續操作
+    toolbar.addEventListener('pointerdown', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      e.preventDefault();
+      if (btn.dataset.font) {
+        t.font = btn.dataset.font === 'serif' ? 'serif' : 'sans';
+        toolbar.querySelectorAll('[data-font]').forEach((b) => b.classList.toggle('on', b.dataset.font === t.font));
+        paintMemoryEditorCanvas(false);
+        input.focus();
+      } else if (btn.dataset.role === 'remove') {
+        t.visible = false;
+        finish();
+      }
+    });
+    box.appendChild(toolbar);
+    box.appendChild(input);
+    input.focus();
+    input.select();
   }
 
   function bindMemoryCardHandle(handle, index) {
@@ -5544,23 +5646,6 @@
     feedbackToast('版面已重設', 'green');
   }
 
-  function memoryToggleTitle(checked) {
-    if (!memoryStudioState) return;
-    memoryStudioState.layout.title.visible = !!checked;
-    paintMemoryEditorCanvas(false);   // 只重繪畫布，不重建把手（勾選框自己已更新）
-  }
-
-  // 只重繪畫布、不重建整個編輯器——否則輸入框會失焦、打不了字
-  function memorySetTitleText(value) {
-    if (!memoryStudioState) return;
-    memoryStudioState.layout.title.text = String(value || '').slice(0, 30);
-    paintMemoryEditorCanvas(false);
-  }
-  function memorySetTitleFont(font) {
-    if (!memoryStudioState) return;
-    memoryStudioState.layout.title.font = (font === 'serif') ? 'serif' : 'sans';
-    paintMemoryEditorCanvas(false);
-  }
 
   /* 從裝置加入自己的照片。blob: URL 是同源，畫到 canvas 不會 taint，之後仍可匯出。
      只存活在這次編輯（不寫回旅記造訪紀錄）；關工具時 revoke 掉，不留記憶體。 */
@@ -6018,9 +6103,6 @@
     memoryOpenGuide,
     memorySetAudioMode,
     memoryResetLayout,
-    memoryToggleTitle,
-    memorySetTitleText,
-    memorySetTitleFont,
     memoryAddUploadedPhoto,
     memoryAiEdit,
     exportTripCollage
