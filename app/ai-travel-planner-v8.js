@@ -4896,7 +4896,6 @@
 
      卡片分成上下兩群，中間留一條橫向走廊給標題——標題才不會壓在卡片上，
      主照片也才露得出來（第一版卡片太大太滿，整張看起來只剩卡片、看不到底圖）。 */
-  // 這兩個是「預設版面」的模板；實際使用的是 memoryStudioState.layout（可被拖曳與 AI 改動）。
   const MEMORY_CARD_LAYOUT = [
     { cx: 0.30, cy: 0.26, w: 0.34, angle: -5 },
     { cx: 0.72, cy: 0.30, w: 0.30, angle: 4 },
@@ -4905,12 +4904,39 @@
   ];
   const MEMORY_TITLE_BAND = { cy: 0.50, w: 0.56, h: 0.11 };  // 落在中列內，只跨垂直切線
 
-  // 每次開工具都拿一份全新的可變副本，別讓編輯改到模板常數本身。
-  function defaultMemoryLayout() {
+  /* 四個版面範本。cards 是每張小卡的位置/大小/角度；title 是標題帶位置。
+     angle 只由範本內建（原本那個有傾斜；新三個直立）——使用者能移動/縮放但不能自己轉。
+     使用者也能自行加小卡（超出範本原本張數），所以卡數不是固定的。 */
+  const MEMORY_TEMPLATES = [
+    { key: 'classic', name: '原本', cards: MEMORY_CARD_LAYOUT,
+      title: { ...MEMORY_TITLE_BAND, cx: 0.5 } },
+    { key: 'grid6', name: '整齊六宮', cards: [
+        { cx: 0.25, cy: 0.19, w: 0.28, angle: 0 }, { cx: 0.5, cy: 0.19, w: 0.28, angle: 0 }, { cx: 0.75, cy: 0.19, w: 0.28, angle: 0 },
+        { cx: 0.25, cy: 0.81, w: 0.28, angle: 0 }, { cx: 0.5, cy: 0.81, w: 0.28, angle: 0 }, { cx: 0.75, cy: 0.81, w: 0.28, angle: 0 }
+      ], title: { cx: 0.5, cy: 0.5, w: 0.64, h: 0.13 } },
+    { key: 'collage5', name: '錯落拼貼', cards: [
+        { cx: 0.26, cy: 0.22, w: 0.34, angle: 0 }, { cx: 0.73, cy: 0.24, w: 0.28, angle: 0 },
+        { cx: 0.24, cy: 0.73, w: 0.28, angle: 0 }, { cx: 0.77, cy: 0.74, w: 0.30, angle: 0 }, { cx: 0.5, cy: 0.86, w: 0.26, angle: 0 }
+      ], title: { cx: 0.5, cy: 0.5, w: 0.56, h: 0.12 } },
+    { key: 'feature5', name: '雜誌主打', cards: [
+        { cx: 0.30, cy: 0.22, w: 0.38, angle: 0 }, { cx: 0.74, cy: 0.20, w: 0.28, angle: 0 },
+        { cx: 0.22, cy: 0.78, w: 0.26, angle: 0 }, { cx: 0.5, cy: 0.80, w: 0.24, angle: 0 }, { cx: 0.80, cy: 0.78, w: 0.28, angle: 0 }
+      ], title: { cx: 0.5, cy: 0.5, w: 0.6, h: 0.12 } }
+  ];
+  const MEMORY_MAX_CARDS = 6;   // 選片池上限＝1 底圖 + 最多這麼多小卡（含使用者自行加的）
+
+  function memoryTemplateByKey(key) {
+    return MEMORY_TEMPLATES.find((t) => t.key === key) || MEMORY_TEMPLATES[0];
+  }
+
+  // 每次開工具都拿一份全新的可變副本，別讓編輯改到範本常數本身。
+  function defaultMemoryLayout(templateKey) {
+    const tpl = memoryTemplateByKey(templateKey);
     return {
-      cards: MEMORY_CARD_LAYOUT.map((c) => ({ ...c })),
+      templateKey: tpl.key,
+      cards: tpl.cards.map((c) => ({ cx: c.cx, cy: c.cy, w: c.w, angle: c.angle || 0 })),
       // cx=水平中心（0.5＝置中）；visible=false → 整條不畫；text='' → 用行程名稱；font=字體家族
-      title: { ...MEMORY_TITLE_BAND, cx: 0.5, visible: true, text: '', font: 'sans' }
+      title: { ...tpl.title, visible: true, text: '', font: 'sans' }
     };
   }
   // 標題可用的字體：都是 HTML <head> 真的載入、且含中文字符的家族。
@@ -5037,10 +5063,8 @@
       tripId,
       material,
       step: 'modes',
-      // 這個版面只用得到「1 張底圖 + 4 張小卡」＝5 張，預設就只選 5 張。
-      // （原本 slice(-9) 是九宮格早期一格一張時的殘留，導致「使用的照片 9/5」的壞標籤，
-      //   而且多選的 4 張根本不會出現在畫面上，卻被算進去也被選著——組員回報的 bug。）
-      selectedPhotoIds: new Set(material.photos.slice(-(1 + MEMORY_CARD_LAYOUT.length)).map((photo) => photo.id)),
+      // 選片池：底圖 1 張 + 最多 MEMORY_MAX_CARDS 張小卡（含使用者自行加的）。
+      selectedPhotoIds: new Set(material.photos.slice(-(1 + MEMORY_MAX_CARDS)).map((photo) => photo.id)),
       gridVisible: true,
       imageCache: new Map(),
       imagePromises: new Map(),
@@ -5051,7 +5075,8 @@
       previewOrder: 1,
       saveRunId: 0,
       audioMode: 'original',
-      layout: defaultMemoryLayout(),   // 可被拖曳/縮放與 AI 改動的版面
+      // 開工具時隨機給一個範本當預設（使用者可再切換）
+      layout: defaultMemoryLayout(MEMORY_TEMPLATES[Math.floor(Math.random() * MEMORY_TEMPLATES.length)].key),
       aiBusy: false
     };
     setMemoryStudioOpen(true);
@@ -5165,7 +5190,7 @@
     return Array.from(memoryStudioState.selectedPhotoIds)
       .map((id) => byId.get(id))
       .filter(Boolean)
-      .slice(0, 1 + MEMORY_CARD_LAYOUT.length);
+      .slice(0, 1 + MEMORY_MAX_CARDS);
   }
 
   function loadMemoryImage(photo) {
@@ -5367,6 +5392,9 @@
           <canvas id="memoryMasterCanvas" class="memory-master-canvas" width="${MEMORY_PREVIEW.w}" height="${MEMORY_PREVIEW.h}"></canvas>
           <div id="memoryLayoutOverlay" class="memory-layout-overlay" aria-hidden="true"></div>
         </div>
+        <div class="memory-template-row" role="group" aria-label="版面範本">
+          ${MEMORY_TEMPLATES.map((t) => `<button type="button" class="memory-tpl-btn${memoryStudioState.layout.templateKey === t.key ? ' on' : ''}" onclick="memorySetTemplate('${t.key}')">${escapeHtml(t.name)}</button>`).join('')}
+        </div>
         <div class="memory-edit-bar">
           <label class="memory-grid-toggle">
             <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
@@ -5380,7 +5408,7 @@
             onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
           <button type="button" class="memory-ai-btn" onclick="memoryAiEdit()">送出</button>
         </div>
-        <div class="memory-photo-head"><strong>底圖 ${selected.size >= 1 ? 1 : 0} 張 · 小卡 ${Math.max(0, selected.size - 1)}/${MEMORY_CARD_LAYOUT.length}</strong><span>★ 底圖鋪滿整張大圖，小卡疊在上面</span></div>
+        <div class="memory-photo-head"><strong>底圖 ${selected.size >= 1 ? 1 : 0} 張 · 小卡 ${Math.max(0, selected.size - 1)}/${memoryStudioState.layout.cards.length}</strong><span>★ 底圖鋪滿整張大圖，小卡疊在上面</span></div>
         <div class="memory-photo-list" aria-label="這趟旅程的照片">
           <div class="memory-photo-slot">
             <button type="button" class="memory-photo-item memory-photo-add" onclick="document.getElementById('memoryUploadInput').click()" aria-label="從裝置加入照片">
@@ -5663,9 +5691,25 @@
 
   function memoryResetLayout() {
     if (!memoryStudioState) return;
-    memoryStudioState.layout = defaultMemoryLayout();
+    // 重設回目前這個範本的原始版面（保留使用者選的範本，不跳回預設範本）
+    const keep = memoryStudioState.layout.templateKey;
+    memoryStudioState.layout = defaultMemoryLayout(keep);
     paintMemoryEditorCanvas(true);
     feedbackToast('版面已重設', 'green');
+  }
+
+  // 切換範本：換掉卡片位置與標題位置，但保留使用者打的標題文字/字體/顯示與否
+  function memorySetTemplate(key) {
+    const state = memoryStudioState;
+    if (!state) return;
+    const tpl = memoryTemplateByKey(key);
+    const old = state.layout.title;
+    state.layout = defaultMemoryLayout(tpl.key);
+    // 沿用使用者已編輯過的標題屬性（範本只決定它擺哪、多大）
+    state.layout.title.text = old.text;
+    state.layout.title.font = old.font;
+    state.layout.title.visible = old.visible;
+    paintMemoryEditorCanvas(true);
   }
 
 
@@ -5685,7 +5729,7 @@
     const photo = { id: `up-${Date.now()}-${state.uploadedUrls.length}`, spotName: '我的照片', url, ts: Date.now(), uploaded: true };
     state.material.photos.push(photo);
     // 有空位就自動選進來（第一張＝底圖）；滿了就只加進清單，讓使用者自己換
-    if (state.selectedPhotoIds.size < 1 + MEMORY_CARD_LAYOUT.length) {
+    if (state.selectedPhotoIds.size < 1 + MEMORY_MAX_CARDS) {
       state.selectedPhotoIds.add(photo.id);
       feedbackToast('已加入並選用', 'green');
     } else {
@@ -5799,8 +5843,8 @@
       // 版面用得到的是「1 張主照片 ＋ 最多 4 張卡片」。上限從 9 改成 5：
       // 舊版一格一張才需要九張，現在多選的那幾張根本不會出現在圖上，
       // 讓使用者以為選了有用是騙他。
-      if (selected.size >= 1 + MEMORY_CARD_LAYOUT.length) {
-        feedbackToast(`這個版面最多用 ${1 + MEMORY_CARD_LAYOUT.length} 張；請先移除一張再加入`, 'orange');
+      if (selected.size >= 1 + MEMORY_MAX_CARDS) {
+        feedbackToast(`最多用 ${1 + MEMORY_MAX_CARDS} 張；請先移除一張再加入`, 'orange');
         return;
       }
       selected.add(photoId);
@@ -6126,6 +6170,7 @@
     memoryOpenGuide,
     memorySetAudioMode,
     memoryResetLayout,
+    memorySetTemplate,
     memoryAddUploadedPhoto,
     memoryAiEdit,
     exportTripCollage
