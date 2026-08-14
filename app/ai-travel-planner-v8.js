@@ -5299,9 +5299,36 @@
 
      現在：主照片全幅鋪滿當底，其餘照片以傾斜卡片跨過切線疊在上面，
      標題只出現一次。切線只是「切線」，底下的構圖是連續的。 */
+  /* 解析「每張卡片要用哪張照片」：卡片若被雙擊指定過 photoId 就用那張，
+     否則沿用選片順序（第 i+1 張）。底圖＝順序第一張。回傳已載入的 img。 */
+  async function resolveMemoryLayoutImages() {
+    const state = memoryStudioState;
+    if (!state) return null;
+    const layout = currentMemoryLayout();
+    const ordered = selectedMemoryPhotos();
+    const byId = new Map(state.material.photos.map((p) => [p.id, p]));
+    const heroPhoto = ordered[0] || null;
+    const cardPhotos = layout.cards.map((c, i) => {
+      if (c.photoId && byId.has(c.photoId)) return byId.get(c.photoId);
+      return ordered[i + 1] || null;   // 沒指定就照順序
+    });
+    const uniq = new Map();
+    [heroPhoto, ...cardPhotos].forEach((p) => { if (p) uniq.set(p.id, p); });
+    const list = Array.from(uniq.values());
+    const imgs = await Promise.all(list.map((p) => loadMemoryImage(p)));
+    const imgById = new Map(); list.forEach((p, i) => imgById.set(p.id, imgs[i]));
+    if (memoryStudioState === state) {
+      state.photoLoadFailures = list.filter((p, i) => !imgs[i]).map((p) => p.spotName);
+    }
+    return {
+      hero: heroPhoto ? { photo: heroPhoto, img: imgById.get(heroPhoto.id) } : null,
+      cards: cardPhotos.map((p) => (p ? { photo: p, img: imgById.get(p.id) } : null))
+    };
+  }
+
   async function buildMemoryMasterCanvas(width = MEMORY_PREVIEW.w, height = MEMORY_PREVIEW.h, showGrid = false) {
-    const loaded = await ensureSelectedMemoryImages();
-    if (!loaded.length) return null;
+    const resolved = await resolveMemoryLayoutImages();
+    if (!resolved || !resolved.hero || !resolved.hero.img) return null;
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -5310,7 +5337,7 @@
     const layout = currentMemoryLayout();    // 可被拖曳/AI 改動的版面
 
     // ① 底層：主照片鋪滿整張畫布——這是「一張大圖」的來源
-    const hero = loaded[0];
+    const hero = resolved.hero;
     ctx.fillStyle = '#1A1814';
     ctx.fillRect(0, 0, width, height);
     drawCover(ctx, hero.img, 0, 0, width, height);
@@ -5325,9 +5352,9 @@
     ctx.fillStyle = veil;
     ctx.fillRect(0, 0, width, height);
 
-    // ③ 其餘照片：傾斜卡片，每一張都刻意壓在切線上
-    const cards = loaded.slice(1, 1 + layout.cards.length);
-    cards.forEach((item, i) => {
+    // ③ 其餘照片：卡片疊在上面（每張壓在切線上）
+    resolved.cards.forEach((item, i) => {
+      if (!item || !item.img) return;
       const spec = layout.cards[i];
       const cardW = spec.w * width;
       const cardH = cardW * (MEMORY_TILE.h / MEMORY_TILE.w);
@@ -5400,9 +5427,10 @@
             <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
             <span>顯示切線</span>
           </label>
-          <span class="memory-edit-hint">點標題可改字、拖小卡可移動、拉角可縮放</span>
+          <button type="button" class="memory-secondary-btn" onclick="memoryAddCard()">＋ 加小圖</button>
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
         </div>
+        <span class="memory-edit-hint">拖小卡可移動、拉角可縮放、雙擊小卡可換照片；點標題可改字</span>
         <div class="memory-ai-box">
           <input type="text" id="memoryAiInput" class="memory-ai-input" placeholder="✨ 也能打字叫 AI 調，例如「卡片放大一點」「標題往上」「移除標題」"
             onkeydown="if(event.key==='Enter'){event.preventDefault();memoryAiEdit();}">
@@ -5687,6 +5715,8 @@
     handle.addEventListener('pointermove', onMove);
     handle.addEventListener('pointerup', onUp);
     handle.addEventListener('pointercancel', onUp);
+    // 雙擊卡片 → 挑要放哪張照片
+    handle.addEventListener('dblclick', (e) => { e.preventDefault(); openMemoryCardPicker(index); });
   }
 
   function memoryResetLayout() {
@@ -5710,6 +5740,59 @@
     state.layout.title.font = old.font;
     state.layout.title.visible = old.visible;
     paintMemoryEditorCanvas(true);
+  }
+
+  // 自行加一張小卡（超出範本原本張數），放中央、直立，隨即開挑照片
+  function memoryAddCard() {
+    const state = memoryStudioState;
+    if (!state) return;
+    if (state.layout.cards.length >= MEMORY_MAX_CARDS) {
+      feedbackToast(`最多 ${MEMORY_MAX_CARDS} 張小卡`, 'orange');
+      return;
+    }
+    state.layout.cards.push({ cx: 0.5, cy: 0.5, w: 0.26, angle: 0, photoId: null });
+    paintMemoryEditorCanvas(true);
+    openMemoryCardPicker(state.layout.cards.length - 1);
+  }
+
+  // 雙擊卡片或新增卡片時：跳出所有照片讓使用者挑，或移除這張卡
+  function openMemoryCardPicker(cardIndex) {
+    const state = memoryStudioState;
+    if (!state || !state.layout.cards[cardIndex]) return;
+    closeMemoryCardPicker();
+    const pool = state.material.photos;
+    const overlay = document.createElement('div');
+    overlay.id = 'memoryCardPicker';
+    overlay.className = 'memory-card-picker';
+    overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) closeMemoryCardPicker(); });
+    const grid = pool.map((p) => `<button type="button" class="memory-pick-item" data-pid="${jsAttrStr(p.id)}">
+        <img src="${escapeHtml(p.url)}" alt="${escapeHtml(p.spotName || '照片')}" loading="lazy"></button>`).join('');
+    overlay.innerHTML = `<div class="memory-card-picker-panel">
+        <div class="memory-card-picker-head"><strong>選一張放進這格</strong>
+          <button type="button" class="memory-pick-close" aria-label="關閉">✕</button></div>
+        <div class="memory-pick-grid">${grid || '<p class="memory-pick-empty">還沒有照片，先「加入照片」。</p>'}</div>
+        <div class="memory-card-picker-foot">
+          <button type="button" class="memory-secondary-btn memory-pick-remove">🗑 移除這張卡</button>
+        </div></div>`;
+    overlay.querySelector('.memory-pick-close').onclick = closeMemoryCardPicker;
+    overlay.querySelector('.memory-pick-remove').onclick = () => {
+      state.layout.cards.splice(cardIndex, 1);
+      closeMemoryCardPicker();
+      paintMemoryEditorCanvas(true);
+    };
+    overlay.querySelectorAll('.memory-pick-item').forEach((btn) => {
+      btn.onclick = () => {
+        const card = state.layout.cards[cardIndex];
+        if (card) card.photoId = btn.dataset.pid;
+        closeMemoryCardPicker();
+        paintMemoryEditorCanvas(true);
+      };
+    });
+    (document.getElementById('memoryStudioBody') || document.body).appendChild(overlay);
+  }
+  function closeMemoryCardPicker() {
+    const el = document.getElementById('memoryCardPicker');
+    if (el) el.remove();
   }
 
 
@@ -6171,6 +6254,7 @@
     memorySetAudioMode,
     memoryResetLayout,
     memorySetTemplate,
+    memoryAddCard,
     memoryAddUploadedPhoto,
     memoryAiEdit,
     exportTripCollage
