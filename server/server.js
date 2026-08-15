@@ -33,6 +33,8 @@ const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const pricing = require('./pricing');
 const genRuns = require('./generation-runs');
 const { createUsageTap, modelIdFromPath } = require('./usage-tap');
+// 回顧短片後端渲染 job（M8）：獨立模組，掛在既有代理上
+const { mountRecapJobs } = require('./recap-jobs');
 
 const PORT = Number(process.env.PORT) || 3001;
 const VERTEX_API_KEY = (process.env.VERTEX_API_KEY || '').trim();
@@ -1234,6 +1236,9 @@ app.get('/api/cwa/v1/rest/datastore/:dataset', cwaLimiter, async (req, res) => {
     res.status(502).json({ error: 'upstream fetch failed' });
   }
 });
+
+// 回顧短片渲染 job 端點（需登入 + 每人每小時 5 次 + 序列化渲染）
+mountRecapJobs(app, { requireFirebaseUser, rateLimit, ipKeyGenerator });
 
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`[proxy] 代理已啟動 http://127.0.0.1:${PORT}（僅本機；對外請經 nginx /api/）`);

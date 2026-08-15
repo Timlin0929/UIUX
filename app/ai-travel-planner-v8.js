@@ -6220,11 +6220,11 @@
         <label><input type="radio" name="memoryAudioMode" value="muted" ${memoryStudioState.audioMode === 'muted' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 靜音</label>
       </fieldset>
       <div class="memory-video-status" role="status">
-        <strong>網頁版影片輸出尚在建置</strong>
-        <p>目前只顯示這趟的真實素材摘要與聲音偏好；素材不會送出、不會上傳，也不會假裝已產生影片。</p>
+        <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
+        <p id="recapVideoStatus" class="memory-video-status-line" aria-live="polite"></p>
+        <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後直接下載 mp4。（影片片段插入為後續版本）</p>
       </div>
       <div class="memory-studio-actions">
-        ${photos.length || videos.length ? '' : '<button type="button" class="memory-primary-btn" onclick="closeMemoryStudio()">去加照片</button>'}
         <button type="button" class="memory-secondary-btn" onclick="memoryStudioBack()">返回選擇</button>
       </div>`;
   }
@@ -6232,6 +6232,210 @@
   function memorySetAudioMode(mode) {
     if (!memoryStudioState) return;
     memoryStudioState.audioMode = mode === 'muted' ? 'muted' : 'original';
+  }
+
+  // ── 旅程回顧短片：前端入口（M9）。串後端 /api/recap 渲染 job → 產出可下載 mp4。──
+  // v1 為「路線動畫版」（景點順序＋交通工具外型＋旅程數據）；照片/影片插入為後續版本。
+  let recapVideoBusy = false;
+
+  function recapApiBase() {
+    return ((window.TRAVEL_APP_CONFIG && window.TRAVEL_APP_CONFIG.API_PROXY_BASE) || '').replace(/\/$/, '');
+  }
+
+  function recapStopLatLng(stop) {
+    const direct = stop && (stop.scenicCoordinates || stop._lockedCoordinates);
+    if (direct && Number.isFinite(Number(direct.lat)) && Number.isFinite(Number(direct.lng))) {
+      return { lat: Number(direct.lat), lng: Number(direct.lng) };
+    }
+    const pin = stop && stop.mapPinId && typeof mapPinLocations !== 'undefined' ? mapPinLocations[stop.mapPinId] : null;
+    if (pin && Number.isFinite(Number(pin.lat)) && Number.isFinite(Number(pin.lng))) {
+      return { lat: Number(pin.lat), lng: Number(pin.lng) };
+    }
+    return null;
+  }
+
+  function recapHaversineKm(a, b) {
+    const R = 6371, rad = (x) => x * Math.PI / 180;
+    const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  // 從目前行程（replanStops）組出後端要的 trip；只挑有座標的站。
+  function collectRecapTrip() {
+    const stops = [];
+    const modeTally = {};
+    (Array.isArray(replanStops) ? replanStops : []).forEach((s, i) => {
+      const pos = recapStopLatLng(s);
+      if (!pos) return;
+      const mode = normalizeTransitMode(s.transitMode) || 'car';
+      modeTally[mode] = (modeTally[mode] || 0) + 1;
+      stops.push({
+        stopId: String(s.collabStopId || s.id || ('s' + i)),
+        name: String(s.name || ('景點 ' + (i + 1))),
+        lat: pos.lat, lng: pos.lng,
+        mode,
+        stayMin: Math.max(0, Number(s.stayMin) || 0),
+        dayIndex: Math.max(1, Number(s.dayIndex) || 1)
+      });
+    });
+    let distanceKm = 0;
+    for (let i = 1; i < stops.length; i++) distanceKm += recapHaversineKm(stops[i - 1], stops[i]);
+    const transportMode = Object.keys(modeTally).sort((a, b) => modeTally[b] - modeTally[a])[0] || 'car';
+    return {
+      title: currentTripTitle || '我的旅程',
+      region: currentTripRegion || '',
+      dateLabel: (memoryStudioState && memoryStudioState.material && memoryStudioState.material.dateRange) || '',
+      people: '',
+      distanceKm: Math.round(distanceKm),
+      transportMode,
+      stops
+    };
+  }
+
+  // 收集每站的打卡照片（每站取第一張）→ [{stopIndex, url}]，後端會抓成 data URL 插進影片。
+  function collectRecapPhotos(recapTrip) {
+    const tripId = String(currentItineraryId || '');
+    if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
+    const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId);
+    const photos = [];
+    recapTrip.stops.forEach((stop, idx) => {
+      const rec = records.find((r) => (r.stopId && stop.stopId && String(r.stopId) === String(stop.stopId))
+        || (r.name && stop.name && r.name === stop.name));
+      if (!rec) return;
+      const first = (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url);
+      if (first && /^https?:\/\//i.test(String(first.url))) photos.push({ stopIndex: idx, url: String(first.url) });
+    });
+    return photos;
+  }
+
+  // 用現有 DirectionsService 算每段沿真實道路的點（overview_path → [[lat,lng],...]）。
+  // best-effort：某段失敗就退直線；全失敗回 null（後端畫直線）。不擋生成。
+  function recapRouteSegment(mode, origin, dest) {
+    return new Promise((resolve) => {
+      if (typeof directionsService === 'undefined' || !directionsService || typeof google === 'undefined') return resolve(null);
+      let done = false;
+      const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 6000);
+      try {
+        const req = buildGoogleRouteRequest(normalizeTransitMode(mode), origin, dest);
+        if (window.WAI_COST) WAI_COST.countClientCall('directions');
+        directionsService.route(req, (res, status) => {
+          if (done) return; done = true; clearTimeout(t);
+          const path = status === 'OK' && res && res.routes && res.routes[0] && res.routes[0].overview_path;
+          resolve(path && path.length ? path.map((ll) => [ll.lat(), ll.lng()]) : null);
+        });
+      } catch (e) { if (!done) { done = true; clearTimeout(t); resolve(null); } }
+    });
+  }
+
+  async function computeRecapRoutePoints(trip) {
+    const stops = (trip && trip.stops) || [];
+    if (stops.length < 2) return null;
+    const out = [];
+    let anyReal = false;
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i], b = stops[i + 1];
+      const pts = await recapRouteSegment(b.mode || a.mode || trip.transportMode,
+        { lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
+      if (pts && pts.length >= 2) { out.push(pts); anyReal = true; }
+      else out.push([[a.lat, a.lng], [b.lat, b.lng]]);
+    }
+    return anyReal ? out : null;
+  }
+
+  function recapRouteSig(trip) {
+    return ((trip && trip.stops) || []).map((s) => String(s.stopId || '')).join('|');
+  }
+  function recapDownsample(seg, max) {
+    if (!Array.isArray(seg) || seg.length <= max) return seg;
+    const out = []; const step = (seg.length - 1) / (max - 1);
+    for (let i = 0; i < max; i++) out.push(seg[Math.round(i * step)]);
+    return out;
+  }
+  // 路線點：先讀 Firestore 快取（micro_trips.routeGeometry，按站點簽章）→ 命中就用（Web/App 讀同一份）；
+  // 沒有才用 DirectionsService 現算，並 best-effort 寫回快取（owner 一定成功；editor 待 firestore.rules 部署）。
+  async function resolveRecapRoutePoints(trip) {
+    const tripId = String(currentItineraryId || '');
+    const sig = recapRouteSig(trip);
+    const segCount = ((trip && trip.stops) || []).length - 1;
+    if (tripId && typeof firebaseDb !== 'undefined' && firebaseDb) {
+      try {
+        const snap = await firebaseDb.collection('micro_trips').doc(tripId).get();
+        const rg = snap.exists && snap.data() ? snap.data().routeGeometry : null;
+        if (rg && rg.sig === sig && Array.isArray(rg.segments) && rg.segments.length === segCount) {
+          return rg.segments; // 快取命中：兩端讀同一份幾何 → 影片一致，且不重算
+        }
+      } catch (_e) {}
+    }
+    const pts = await computeRecapRoutePoints(trip);
+    if (pts && tripId && typeof firebaseDb !== 'undefined' && firebaseDb) {
+      try {
+        const capped = pts.map((seg) => recapDownsample(seg, 120));
+        await firebaseDb.collection('micro_trips').doc(tripId).set(
+          { routeGeometry: { sig: sig, segments: capped, updatedAt: Date.now() } }, { merge: true });
+      } catch (_e) { /* 無寫權限（viewer／editor 未部署規則）就跳過，不擋生成 */ }
+    }
+    return pts;
+  }
+
+  async function startRecapVideo() {
+    if (recapVideoBusy) return;
+    const statusEl = document.getElementById('recapVideoStatus');
+    const setStatus = (text) => { if (statusEl) statusEl.textContent = text; };
+    const base = recapApiBase();
+    if (!base) { feedbackToast('這個環境未設定後端代理，無法產生影片', 'orange'); return; }
+    const user = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+    if (!user) { feedbackToast('請先登入再產生回顧短片', 'orange'); return; }
+    const trip = collectRecapTrip();
+    if (trip.stops.length < 2) { feedbackToast('這趟行程還沒有足夠的景點座標', 'orange'); return; }
+
+    recapVideoBusy = true;
+    const btn = document.getElementById('recapGenerateBtn');
+    if (btn) btn.disabled = true;
+    try {
+      setStatus('準備中…');
+      const photos = collectRecapPhotos(trip);
+      setStatus('計算路線…');
+      let routePoints = null;
+      try { routePoints = await resolveRecapRoutePoints(trip); } catch (_e) { routePoints = null; }
+      const token = await user.getIdToken();
+      const authHeaders = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
+      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints }) });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.message || ('建立失敗（' + r.status + '）'));
+      }
+      const created = await r.json();
+      const jobId = created.jobId;
+      let status = 'queued', tries = 0;
+      while (status !== 'done' && status !== 'error' && tries < 300) {
+        await new Promise((res) => setTimeout(res, 1200));
+        const sr = await fetch(base + '/recap/jobs/' + jobId, { headers: { Authorization: 'Bearer ' + token } });
+        if (sr.ok) {
+          const s = await sr.json();
+          status = s.status;
+          setStatus('產生中… ' + (s.progress || 0) + '%');
+        }
+        tries += 1;
+      }
+      if (status !== 'done') throw new Error('產生逾時或失敗，請稍後再試');
+      setStatus('下載中…');
+      const dr = await fetch(base + '/recap/jobs/' + jobId + '/download', { headers: { Authorization: 'Bearer ' + token } });
+      if (!dr.ok) throw new Error('下載失敗');
+      const blob = await dr.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (trip.title || '旅程回顧') + '-回顧短片.mp4';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_e) {} }, 60000);
+      setStatus('✅ 已產生並下載完成');
+    } catch (err) {
+      setStatus('⚠ ' + String(err && err.message || err));
+    } finally {
+      recapVideoBusy = false;
+      if (btn) btn.disabled = false;
+    }
   }
 
   // 保留舊入口名稱供書籤／測試腳本相容，但行為已改為開啟新工具。
@@ -6257,7 +6461,8 @@
     memoryAddCard,
     memoryAddUploadedPhoto,
     memoryAiEdit,
-    exportTripCollage
+    exportTripCollage,
+    startRecapVideo
   });
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setupMemoryStudio);

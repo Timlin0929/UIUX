@@ -360,7 +360,10 @@ service cloud.firestore {
             'title', 'customTitle', 'emoji', 'days', 'region', 'budget', 'people', 'wizardData',
             'stops', 'status', 'currentStopIndex', 'startedAt', 'updatedAt',
             'lastEditedBy', 'lastEditedByName', 'titleVersion',
-            'aiTitle', 'aiReply', 'appDays', 'transportMode', 'imageUrl', 'editingLocks', 'transitMins'
+            'aiTitle', 'aiReply', 'appDays', 'transportMode', 'imageUrl', 'editingLocks', 'transitMins',
+            // 回顧短片：Directions 路線幾何快取（比照 transitMins，按站點簽章失效）。
+            // owner 走 blocklist 本就可寫；加這個是讓 editor 也能填快取（部署後生效，非必要）。
+            'routeGeometry'
           ]))
         || (isEditor(resource.data) && validRegenLockChange())
         // ★App 成員更新自己的偏好（members.{自己}.prefs 等）
