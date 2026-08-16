@@ -2035,19 +2035,69 @@
     }
     return t;
   }
+
+  function normalizePlaceIdentityName(name) {
+    return String(name || '')
+      .replace(/臺/g, '台')
+      .replace(/[\s（）()[\]「」·\-_\/,.。，、！!？?～~]/g, '')
+      .toLowerCase();
+  }
+
+  function getDistinctivePlaceName(name, region = '') {
+    let key = normalizePlaceIdentityName(stripGenericPlaceSuffix(name));
+    const regionTokens = [region, resolveGeoRegion(region)]
+      .map((value) => normalizePlaceIdentityName(value).replace(/[縣市]$/u, ''))
+      .filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index)
+      .sort((a, b) => b.length - a.length);
+    regionTokens.forEach((token) => {
+      key = key.split(token).join('');
+    });
+    return key;
+  }
+
+  // Places 的 textSearch 會把地區內熱門景點排在前面；不能只因候選位於同一縣市就自動改名。
+  // 模糊改名至少要有兩個非地區、非通用後綴的共同字，且覆蓋較短名稱的一半。
+  function hasMeaningfulFuzzyPlaceNameOverlap(candidateName, queryName, region = '') {
+    if (!candidateName || !queryName) return false;
+    if (placeNameMatchesStrict(candidateName, queryName, region)) return true;
+    const candidateCore = getDistinctivePlaceName(candidateName, region);
+    const queryCore = getDistinctivePlaceName(queryName, region);
+    if (candidateCore.length < 2 || queryCore.length < 2) return false;
+    const candidateChars = new Set(Array.from(candidateCore));
+    const queryChars = new Set(Array.from(queryCore));
+    let commonCount = 0;
+    queryChars.forEach((char) => {
+      if (candidateChars.has(char)) commonCount += 1;
+    });
+    const shorterLength = Math.min(candidateChars.size, queryChars.size);
+    return commonCount >= 2 && shorterLength > 0 && (commonCount / shorterLength) >= 0.5;
+  }
+
+  function findExactLocalPoiCandidate(name, region) {
+    const nameKey = normalizePlaceIdentityName(name);
+    if (!nameKey || typeof getLocalPoiList !== 'function') return null;
+    const match = (getLocalPoiList(resolveGeoRegion(region)) || []).find((poi) =>
+      poi && normalizePlaceIdentityName(poi.name) === nameKey
+      && Number.isFinite(Number(poi.lat)) && Number.isFinite(Number(poi.lng))
+    );
+    if (!match) return null;
+    const position = { lat: Number(match.lat), lng: Number(match.lng) };
+    if (isCoordinatesOutsideRegion(position, region, name)) return null;
+    return { name: match.name, position };
+  }
+
   // 嚴格名稱比對：去掉通用後綴後比「特徵核心」，避免只共用漁港/部落等通用詞就誤判同地點
-  function placeNameMatchesStrict(displayName, queryName) {
+  function placeNameMatchesStrict(displayName, queryName, region = '') {
     if (!displayName || !queryName) return false;
-    const clean = s => String(s).replace(/[\s（）()[\]「」·\-_\/,.。，、！!？?～~]/g, '').toLowerCase();
+    const clean = normalizePlaceIdentityName;
     const dn = clean(displayName);
     const qn = clean(queryName);
     if (!dn || !qn) return false;
     if (dn.includes(qn) || qn.includes(dn)) return true; // 一方完整含另一方（涵蓋別名內含）
-    const dCore = clean(stripGenericPlaceSuffix(displayName));
-    const qCore = clean(stripGenericPlaceSuffix(queryName));
+    const dCore = getDistinctivePlaceName(displayName, region);
+    const qCore = getDistinctivePlaceName(queryName, region);
     if (dCore && qCore) {
       if (dCore.includes(qCore) || qCore.includes(dCore)) return true;
-      if (dCore.length >= 2 && qCore.length >= 2 && dCore.slice(0, 2) === qCore.slice(0, 2)) return true;
     }
     return false;
   }
@@ -2099,7 +2149,7 @@
                 return { name: p.name || '', position, score: scorePlaceCandidate(p, stop, region, title, biasCenter, position) };
               })
               .sort((a, b) => b.score - a.score);
-            const strict = ranked.find(r => placeNameMatchesStrict(r.name, stop && stop.name));
+            const strict = ranked.find(r => placeNameMatchesStrict(r.name, stop && stop.name, region));
             resolve(strict || null);
           });
         });
@@ -2130,19 +2180,39 @@
       const cur = readStopCoordinates(stop);
       let cand = null;
       let renamed = false;
+
+      // 本地爬蟲資料以完整名稱命中時，比 Places 模糊搜尋更可信；舊行程即使沒有 coordVerified
+      // 也可直接補上驗證旗標，避免把真實冷門景點誤改成同縣市的熱門景點。
+      const localCandidate = findExactLocalPoiCandidate(name, region);
+      if (localCandidate) {
+        const localDistance = cur ? measureDistanceMeters(cur, localCandidate.position) : Infinity;
+        stop.lat = localCandidate.position.lat;
+        stop.lng = localCandidate.position.lng;
+        stop.scenicCoordinates = { ...localCandidate.position };
+        stop.coordinateSource = 'local_verified_reverify';
+        stop.placeVerified = true;
+        stop.coordVerified = true;
+        if (!cur || localDistance > 50) {
+          snapped++;
+          console.info('[coord reverify local]', name, localCandidate.position, '(原', cur, '偏移', Number.isFinite(localDistance) ? Math.round(localDistance) + 'm' : '無座標', ')');
+        }
+        return;
+      }
+
       try { cand = await searchStrictPlaceCandidate(name, stop, region, title); } catch (e) { return; }
       if (!cand || !cand.position) {
         // 嚴格配對失敗（多為 AI 取的別名，如「白色陋屋」實為「台東阿伯小白屋」）：
-        // 信心控管的模糊退回——信任 Google 對該名稱的最佳 in-region 候選，連同名稱一起校正。
+        // 模糊退回仍須具備實質名稱關聯；只有同縣市或搜尋分數大於零不足以允許自動改名。
         let fuzzy = null;
         try { fuzzy = await searchVerifiedPlaceCandidate(name, stop, region, title, resolveTripCenter(region, title)); } catch (e) {}
         if (fuzzy && fuzzy.position
           && !isCoordinatesOutsideRegion(fuzzy.position, region, name)
-          && Number(fuzzy.score) > 0) {
+          && Number(fuzzy.score) > 0
+          && hasMeaningfulFuzzyPlaceNameOverlap(fuzzy.name, name, region)) {
           cand = fuzzy;
           renamed = true;
         } else {
-          console.info('[coord reverify] 無嚴格配對候選：', name);
+          console.info('[coord reverify] 無可信名稱配對，保留原景點：', name, fuzzy?.name || '無候選');
           return;
         }
       }
@@ -14922,7 +14992,7 @@
     for (const el of els) {
       const tags = (el && el.tags) || {};
       const elName = tags.name;
-      if (!elName || !placeNameMatchesStrict(elName, name)) continue;
+      if (!elName || !placeNameMatchesStrict(elName, name, currentTripRegion)) continue;
       // 標籤黑名單：水體/海岸/水道/行政邊界/地名點 → 跳過
       if (tags.boundary || tags.place || tags.waterway || tags.water) continue;
       if (tags.natural && _OSM_BAD_NATURAL.test(tags.natural)) continue;
