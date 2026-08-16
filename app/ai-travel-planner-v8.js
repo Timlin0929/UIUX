@@ -4963,7 +4963,7 @@
     state.slices.clear();
   }
 
-  function collectMemoryMaterials(tripId) {
+  function collectMemoryMaterials(tripId, extraPhotos) {
     const records = getVisitedPlaces().filter((p) => (p.tripId || 'no-trip') === tripId);
     const photos = [];
     const videos = [];
@@ -4988,6 +4988,8 @@
         });
       });
     });
+    // 旅伴的照片（來自 micro_trips/memories 其他成員）併進照片池
+    (Array.isArray(extraPhotos) ? extraPhotos : []).forEach((p) => { if (p && p.url) photos.push(p); });
     photos.sort((a, b) => a.ts - b.ts);
     const dates = records.map((p) => p.visitDate).filter(Boolean).sort();
     return {
@@ -5048,7 +5050,7 @@
     return true;
   }
 
-  function openMemoryStudio(tripId) {
+  async function openMemoryStudio(tripId) {
     setupMemoryStudio();
     if (!document.getElementById('memoryStudioOverlay')) {
       feedbackToast('回憶製作工具尚未載入，請重新整理後再試', 'orange');
@@ -5058,7 +5060,24 @@
       memoryStudioState.saveRunId += 1;
       revokeMemorySlices(memoryStudioState);
     }
-    const material = collectMemoryMaterials(tripId);
+    // 跨端：把本端照片同步進 memories（lazy 遷移），並讀旅伴那份併進照片池
+    let extraPhotos = [];
+    try {
+      await saveMyTripMemory(String(tripId));
+      const mem = await readTripMemories(String(tripId));
+      (mem.others || []).forEach((o) => {
+        const spots = o && o.spots ? o.spots : {};
+        Object.keys(spots).forEach((sid) => {
+          const sp = spots[sid] || {};
+          (Array.isArray(sp.photos) ? sp.photos : []).forEach((u, k) => {
+            if (u && /^https?:\/\//i.test(String(u))) {
+              extraPhotos.push({ id: 'o-' + o.uid + '-' + sid + '-' + k, spotName: (sp.spotName || '旅伴照片') + ' · ' + (o.ownerName || '旅伴'), url: String(u), ts: Number(sp.updatedAt) || 0, owner: o.ownerName || '旅伴' });
+            }
+          });
+        });
+      });
+    } catch (_e) {}
+    const material = collectMemoryMaterials(tripId, extraPhotos);
     memoryStudioState = {
       tripId,
       material,
@@ -6294,20 +6313,34 @@
     };
   }
 
-  // 收集每站的打卡照片（每站取第一張）→ [{stopIndex, url}]，後端會抓成 data URL 插進影片。
-  function collectRecapPhotos(recapTrip) {
+  // 收集每站照片（每站取第一張）→ [{stopIndex, url}]。讀跨端 memories：自己＋旅伴都算，
+  // 所以旅伴在 App 拍的照片也會進影片。自己優先。後端會把 url 抓成 data URL 插進影片。
+  async function collectRecapPhotos(recapTrip) {
     const tripId = String(currentItineraryId || '');
     if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
-    const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId);
-    const photos = [];
+    try { await saveMyTripMemory(tripId); } catch (_e) {}   // lazy 遷移：本端照片先同步進 memories
+    const mem = await readTripMemories(tripId);
+    const photoBySid = {};
+    const absorb = (doc, isMine) => {
+      const spots = doc && doc.spots; if (!spots) return;
+      Object.keys(spots).forEach((sid) => {
+        const arr = (spots[sid] && Array.isArray(spots[sid].photos)) ? spots[sid].photos : [];
+        const first = arr.find((u) => u && /^https?:\/\//i.test(String(u)));
+        if (first && (isMine || !photoBySid[sid])) photoBySid[sid] = String(first);   // 自己優先
+      });
+    };
+    if (mem.mine) absorb(mem.mine, true);
+    (mem.others || []).forEach((o) => absorb(o, false));
+    const tripStops = await fetchTripStops(tripId);
+    const sidByName = {};
+    tripStops.forEach((s, i) => { const k = visitedPlaceNameKey(s.name); if (!(k in sidByName)) sidByName[k] = memoryStableStopId(s, i); });
+    const out = [];
     recapTrip.stops.forEach((stop, idx) => {
-      const rec = records.find((r) => (r.stopId && stop.stopId && String(r.stopId) === String(stop.stopId))
-        || (r.name && stop.name && r.name === stop.name));
-      if (!rec) return;
-      const first = (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url);
-      if (first && /^https?:\/\//i.test(String(first.url))) photos.push({ stopIndex: idx, url: String(first.url) });
+      let url = (stop.stopId && photoBySid[stop.stopId]) ? photoBySid[stop.stopId] : null;
+      if (!url) { const sid = sidByName[visitedPlaceNameKey(stop.name)]; if (sid) url = photoBySid[sid]; }
+      if (url) out.push({ stopIndex: idx, url: url });
     });
-    return photos;
+    return out;
   }
 
   // 用現有 DirectionsService 算每段沿真實道路的點（overview_path → [[lat,lng],...]）。
@@ -6397,7 +6430,7 @@
     if (btn) btn.disabled = true;
     try {
       setStatus('準備中…');
-      const photos = collectRecapPhotos(trip);
+      const photos = await collectRecapPhotos(trip);
       setStatus('計算路線…');
       let routePoints = null;
       try { routePoints = await resolveRecapRoutePoints(trip); } catch (_e) { routePoints = null; }
@@ -11887,7 +11920,70 @@
     if (!place) return false;
     mutator(place);
     saveVisitedPlaces(places);
+    const tId = tripId != null ? tripId : (place.tripId || '');
+    if (tId) saveMyTripMemory(String(tId));   // 跨端回憶：同步寫自己那份 memories（fire-and-forget）
     return true;
+  }
+
+  // ── 旅遊回憶跨端路徑 micro_trips/{tripId}/memories/{uid}（與 App 對齊，規格見 規格_旅遊回憶行程共享）──
+  // 網頁本端仍以 users.visitedSpots 為主資料；這一層是「橋接」：把本端照片/備註同步進共享路徑，
+  // 並能讀回旅伴那份。stopId 一律用與 App CollabModels.kt stableStopId() 一致的算法。
+  const MEMO_FIELD_UNSAFE = /[.~*/\[\]]/g;
+  function memoryStableStopId(stop, index) {
+    if (stop && stop.stopId) return String(stop.stopId);           // App 建的行程直接用
+    const order = Number((stop && stop.order != null) ? stop.order : (index != null ? index : 0));
+    const nm = String((stop && stop.name) || '').replace(MEMO_FIELD_UNSAFE, '_');
+    return 'web_' + order + '_' + nm;
+  }
+  function memoryOwnerName() {
+    const u = firebaseAuth && firebaseAuth.currentUser;
+    if (!u) return '旅伴';
+    return String(u.displayName || (u.email ? u.email.split('@')[0] : '') || '旅伴').slice(0, 100);
+  }
+  async function fetchTripStops(tripId) {
+    if (!firebaseDb || !tripId) return [];
+    try { const t = await firebaseDb.collection('micro_trips').doc(tripId).get();
+      return (t.exists && Array.isArray(t.data().stops)) ? t.data().stops : []; } catch (e) { return []; }
+  }
+  // 讀整個 memories 子集合 → 自己＋旅伴
+  async function readTripMemories(tripId) {
+    if (!firebaseDb || !tripId) return { mine: null, others: [] };
+    const uid = firebaseAuth && firebaseAuth.currentUser ? firebaseAuth.currentUser.uid : null;
+    try {
+      const snap = await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').get();
+      let mine = null; const others = [];
+      snap.forEach((d) => { const data = d.data() || {}; if (uid && d.id === uid) mine = data; else others.push(Object.assign({ uid: d.id }, data)); });
+      return { mine: mine, others: others };
+    } catch (e) { return { mine: null, others: [] }; }
+  }
+  // 把本端這趟的照片/備註整份重寫進 memories/{uid}（set 覆蓋，只留有內容的站）
+  async function saveMyTripMemory(tripId) {
+    if (!firebaseEnabled || !firebaseDb || !firebaseAuth || !firebaseAuth.currentUser) return;
+    if (!tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
+    const uid = firebaseAuth.currentUser.uid;
+    const stops = await fetchTripStops(tripId);
+    if (!stops.length) return;
+    const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === String(tripId));
+    if (!records.length) return;   // 本端沒內容就不寫，避免用空文件覆蓋自己雲端那份
+    const byName = {};
+    records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
+    const spots = {}; let coverUrl = '';
+    stops.forEach((s, i) => {
+      const rec = byName[visitedPlaceNameKey(s.name)];
+      if (!rec) return;
+      const photos = (Array.isArray(rec.photos) ? rec.photos : []).map((p) => p && p.url).filter(Boolean);
+      const note = String(rec.note || '').slice(0, 500);
+      if (!photos.length && !note) return;
+      const sid = memoryStableStopId(s, i);
+      spots[sid] = { stopId: sid, spotName: String(s.name || ''), note: note, photos: photos, updatedAt: Date.now() };
+      if (!coverUrl && photos.length) coverUrl = photos[0];
+    });
+    try {
+      await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid).set({
+        tripId: tripId, tripTitle: currentTripTitle || '', region: currentTripRegion || '',
+        coverUrl: coverUrl, updatedAt: Date.now(), ownerUid: uid, ownerName: memoryOwnerName(), spots: spots
+      });
+    } catch (e) { console.warn('Firestore 寫入回憶失敗:', e && e.message); }
   }
 
   function toggleVisitedPlace(stop, extras = {}) {

@@ -440,6 +440,15 @@ service cloud.firestore {
             || (hasEmail() && memberId == memberKey(request.auth.token.email)));
       }
 
+      // ★旅遊回憶（照片/短記）：一趟行程下每位成員各一份，doc id = 成員 uid。
+      //   同行成員互相讀得到，但只能寫自己那份（多人整理照片不互相覆蓋）。
+      //   App 與網頁共用此路徑，回顧短片/九宮格也讀這裡。
+      //   （2026-08-16 補回：先前只在線上、未進 repo，部署時被覆蓋。）
+      match /memories/{memberId} {
+        allow read: if isTripMemberOrOwner(tripId);
+        allow write: if isTripMemberOrOwner(tripId) && memberId == request.auth.uid;
+      }
+
       match /member_prefs/{memberId} {
         allow read: if isTripMemberOrOwner(tripId);
         allow create: if isTripMemberOrOwner(tripId)
