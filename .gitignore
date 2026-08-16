@@ -50,3 +50,6 @@ __pycache__/
 
 # 安全性驗證頁（含攻擊探測，僅本機／展示用，不公開進版控）
 /app/security-audit.html
+
+# 回顧短片 App 交接文件（僅內部傳閱，不進版控）
+TRAVEL_STORY_RECAP_APP_HANDOFF.md

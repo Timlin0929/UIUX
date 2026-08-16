@@ -6189,6 +6189,25 @@ button.notif-item { cursor: pointer; }
   background: var(--surface);
 }
 
+/* 回顧短片：網頁內預覽播放器＋下載鈕 */
+.memory-video-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.memory-video-preview:empty { margin: 0; }
+.memory-video-player {
+  width: 100%;
+  max-width: 320px;
+  max-height: 62vh;
+  border-radius: 14px;
+  background: #000;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.memory-video-download { margin: 0 auto; }
+
 .memory-inline-note {
   display: flex;
   align-items: center;

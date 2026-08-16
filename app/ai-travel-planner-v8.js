@@ -6221,7 +6221,8 @@
       </fieldset>
       <div class="memory-video-status" role="status">
         <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
-        <p id="recapVideoStatus" class="memory-video-status-line" aria-live="polite"></p>
+        <p id="recapVideoStatusText" class="memory-video-status-line" aria-live="polite"></p>
+        <div id="recapVideoPreview" class="memory-video-preview"></div>
         <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後直接下載 mp4。（影片片段插入為後續版本）</p>
       </div>
       <div class="memory-studio-actions">
@@ -6380,8 +6381,10 @@
 
   async function startRecapVideo() {
     if (recapVideoBusy) return;
-    const statusEl = document.getElementById('recapVideoStatus');
+    const statusEl = document.getElementById('recapVideoStatusText');
+    const previewEl = document.getElementById('recapVideoPreview');
     const setStatus = (text) => { if (statusEl) statusEl.textContent = text; };
+    if (previewEl) previewEl.innerHTML = '';
     const base = recapApiBase();
     if (!base) { feedbackToast('這個環境未設定後端代理，無法產生影片', 'orange'); return; }
     const user = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
@@ -6424,12 +6427,30 @@
       if (!dr.ok) throw new Error('下載失敗');
       const blob = await dr.blob();
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = (trip.title || '旅程回顧') + '-回顧短片.mp4';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_e) {} }, 60000);
-      setStatus('✅ 已產生並下載完成');
+      const filename = (trip.title || '旅程回顧') + '-回顧短片.mp4';
+      // 關工具時 revoke，避免記憶體殘留
+      if (memoryStudioState) {
+        memoryStudioState.uploadedUrls = memoryStudioState.uploadedUrls || [];
+        memoryStudioState.uploadedUrls.push(url);
+      }
+      setStatus('✅ 產生完成，可先預覽再決定是否下載');
+      if (previewEl) {
+        previewEl.innerHTML = '';
+        const v = document.createElement('video');
+        v.src = url; v.controls = true; v.autoplay = true; v.loop = true; v.playsInline = true; v.muted = true;
+        v.className = 'memory-video-player';
+        const dl = document.createElement('button');
+        dl.type = 'button';
+        dl.className = 'memory-primary-btn memory-video-download';
+        dl.textContent = '⬇ 下載影片';
+        dl.onclick = () => {
+          const a = document.createElement('a');
+          a.href = url; a.download = filename;
+          document.body.appendChild(a); a.click(); a.remove();
+        };
+        previewEl.appendChild(v);
+        previewEl.appendChild(dl);
+      }
     } catch (err) {
       setStatus('⚠ ' + String(err && err.message || err));
     } finally {

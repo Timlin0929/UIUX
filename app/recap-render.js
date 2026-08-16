@@ -128,6 +128,38 @@
     return { byStop: byStop, images: images, ready: Promise.all(proms) };
   }
 
+  // 真實 2D 地圖底圖：預載 OSM 圖磚（data URL）
+  function preloadBasemap(manifest) {
+    var bm = manifest.basemap;
+    if (!bm || !Array.isArray(bm.tiles) || typeof Image === 'undefined') return { tiles: [], attribution: '', ready: Promise.resolve() };
+    var loaded = [];
+    var proms = bm.tiles.map(function (t) {
+      return new Promise(function (res) {
+        if (!t.dataUrl) return res();
+        var img = new Image();
+        img.onload = function () { loaded.push({ lngW: t.lngW, lngE: t.lngE, latN: t.latN, latS: t.latS, img: img }); res(); };
+        img.onerror = function () { res(); };
+        img.src = t.dataUrl;
+      });
+    });
+    return { tiles: loaded, attribution: bm.attribution || '© OpenStreetMap contributors', ready: Promise.all(proms) };
+  }
+  // 把圖磚依地理範圍畫進世界座標（本專案投影 x=lng·cosLat、y=-lat 對經緯線性，圖磚落成軸對齊矩形），再暗化配深色主題
+  function drawBasemap(ctx, W, H, world, cam, basemap) {
+    if (!basemap || !basemap.tiles.length) return false;
+    ctx.save();
+    ctx.fillStyle = '#0a1214'; ctx.fillRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = true;
+    basemap.tiles.forEach(function (t) {
+      var tl = cam.toScreen({ x: t.lngW * world.cosLat, y: -t.latN });
+      var br = cam.toScreen({ x: t.lngE * world.cosLat, y: -t.latS });
+      ctx.drawImage(t.img, tl.x, tl.y, (br.x - tl.x) + 1, (br.y - tl.y) + 1);
+    });
+    ctx.fillStyle = 'rgba(9,18,22,0.5)'; ctx.fillRect(0, 0, W, H);  // 暗化，讓路線跳出
+    ctx.restore();
+    return true;
+  }
+
   // 到站照片：暗化地圖＋置中相框＋Ken Burns 緩慢縮放平移＋淡入淡出
   function drawPhotoOverlay(ctx, img, W, H, progress, caption) {
     var fade = Math.max(0, Math.min(1, Math.min(progress / 0.14, (1 - progress) / 0.14)));
@@ -269,7 +301,8 @@
   }
 
   // ── 背景 ──
-  function drawBg(ctx, W, H) {
+  function drawBg(ctx, W, H, world, cam, basemap) {
+    if (basemap && drawBasemap(ctx, W, H, world, cam, basemap)) return;  // 有真實地圖就用它
     var g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#16232a'); g.addColorStop(.55, '#0f1a20'); g.addColorStop(1, '#0a1214');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
     var sea = ctx.createLinearGradient(W * 0.66, 0, W, 0); sea.addColorStop(0, 'rgba(40,90,120,0)'); sea.addColorStop(1, 'rgba(38,96,130,0.28)');
@@ -302,10 +335,10 @@
   function drawVehicle(ctx, carScreen, ang, mode, worldPts, carIdxFloat) {
     var col = carColors(mode);
     var isWalk = (mode || '').toLowerCase().indexOf('walk') >= 0;
-    // 落地陰影
+    // 落地陰影：置中（只往下一點點），避免車＋影整團偏右、看起來離開路線
     ctx.save();
-    if (isWalk) { ctx.translate(carScreen.x + 3, carScreen.y + 22); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 0, 20, 9, 0, 0, 7); ctx.fill(); }
-    else { ctx.translate(carScreen.x + 6, carScreen.y + 9); ctx.rotate(ang); ctx.fillStyle = 'rgba(0,0,0,.32)'; ctx.beginPath(); ctx.ellipse(0, 0, 54, 25, 0, 0, 7); ctx.fill(); }
+    if (isWalk) { ctx.translate(carScreen.x, carScreen.y + 20); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 0, 18, 8, 0, 0, 7); ctx.fill(); }
+    else { ctx.translate(carScreen.x, carScreen.y + 3); ctx.rotate(ang); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 0, 50, 22, 0, 0, 7); ctx.fill(); }
     ctx.restore();
     ctx.save(); ctx.translate(carScreen.x, carScreen.y);
     if (isWalk) { if (Math.cos(ang) < 0) ctx.scale(-1, 1); }
@@ -358,11 +391,11 @@
   }
 
   // ── 主入口：對某時刻畫一整幀 ──
-  function renderFrameAtMs(ctx, m, world, timing, tMs, viewport, media) {
+  function renderFrameAtMs(ctx, m, world, timing, tMs, viewport, media, basemap) {
     var W = viewport.w, H = viewport.h, tl = m.timeline;
-    drawBg(ctx, W, H);
     var car = posAtTime(m, world, timing, tMs);
     var cam = cameraAt(m, world, timing, car, tMs, viewport);
+    drawBg(ctx, W, H, world, cam, basemap);   // 底圖需要鏡頭，故先算 car/cam
     var screenPts = world.points.map(function (p) { return cam.toScreen(p); });
     var carScreen = cam.toScreen({ x: car.x, y: car.y });
     if (tMs < tl.coverMs) {
@@ -390,6 +423,15 @@
       drawStops(ctx, screenPts, m.stops.length - 1);
       statsCard(ctx, m, W, H, Math.min(1, (tMs - timing.routeEnd) / 500));
     }
+    // 地圖來源標註（OSM 授權要求）
+    if (basemap && basemap.tiles && basemap.tiles.length && basemap.attribution) {
+      ctx.save();
+      ctx.textAlign = 'right'; ctx.font = '400 24px ' + SANS;
+      ctx.fillStyle = 'rgba(255,255,255,.5)';
+      ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 8;
+      ctx.fillText(basemap.attribution, W - 18, H - 18);
+      ctx.textAlign = 'left'; ctx.restore();
+    }
   }
 
   // ── 便利 session（前端預覽用）──
@@ -397,11 +439,12 @@
     var world = buildWorld(manifest, viewport);
     var timing = computeTiming(manifest);
     var media = preloadMedia(manifest);
+    var basemap = preloadBasemap(manifest);
     return {
       totalMs: manifest.timeline.totalMs,
-      world: world, timing: timing, media: media,
-      ready: media.ready,
-      renderAt: function (tMs) { renderFrameAtMs(ctx, manifest, world, timing, tMs, viewport, media); }
+      world: world, timing: timing, media: media, basemap: basemap,
+      ready: Promise.all([media.ready, basemap.ready]),
+      renderAt: function (tMs) { renderFrameAtMs(ctx, manifest, world, timing, tMs, viewport, media, basemap); }
     };
   }
 

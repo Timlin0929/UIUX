@@ -114,6 +114,53 @@ function sanitizePhotos(raw, stopCount) {
   return out;
 }
 
+// ── OSM 真實 2D 地圖底圖：伺服器端抓圖磚 → data URL（避開瀏覽器跨源污染）──
+// 授權：OpenStreetMap 標準圖磚，需標註「© OpenStreetMap contributors」；輕量使用。
+const OSM_UA = 'TravelLinkAI-recap/1.0 (+https://travel-link-ai.duckdns.org)';
+function lng2tileX(lng, z) { return (lng + 180) / 360 * Math.pow(2, z); }
+function lat2tileY(lat, z) { var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z); }
+function tileX2lng(x, z) { return x / Math.pow(2, z) * 360 - 180; }
+function tileY2lat(y, z) { var n = Math.PI - 2 * Math.PI * y / Math.pow(2, z); return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))); }
+
+async function fetchBasemap(manifest) {
+  if (process.env.RECAP_BASEMAP === '0') return null;   // 可用環境變數關閉
+  var lats = [], lngs = [];
+  (manifest.stops || []).forEach((s) => { lats.push(s.lat); lngs.push(s.lng); });
+  (manifest.segments || []).forEach((seg) => { if (Array.isArray(seg.points)) seg.points.forEach((p) => { lats.push(p[0]); lngs.push(p[1]); }); });
+  if (lats.length < 2) return null;
+  var minLat = Math.min.apply(null, lats), maxLat = Math.max.apply(null, lats);
+  var minLng = Math.min.apply(null, lngs), maxLng = Math.max.apply(null, lngs);
+  var mLat = (maxLat - minLat) * 0.15 + 0.002, mLng = (maxLng - minLng) * 0.15 + 0.002;
+  minLat -= mLat; maxLat += mLat; minLng -= mLng; maxLng += mLng;
+  var z, x0, x1, y0, y1;
+  for (z = 17; z >= 10; z--) {
+    x0 = Math.floor(lng2tileX(minLng, z)); x1 = Math.floor(lng2tileX(maxLng, z));
+    y0 = Math.floor(lat2tileY(maxLat, z)); y1 = Math.floor(lat2tileY(minLat, z));
+    var w = x1 - x0 + 1, h = y1 - y0 + 1;
+    if (w >= 1 && h >= 1 && w <= 6 && h <= 8 && w * h <= 24) break;
+  }
+  if (z < 10) return null;
+  var coords = [];
+  for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) coords.push([x, y]);
+  var tiles = [];
+  await Promise.all(coords.map(async (xy) => {
+    try {
+      const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 8000);
+      const r = await fetch('https://tile.openstreetmap.org/' + z + '/' + xy[0] + '/' + xy[1] + '.png', { headers: { 'User-Agent': OSM_UA }, signal: ctrl.signal });
+      clearTimeout(to);
+      if (!r.ok) return;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > 2 * 1024 * 1024) return;
+      tiles.push({
+        lngW: tileX2lng(xy[0], z), lngE: tileX2lng(xy[0] + 1, z),
+        latN: tileY2lat(xy[1], z), latS: tileY2lat(xy[1] + 1, z),
+        dataUrl: 'data:image/png;base64,' + buf.toString('base64')
+      });
+    } catch (e) {}
+  }));
+  return tiles.length ? { tiles: tiles, attribution: '© OpenStreetMap contributors', z: z } : null;
+}
+
 // 伺服器端抓照片 → data URL（避開瀏覽器 file:// 的跨源污染）。失敗回 null。
 async function fetchPhotoDataUrl(url) {
   if (/^data:image\//i.test(url)) return url.length <= 6 * 1024 * 1024 ? url : null;
@@ -154,6 +201,8 @@ async function runNext() {
       await Promise.all(job.photos.map(async (p) => { byStop[p.stopIndex] = await fetchPhotoDataUrl(p.url); }));
       job.manifest.media.forEach((mm) => { const src = byStop[mm.stopIndex]; if (src) mm.src = src; });
     }
+    // 真實 2D 地圖底圖（OSM 圖磚，抓不到就用風格化底圖）
+    job.manifest.basemap = await fetchBasemap(job.manifest).catch(() => null);
     const outPath = path.join(OUT_DIR, job.id + '.mp4');
     await renderRecapVideo(job.manifest, {
       outPath, fps: FPS, width: 1080, height: 1920,
@@ -224,4 +273,4 @@ function mountRecapJobs(app, deps) {
   console.log('[recap] job 端點已掛載：POST /api/recap/render、GET /api/recap/jobs/:id[/download]');
 }
 
-module.exports = { mountRecapJobs: mountRecapJobs, _internals: { sanitizeTrip, buildManifest } };
+module.exports = { mountRecapJobs: mountRecapJobs, _internals: { sanitizeTrip, buildManifest, fetchBasemap } };
