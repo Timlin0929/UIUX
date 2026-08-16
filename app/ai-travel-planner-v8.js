@@ -4377,9 +4377,12 @@
   }
 
   function deleteTripPhoto(name, ts, tripId = null) {
+    const rec0 = findVisitedPlaceRecord(name, tripId);
+    const target = rec0 && Array.isArray(rec0.photos) ? rec0.photos.find(p => p && p.ts === ts) : null;
+    if (target && target.foreign) { return feedbackToast('這是旅伴的照片，不能刪除', 'orange'); }  // 只能刪自己的
     if (!window.confirm('要刪除這張照片嗎？')) return;
-    const rec = findVisitedPlaceRecord(name, tripId);
-    const photo = rec && Array.isArray(rec.photos) ? rec.photos.find(p => p && p.ts === ts) : null;
+    const rec = rec0;
+    const photo = target;
     if (photo && photo.path && firebaseStorage) {
       firebaseStorage.ref(photo.path).delete().catch(() => {}); // object-not-found 等一律靜默
     }
@@ -5060,24 +5063,9 @@
       memoryStudioState.saveRunId += 1;
       revokeMemorySlices(memoryStudioState);
     }
-    // 跨端：把本端照片同步進 memories（lazy 遷移），並讀旅伴那份併進照片池
-    let extraPhotos = [];
-    try {
-      await saveMyTripMemory(String(tripId));
-      const mem = await readTripMemories(String(tripId));
-      (mem.others || []).forEach((o) => {
-        const spots = o && o.spots ? o.spots : {};
-        Object.keys(spots).forEach((sid) => {
-          const sp = spots[sid] || {};
-          (Array.isArray(sp.photos) ? sp.photos : []).forEach((u, k) => {
-            if (u && /^https?:\/\//i.test(String(u))) {
-              extraPhotos.push({ id: 'o-' + o.uid + '-' + sid + '-' + k, spotName: (sp.spotName || '旅伴照片') + ' · ' + (o.ownerName || '旅伴'), url: String(u), ts: Number(sp.updatedAt) || 0, owner: o.ownerName || '旅伴' });
-            }
-          });
-        });
-      });
-    } catch (_e) {}
-    const material = collectMemoryMaterials(tripId, extraPhotos);
+    // 跨端：把 memories（自己雲端＋旅伴）併進本機，再同步本機上去 → 照片池即含所有人
+    try { await mergeTripMemoriesIntoLocal(String(tripId)); await saveMyTripMemory(String(tripId)); } catch (_e) {}
+    const material = collectMemoryMaterials(tripId);
     memoryStudioState = {
       tripId,
       material,
@@ -6313,32 +6301,22 @@
     };
   }
 
-  // 收集每站照片（每站取第一張）→ [{stopIndex, url}]。讀跨端 memories：自己＋旅伴都算，
-  // 所以旅伴在 App 拍的照片也會進影片。自己優先。後端會把 url 抓成 data URL 插進影片。
+  // 收集每站照片（每站取第一張）→ [{stopIndex, url}]。先把跨端 memories（自己雲端＋旅伴）
+  // 併進本機，再從本機讀 → 旅伴在 App 拍的照片也會進影片。後端會把 url 抓成 data URL 插進影片。
   async function collectRecapPhotos(recapTrip) {
     const tripId = String(currentItineraryId || '');
     if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
-    try { await saveMyTripMemory(tripId); } catch (_e) {}   // lazy 遷移：本端照片先同步進 memories
-    const mem = await readTripMemories(tripId);
-    const photoBySid = {};
-    const absorb = (doc, isMine) => {
-      const spots = doc && doc.spots; if (!spots) return;
-      Object.keys(spots).forEach((sid) => {
-        const arr = (spots[sid] && Array.isArray(spots[sid].photos)) ? spots[sid].photos : [];
-        const first = arr.find((u) => u && /^https?:\/\//i.test(String(u)));
-        if (first && (isMine || !photoBySid[sid])) photoBySid[sid] = String(first);   // 自己優先
-      });
-    };
-    if (mem.mine) absorb(mem.mine, true);
-    (mem.others || []).forEach((o) => absorb(o, false));
-    const tripStops = await fetchTripStops(tripId);
-    const sidByName = {};
-    tripStops.forEach((s, i) => { const k = visitedPlaceNameKey(s.name); if (!(k in sidByName)) sidByName[k] = memoryStableStopId(s, i); });
+    try { await mergeTripMemoriesIntoLocal(tripId); } catch (_e) {}
+    try { await saveMyTripMemory(tripId); } catch (_e) {}
+    const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId);
+    const byName = {};
+    records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
     const out = [];
     recapTrip.stops.forEach((stop, idx) => {
-      let url = (stop.stopId && photoBySid[stop.stopId]) ? photoBySid[stop.stopId] : null;
-      if (!url) { const sid = sidByName[visitedPlaceNameKey(stop.name)]; if (sid) url = photoBySid[sid]; }
-      if (url) out.push({ stopIndex: idx, url: url });
+      const rec = byName[visitedPlaceNameKey(stop.name)];
+      if (!rec) return;
+      const first = (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url && /^https?:\/\//i.test(String(ph.url)));
+      if (first) out.push({ stopIndex: idx, url: String(first.url) });
     });
     return out;
   }
@@ -8157,7 +8135,9 @@
                 ${photos.length ? `<div class="travellog-photo-row">
                   ${photos.map((photo) => `<div class="travellog-photo-thumb">
                     <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(spot.name)}的旅程照片" loading="lazy" onclick="openImageLightbox(this.src)">
-                    <button type="button" class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(photo.ts) || 0}, '${tripIdJs}')" aria-label="刪除這張照片">✕</button>
+                    ${photo.foreign
+                      ? (photo.owner ? `<span class="travellog-photo-owner">${escapeHtml(photo.owner)}</span>` : '')
+                      : `<button type="button" class="travellog-photo-del" onclick="deleteTripPhoto('${nameJs}', ${Number(photo.ts) || 0}, '${tripIdJs}')" aria-label="刪除這張照片">✕</button>`}
                   </div>`).join('')}
                 </div>` : ''}
                 <div class="travellog-spot-actions">
@@ -10089,7 +10069,13 @@
     });
     document.getElementById('view-' + viewId).classList.add('active');
 
-    if (viewId === 'travellog') renderTravelLog();
+    if (viewId === 'travellog') {
+      renderTravelLog();
+      // 併入跨端 memories（旅伴＋自己他機的照片）後再重繪
+      mergeTripMemoriesIntoLocal(String(currentItineraryId || '')).then(() => {
+        if (document.getElementById('view-travellog') && document.getElementById('view-travellog').classList.contains('active')) renderTravelLog();
+      }).catch(() => {});
+    }
     if (viewId === 'budget') {
       renderBudgetTracker();
       renderApiCost();   // 必須在 renderBudgetTracker 之後：它會覆寫整個 #view-budget
@@ -11956,7 +11942,10 @@
       return { mine: mine, others: others };
     } catch (e) { return { mine: null, others: [] }; }
   }
-  // 把本端這趟的照片/備註整份重寫進 memories/{uid}（set 覆蓋，只留有內容的站）
+  // 把本端這趟的照片/備註「合併」進 memories/{uid}。
+  // ★關鍵：先讀既有雲端那份，照片以 URL 聯集——否則同帳號在 App 上傳、
+  //   換到網頁一開就用本機（沒有那張）整份覆蓋，會把 App 的照片洗掉（組員回報的 bug）。
+  //   本機標了 foreign 的照片（＝載入時從別人/他機併進來顯示的）不回寫，避免據為己有。
   async function saveMyTripMemory(tripId) {
     if (!firebaseEnabled || !firebaseDb || !firebaseAuth || !firebaseAuth.currentUser) return;
     if (!tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
@@ -11964,26 +11953,85 @@
     const stops = await fetchTripStops(tripId);
     if (!stops.length) return;
     const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === String(tripId));
-    if (!records.length) return;   // 本端沒內容就不寫，避免用空文件覆蓋自己雲端那份
+    if (!records.length) return;   // 本端沒內容就不動雲端
     const byName = {};
     records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
-    const spots = {}; let coverUrl = '';
+    // 先帶入既有雲端所有站（含 App 上傳、本機沒有的）
+    let existing = {};
+    try {
+      const d = await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid).get();
+      if (d.exists && d.data() && d.data().spots) existing = d.data().spots;
+    } catch (e) {}
+    const spots = {};
+    Object.keys(existing).forEach((sid) => {
+      const e = existing[sid] || {};
+      const ph = (Array.isArray(e.photos) ? e.photos : []).filter((u) => u && /^https?:\/\//i.test(String(u)));
+      spots[sid] = { stopId: sid, spotName: String(e.spotName || ''), note: String(e.note || '').slice(0, 500), photos: ph.slice(), updatedAt: Number(e.updatedAt) || 0 };
+    });
+    // 併入本機 local（排除 foreign），照片 URL 聯集
     stops.forEach((s, i) => {
       const rec = byName[visitedPlaceNameKey(s.name)];
       if (!rec) return;
-      const photos = (Array.isArray(rec.photos) ? rec.photos : []).map((p) => p && p.url).filter(Boolean);
+      const localPhotos = (Array.isArray(rec.photos) ? rec.photos : []).filter((p) => p && p.url && !p.foreign).map((p) => p.url);
       const note = String(rec.note || '').slice(0, 500);
-      if (!photos.length && !note) return;
+      if (!localPhotos.length && !note) return;
       const sid = memoryStableStopId(s, i);
-      spots[sid] = { stopId: sid, spotName: String(s.name || ''), note: note, photos: photos, updatedAt: Date.now() };
-      if (!coverUrl && photos.length) coverUrl = photos[0];
+      const cur = spots[sid] || { stopId: sid, spotName: String(s.name || ''), note: '', photos: [], updatedAt: 0 };
+      const seen = new Set(cur.photos);
+      localPhotos.forEach((u) => { if (!seen.has(u)) { seen.add(u); cur.photos.push(u); } });
+      if (note) cur.note = note;
+      if (!cur.spotName) cur.spotName = String(s.name || '');
+      cur.updatedAt = Date.now();
+      spots[sid] = cur;
     });
+    if (!Object.keys(spots).length) return;
+    let coverUrl = '';
+    Object.keys(spots).forEach((sid) => { if (!coverUrl && spots[sid].photos.length) coverUrl = spots[sid].photos[0]; });
     try {
       await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid).set({
         tripId: tripId, tripTitle: currentTripTitle || '', region: currentTripRegion || '',
         coverUrl: coverUrl, updatedAt: Date.now(), ownerUid: uid, ownerName: memoryOwnerName(), spots: spots
       });
     } catch (e) { console.warn('Firestore 寫入回憶失敗:', e && e.message); }
+  }
+
+  // 載入時把 memories（自己雲端＋旅伴）併進本機造訪紀錄，讓所有畫面（旅記/九宮格/短片）都看得到。
+  // 併進來的照片標 foreign:true（不可刪、不回寫），owner=作者名（自己他機為 null）。
+  async function mergeTripMemoriesIntoLocal(tripId) {
+    if (!firebaseDb || !tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
+    const mem = await readTripMemories(tripId);
+    const docs = [];
+    if (mem.mine) docs.push({ doc: mem.mine, isMine: true });
+    (mem.others || []).forEach((o) => docs.push({ doc: o, isMine: false }));
+    if (!docs.length) return;
+    const stops = await fetchTripStops(tripId);
+    const nameBySid = {};
+    stops.forEach((s, i) => { nameBySid[memoryStableStopId(s, i)] = String(s.name || ''); });
+    const places = getVisitedPlaces();
+    let changed = false;
+    const ensureRecord = (name) => {
+      let r = places.find((p) => visitedPlaceMatches(p, name, tripId));
+      if (!r) { r = { name: name, region: currentTripRegion || '', visitDate: '', tripId: String(tripId), tripTitle: currentTripTitle || '', emoji: '📍', gpsVerified: null, photos: [], note: '' }; places.push(r); changed = true; }
+      return r;
+    };
+    docs.forEach((entry) => {
+      const spots = (entry.doc && entry.doc.spots) ? entry.doc.spots : {};
+      const owner = entry.doc && entry.doc.ownerName ? entry.doc.ownerName : '旅伴';
+      Object.keys(spots).forEach((sid) => {
+        const sp = spots[sid] || {};
+        const name = nameBySid[sid] || sp.spotName;
+        if (!name) return;
+        const rec = ensureRecord(name);
+        rec.photos = rec.photos || [];
+        const seen = new Set(rec.photos.map((p) => p && p.url).filter(Boolean));
+        (Array.isArray(sp.photos) ? sp.photos : []).forEach((u) => {
+          if (!u || !/^https?:\/\//i.test(String(u)) || seen.has(u)) return;
+          rec.photos.push({ url: String(u), ts: Number(sp.updatedAt) || 0, foreign: true, owner: entry.isMine ? null : owner });
+          seen.add(u); changed = true;
+        });
+      });
+    });
+    if (changed) { try { localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places)); } catch (e) {} }
   }
 
   function toggleVisitedPlace(stop, extras = {}) {

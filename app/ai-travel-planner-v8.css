@@ -886,6 +886,22 @@ body.prototype-mode .prototype-id-chip {
   justify-content: center;
   padding: 0;
 }
+/* 旅伴照片的作者小標（不可刪，取代刪除鈕） */
+.travellog-photo-owner {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  max-width: calc(100% - 8px);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .travellog-photo-add {
   width: 56px;
   height: 56px;
