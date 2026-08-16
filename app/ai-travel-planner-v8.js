@@ -6300,11 +6300,12 @@
         <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
         <p id="recapVideoStatusText" class="memory-video-status-line" aria-live="polite"></p>
         <div id="recapVideoPreview" class="memory-video-preview"></div>
-        <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後直接下載 mp4。（影片片段插入為後續版本）</p>
+        <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後可預覽並下載 mp4，並會保留在雲端，換裝置、組員、App 端下次開啟都看得到。（影片片段插入為後續版本）</p>
       </div>
       <div class="memory-studio-actions">
         <button type="button" class="memory-secondary-btn" onclick="memoryStudioBack()">返回選擇</button>
       </div>`;
+    hydrateRecapFromCache();
   }
 
   function memorySetAudioMode(mode) {
@@ -6460,6 +6461,213 @@
     return pts;
   }
 
+  // ── 產生物快取：把已完成的回顧短片 mp4 存進 IndexedDB（這台裝置），關工具/重整/重開瀏覽器
+  // 都還在，避免每次重開都重算（後端渲染約 16 秒、且佔每小時 5 次額度）。以 tripId 為 key，
+  // 一趟只留最新一支；行程或照片有更動時用 sig 標為「可重新產生」。──
+  const RECAP_IDB = { name: 'wai-recap-videos', store: 'videos', version: 1 };
+
+  function recapIdbOpen() {
+    return new Promise((resolve, reject) => {
+      let req;
+      try { req = indexedDB.open(RECAP_IDB.name, RECAP_IDB.version); }
+      catch (e) { return reject(e); }
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(RECAP_IDB.store)) db.createObjectStore(RECAP_IDB.store, { keyPath: 'tripId' });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function recapIdbGet(tripId) {
+    try {
+      const db = await recapIdbOpen();
+      return await new Promise((resolve, reject) => {
+        const r = db.transaction(RECAP_IDB.store, 'readonly').objectStore(RECAP_IDB.store).get(String(tripId));
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => reject(r.error);
+      });
+    } catch (_e) { return null; }
+  }
+
+  async function recapIdbPut(record) {
+    try {
+      const db = await recapIdbOpen();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(RECAP_IDB.store, 'readwrite');
+        tx.objectStore(RECAP_IDB.store).put(record);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (_e) { return false; }
+  }
+
+  // 便宜且同步的內容指紋（只讀記憶體，不打網路）：景點順序/座標/交通/停留 + 聲音模式 + 本機照片數。
+  // 用來判斷快取影片是否已過期；跨端才新增的照片要等重新產生才會納入。
+  function recapVideoSignature() {
+    try {
+      const trip = collectRecapTrip();
+      const stopSig = (trip.stops || [])
+        .map((s) => `${s.stopId}|${s.name}|${Number(s.lat).toFixed(4)}|${Number(s.lng).toFixed(4)}|${s.mode}|${s.stayMin}`)
+        .join(';');
+      const tripId = String(currentItineraryId || (memoryStudioState && memoryStudioState.tripId) || '');
+      const photoSig = (typeof getVisitedPlaces === 'function' ? getVisitedPlaces() : [])
+        .filter((p) => String(p.tripId || '') === tripId)
+        .map((p) => `${visitedPlaceNameKey(p.name)}:${(Array.isArray(p.photos) ? p.photos.filter((ph) => ph && ph.url).length : 0)}`)
+        .sort()
+        .join(',');
+      const audio = (memoryStudioState && memoryStudioState.audioMode) || 'original';
+      return `${(trip.stops || []).length}#${audio}#${stopSig}#${photoSig}`;
+    } catch (_e) { return ''; }
+  }
+
+  // 把影片與下載鈕塞進預覽區（產生完成／本機快取／雲端載入共用）。
+  // remote=true 時 url 是跨網域的 Storage 下載連結：<a download> 對跨網域會被忽略檔名、
+  // 直接開新頁，所以要先 fetch 成 blob 再存，才會真的下載成 mp4。
+  function renderRecapPreview(previewEl, url, filename, remote) {
+    if (!previewEl) return;
+    previewEl.innerHTML = '';
+    const v = document.createElement('video');
+    v.src = url; v.controls = true; v.autoplay = true; v.loop = true; v.playsInline = true; v.muted = true;
+    v.className = 'memory-video-player';
+    const dl = document.createElement('button');
+    dl.type = 'button';
+    dl.className = 'memory-primary-btn memory-video-download';
+    dl.textContent = '⬇ 下載影片';
+    dl.onclick = async () => {
+      let href = url; let revoke = false;
+      try {
+        if (remote) {
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error('fetch ' + resp.status);
+          href = URL.createObjectURL(await resp.blob()); revoke = true;
+        }
+        const a = document.createElement('a');
+        a.href = href; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        if (revoke) setTimeout(() => { try { URL.revokeObjectURL(href); } catch (_e) {} }, 4000);
+      } catch (_e) {
+        window.open(url, '_blank', 'noopener');
+      }
+    };
+    previewEl.appendChild(v);
+    previewEl.appendChild(dl);
+  }
+
+  // ── 雲端保存（主）：上傳 Firebase Storage、metadata 寫 micro_trips/{tripId}/recaps/{uid}。
+  //   換裝置、組員、App 端都看得到。IndexedDB（上）保留為同裝置快取／離線用。──
+  function recapValidTripId(tripId) {
+    return !!tripId && tripId !== 'TRIP-EMPTY' && /^[A-Za-z0-9_-]+$/.test(String(tripId));
+  }
+
+  function recapCloudEnabled() {
+    return !!(firebaseEnabled && firebaseDb && firebaseStorage && firebaseAuth && firebaseAuth.currentUser);
+  }
+
+  // 上傳影片到雲端並寫回 metadata。uid 放路徑段 → Storage 規則好鎖成「僅本人可寫」。
+  async function uploadRecapToCloud(tripId, blob, meta) {
+    if (!recapCloudEnabled() || !recapValidTripId(tripId)) return null;
+    const uid = firebaseAuth.currentUser.uid;
+    const path = `recap-videos/${uid}/${tripId}/recap.mp4`;
+    const snapshot = await firebaseStorage.ref(path).put(blob, { contentType: 'video/mp4' });
+    const url = await snapshot.ref.getDownloadURL();
+    await firebaseDb.collection('micro_trips').doc(tripId).collection('recaps').doc(uid).set({
+      tripId: String(tripId),
+      ownerUid: uid,
+      ownerName: memoryOwnerName(),
+      videoUrl: url,
+      storagePath: path,
+      sig: String((meta && meta.sig) || ''),
+      title: String((meta && meta.title) || ''),
+      filename: String((meta && meta.filename) || ''),
+      bytes: Number(blob.size) || 0,
+      updatedAt: Date.now()
+    });
+    return { url, path };
+  }
+
+  // 讀這趟雲端回顧：自己那份優先，否則取最新一支（旅伴／他機）。
+  async function readCloudRecap(tripId) {
+    if (!firebaseDb || !recapValidTripId(tripId)) return null;
+    const uid = firebaseAuth && firebaseAuth.currentUser ? firebaseAuth.currentUser.uid : null;
+    try {
+      const snap = await firebaseDb.collection('micro_trips').doc(tripId).collection('recaps').get();
+      let mine = null; let newest = null;
+      snap.forEach((d) => {
+        const data = Object.assign({ ownerUid: d.id }, d.data() || {});
+        if (!data.videoUrl) return;
+        if (uid && d.id === uid) mine = data;
+        if (!newest || Number(data.updatedAt || 0) > Number(newest.updatedAt || 0)) newest = data;
+      });
+      return mine || newest || null;
+    } catch (_e) { return null; }
+  }
+
+  // 把雲端影片抓下來存進本機 IndexedDB，供下次秒開／離線（best-effort，不擋）。
+  async function cacheCloudRecapLocally(tripId, cloud) {
+    try {
+      const resp = await fetch(cloud.videoUrl);
+      if (!resp.ok) return;
+      const blob = await resp.blob();
+      await recapIdbPut({
+        tripId: String(tripId), blob, sig: cloud.sig || '',
+        title: cloud.title || '旅程回顧', filename: cloud.filename || '',
+        createdAt: Number(cloud.updatedAt) || Date.now()
+      });
+    } catch (_e) {}
+  }
+
+  // 開啟「回顧短片」步驟時：先用本機快取秒開，再比對雲端有沒有更新的版本
+  //（換裝置、組員、App 產生的）→ 有就換成雲端那支並回快取本機。
+  async function hydrateRecapFromCache() {
+    const tripId = String((memoryStudioState && memoryStudioState.tripId) || currentItineraryId || '');
+    if (!tripId) return;
+    const stillHere = () => !recapVideoBusy && memoryStudioState
+      && memoryStudioState.step === 'video' && String(memoryStudioState.tripId || '') === tripId;
+
+    // 1) 本機快取：秒開、離線也行
+    let shownLocalAt = 0;
+    const localRec = await recapIdbGet(tripId);
+    if (localRec && localRec.blob && stillHere()) {
+      const previewEl = document.getElementById('recapVideoPreview');
+      if (previewEl && !previewEl.childElementCount) {
+        let url = null;
+        try { url = URL.createObjectURL(localRec.blob); } catch (_e) {}
+        if (url) {
+          memoryStudioState.uploadedUrls = memoryStudioState.uploadedUrls || [];
+          memoryStudioState.uploadedUrls.push(url);
+          renderRecapPreview(previewEl, url, localRec.filename || ((localRec.title || '旅程回顧') + '-回顧短片.mp4'));
+          shownLocalAt = Number(localRec.createdAt) || 0;
+          const statusEl = document.getElementById('recapVideoStatusText');
+          const stale = localRec.sig && localRec.sig !== recapVideoSignature();
+          if (statusEl) statusEl.textContent = stale
+            ? '這是先前產生的版本；行程或照片有更動，可點「重新產生」更新'
+            : '✅ 已保留上次產生的影片（這台裝置）';
+          const btn = document.getElementById('recapGenerateBtn');
+          if (btn) btn.textContent = '🔄 重新產生回顧短片';
+        }
+      }
+    }
+
+    // 2) 雲端：換裝置／組員／App 產生的更新版
+    const cloud = await readCloudRecap(tripId);
+    if (!cloud || !cloud.videoUrl || !stillHere()) return;
+    const cloudNewer = Number(cloud.updatedAt || 0) > shownLocalAt;
+    if (shownLocalAt && !cloudNewer) return; // 本機已是最新，不動
+    const previewEl = document.getElementById('recapVideoPreview');
+    const statusEl = document.getElementById('recapVideoStatusText');
+    const btn = document.getElementById('recapGenerateBtn');
+    if (!previewEl) return;
+    renderRecapPreview(previewEl, cloud.videoUrl, cloud.filename || ((cloud.title || '旅程回顧') + '-回顧短片.mp4'), true);
+    const own = firebaseAuth && firebaseAuth.currentUser && cloud.ownerUid === firebaseAuth.currentUser.uid;
+    if (statusEl) statusEl.textContent = own
+      ? '☁ 已從雲端載入你的回顧短片（換裝置也看得到）'
+      : `☁ 已載入 ${cloud.ownerName || '旅伴'} 產生的回顧短片`;
+    if (btn) btn.textContent = '🔄 重新產生回顧短片';
+    cacheCloudRecapLocally(tripId, cloud); // best-effort，供下次秒開/離線
+  }
+
   async function startRecapVideo() {
     if (recapVideoBusy) return;
     const statusEl = document.getElementById('recapVideoStatusText');
@@ -6509,28 +6717,31 @@
       const blob = await dr.blob();
       const url = URL.createObjectURL(blob);
       const filename = (trip.title || '旅程回顧') + '-回顧短片.mp4';
-      // 關工具時 revoke，避免記憶體殘留
+      // 關工具時 revoke objectURL，避免記憶體殘留；影片本體另存 IndexedDB（見下），不受 revoke 影響
       if (memoryStudioState) {
         memoryStudioState.uploadedUrls = memoryStudioState.uploadedUrls || [];
         memoryStudioState.uploadedUrls.push(url);
       }
+      const sig = recapVideoSignature();
+      // 先存這台裝置（IndexedDB）→ 秒開、離線也行；一趟只留最新一支
+      const cacheTripId = String((memoryStudioState && memoryStudioState.tripId) || currentItineraryId || '');
+      if (cacheTripId) {
+        try {
+          await recapIdbPut({ tripId: cacheTripId, blob, sig, title: trip.title || '旅程回顧', filename, createdAt: Date.now() });
+        } catch (_e) {}
+      }
       setStatus('✅ 產生完成，可先預覽再決定是否下載');
-      if (previewEl) {
-        previewEl.innerHTML = '';
-        const v = document.createElement('video');
-        v.src = url; v.controls = true; v.autoplay = true; v.loop = true; v.playsInline = true; v.muted = true;
-        v.className = 'memory-video-player';
-        const dl = document.createElement('button');
-        dl.type = 'button';
-        dl.className = 'memory-primary-btn memory-video-download';
-        dl.textContent = '⬇ 下載影片';
-        dl.onclick = () => {
-          const a = document.createElement('a');
-          a.href = url; a.download = filename;
-          document.body.appendChild(a); a.click(); a.remove();
-        };
-        previewEl.appendChild(v);
-        previewEl.appendChild(dl);
+      renderRecapPreview(previewEl, url, filename);
+      if (btn) btn.textContent = '🔄 重新產生回顧短片';
+      // 再上雲端（主）→ 換裝置、組員、App 端都看得到；best-effort，失敗降級成只存本機
+      if (cacheTripId && recapCloudEnabled()) {
+        setStatus('☁ 上傳雲端中…（換裝置／組員也看得到）');
+        try {
+          await uploadRecapToCloud(cacheTripId, blob, { sig, title: trip.title || '旅程回顧', filename });
+          setStatus('✅ 產生完成，已同步雲端；換裝置、組員、App 都看得到');
+        } catch (e) {
+          setStatus('✅ 已保留在這台裝置；雲端同步失敗（' + String((e && e.message) || '稍後可重新產生再試') + '）');
+        }
       }
     } catch (err) {
       setStatus('⚠ ' + String(err && err.message || err));
