@@ -30,5 +30,15 @@ service firebase.storage {
       //（delete 沒有 request.resource）
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
+
+    // 網頁端：旅程回顧短片 mp4（uploadRecapToCloud）—— 僅本人可寫/刪；
+    // 播放/下載走含 token 的 downloadURL（不經規則），read 收緊成登入即可
+    match /recap-videos/{uid}/{tripId}/{file} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+                    && request.resource.size < 200 * 1024 * 1024
+                    && request.resource.contentType == 'video/mp4';
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
   }
 }

@@ -449,6 +449,13 @@ service cloud.firestore {
         allow write: if isTripMemberOrOwner(tripId) && memberId == request.auth.uid;
       }
 
+      // 旅程回顧短片：每位成員各一份 metadata（videoUrl 指向 Storage）。
+      //   App 與網頁共用此路徑，換裝置／組員／App 端都讀得到；只能寫自己那份。
+      match /recaps/{memberId} {
+        allow read: if isTripMemberOrOwner(tripId);
+        allow write: if isTripMemberOrOwner(tripId) && memberId == request.auth.uid;
+      }
+
       match /member_prefs/{memberId} {
         allow read: if isTripMemberOrOwner(tripId);
         allow create: if isTripMemberOrOwner(tripId)
