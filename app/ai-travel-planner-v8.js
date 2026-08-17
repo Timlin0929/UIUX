@@ -6287,9 +6287,8 @@
     setMemoryStudioHeader('旅程回顧短片', '素材摘要', true);
     body.innerHTML = `
       <div class="memory-video-summary">
-        <span class="memory-mode-icon" aria-hidden="true">▶</span>
         <h3>${escapeHtml(memoryStudioState.material.title)}</h3>
-        <p>${photos.length} 張照片 · ${videos.length} 段影片</p>
+        <p>${photos.length} 張照片${videos.length ? ` · ${videos.length} 段影片` : ''}</p>
       </div>
       ${videos.length ? `<fieldset class="memory-audio-options">
         <legend>影片聲音</legend>
