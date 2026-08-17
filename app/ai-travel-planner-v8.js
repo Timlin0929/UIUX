@@ -6291,11 +6291,11 @@
         <h3>${escapeHtml(memoryStudioState.material.title)}</h3>
         <p>${photos.length} 張照片 · ${videos.length} 段影片</p>
       </div>
-      <fieldset class="memory-audio-options">
+      ${videos.length ? `<fieldset class="memory-audio-options">
         <legend>影片聲音</legend>
-        <label><input type="radio" name="memoryAudioMode" value="original" ${memoryStudioState.audioMode === 'original' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 保留現場聲</label>
+        <label><input type="radio" name="memoryAudioMode" value="original" ${memoryStudioState.audioMode === 'original' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 保留片段原聲</label>
         <label><input type="radio" name="memoryAudioMode" value="muted" ${memoryStudioState.audioMode === 'muted' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 靜音</label>
-      </fieldset>
+      </fieldset>` : ''}
       <div class="memory-video-status" role="status">
         <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
         <p id="recapVideoStatusText" class="memory-video-status-line" aria-live="polite"></p>
