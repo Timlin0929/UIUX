@@ -107,7 +107,19 @@ async function renderRecapVideo(manifest, opts) {
     let usedFallback = false;
     try {
       if (opts.onProgress) opts.onProgress(0.05);
-      const rec = await page.evaluate((t, f) => window.__recap.record(t, f), totalMs, fps);
+      // MediaRecorder 即時錄製是黑箱、中間不回報，而其耗時 ≈ 影片總長（即時擷取）。
+      // 用計時器按經過時間把進度從 5% 緩緩推到 ~80%，避免卡在 5% 後突然跳到 85%。
+      let tick = null;
+      if (opts.onProgress) {
+        const startedAt = Date.now();
+        tick = setInterval(() => {
+          const frac = Math.min(0.8, 0.05 + ((Date.now() - startedAt) / Math.max(1, totalMs)) * 0.75);
+          opts.onProgress(frac);
+        }, 500);
+      }
+      let rec;
+      try { rec = await page.evaluate((t, f) => window.__recap.record(t, f), totalMs, fps); }
+      finally { if (tick) clearInterval(tick); }
       if (opts.onProgress) opts.onProgress(0.85);
       const b64 = String(rec.dataUrl).split(',')[1] || '';
       if (!b64) throw new Error('empty recording');
