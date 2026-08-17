@@ -6160,8 +6160,11 @@
       <div class="memory-result-card ${failed.length ? 'has-error' : ''}">
         <span class="memory-result-icon" aria-hidden="true">${failed.length ? '⚠️' : '✓'}</span>
         <h3>${failed.length ? '部分圖片產生失敗' : '九張圖片已產生'}</h3>
-        <p>${failed.length ? `失敗序號：${failed.join('、')}。已完成的圖片仍可下載。` : '請依下方順序逐張下載，避免瀏覽器攔截多檔下載。'}</p>
+        <p>${failed.length ? `失敗序號：${failed.join('、')}。已完成的圖片仍可下載。` : '手機可用「分享全部九張」一次送出（省去逐張下載）；桌機請逐張下載。'}</p>
         <p class="memory-download-note">檔名已包含發布順序與九宮格位置；請由第 1 張開始依序發布。</p>
+      </div>
+      <div class="memory-studio-actions memory-share-all-row">
+        <button type="button" class="memory-primary-btn" onclick="memoryShareAll()">↗ 分享全部九張</button>
       </div>
       <div class="memory-download-list">
         ${MEMORY_GRID_ORDER.map((meta) => {
@@ -6180,6 +6183,28 @@
   function memoryDownloadSlice(order) {
     if (!memoryStudioState || !triggerMemoryDownload(memoryStudioState.slices.get(Number(order)))) {
       feedbackToast('這張圖片尚未產生，請先重試', 'orange');
+    }
+  }
+
+  // 一次把九張（依發布順序）丟進系統分享面板 → 選 IG／LINE／相簿，省去逐張下載。
+  // 手機支援多檔分享；桌機多半不支援 → 提示改用逐張下載。IG 仍需自己照順序發（右下角第 1 張先）。
+  async function memoryShareAll() {
+    const state = memoryStudioState;
+    if (!state || !state.slices) return;
+    const files = MEMORY_GRID_ORDER
+      .map((meta) => state.slices.get(meta.order))
+      .filter((s) => s && s.blob)
+      .map((s) => new File([s.blob], s.filename, { type: 'image/jpeg' }));
+    if (!files.length) { feedbackToast('圖片尚未產生，請先重試', 'orange'); return; }
+    if (navigator.canShare && navigator.canShare({ files })) {
+      try {
+        await navigator.share({ files, title: '我的旅程九宮格', text: '旅程九宮格——依檔名順序發布（右下角第 1 張先發）' });
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;   // 使用者自己取消
+        feedbackToast('分享失敗，可改用逐張下載', 'orange');
+      }
+    } else {
+      feedbackToast('這個裝置不支援一次分享多張，請改用逐張下載（手機較支援）', 'orange');
     }
   }
 
@@ -6718,6 +6743,7 @@
     memoryGoPreview,
     memoryStartSave,
     memoryDownloadSlice,
+    memoryShareAll,
     memoryRetryFailed,
     memoryOpenGuide,
     memorySetAudioMode,
