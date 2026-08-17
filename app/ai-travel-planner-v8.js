@@ -6299,10 +6299,7 @@
         <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
         <p id="recapVideoStatusText" class="memory-video-status-line" aria-live="polite"></p>
         <div id="recapVideoPreview" class="memory-video-preview"></div>
-        <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後可預覽並下載 mp4，並會保留在雲端，換裝置、組員、App 端下次開啟都看得到。（影片片段插入為後續版本）</p>
-      </div>
-      <div class="memory-studio-actions">
-        <button type="button" class="memory-secondary-btn" onclick="memoryStudioBack()">返回選擇</button>
+        <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後可預覽、下載或分享 mp4，並會保留在雲端，換裝置、組員、App 端下次開啟都看得到。（影片片段插入為後續版本）</p>
       </div>`;
     hydrateRecapFromCache();
   }
@@ -6550,8 +6547,35 @@
         window.open(url, '_blank', 'noopener');
       }
     };
+    // 分享到社群 App（Web Share API）：把影片當檔案分享。手機支援；桌機多半不支援檔案分享 →
+    // 退回分享文字、或提示改用下載。fetch(url) 對本機 blob: 一定可讀，雲端 https 若被 CORS 擋則落到提示。
+    const sh = document.createElement('button');
+    sh.type = 'button';
+    sh.className = 'memory-secondary-btn memory-video-share';
+    sh.textContent = '↗ 分享';
+    sh.onclick = async () => {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('fetch ' + resp.status);
+        const file = new File([await resp.blob()], filename, { type: 'video/mp4' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: filename, text: '我的旅程回顧短片' });
+        } else if (navigator.share) {
+          await navigator.share({ title: filename, text: '我的旅程回顧短片' });
+        } else {
+          feedbackToast('這個瀏覽器不支援分享，請改用「下載影片」再傳給朋友', 'orange');
+        }
+      } catch (e) {
+        if (e && e.name === 'AbortError') return; // 使用者自己取消，不提示
+        feedbackToast('分享失敗，可改用「下載影片」再傳給朋友', 'orange');
+      }
+    };
+    const actions = document.createElement('div');
+    actions.className = 'memory-video-actions';
+    actions.appendChild(dl);
+    actions.appendChild(sh);
     previewEl.appendChild(v);
-    previewEl.appendChild(dl);
+    previewEl.appendChild(actions);
   }
 
   // ── 雲端保存（主）：上傳 Firebase Storage、metadata 寫 micro_trips/{tripId}/recaps/{uid}。

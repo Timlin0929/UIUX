@@ -6223,6 +6223,14 @@ button.notif-item { cursor: pointer; }
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
 }
 .memory-video-download { margin: 0 auto; }
+.memory-video-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.memory-video-share { margin: 0; }
 
 .memory-inline-note {
   display: flex;
