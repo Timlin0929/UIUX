@@ -38,23 +38,24 @@
     var targetMs;
     var tier;
 
+    // 整體節奏放慢（原值約快 ~30%）：routeMs 變長 → 小車在站間移動變慢、看得清楚。
     if (mediaCount === 0) {
       tier = '0';
-      targetMs = 11000;
+      targetMs = 14500;
     } else if (mediaCount <= 2) {
       tier = '1-2';
-      targetMs = 13500;
+      targetMs = 18000;
     } else if (mediaCount <= 5) {
       tier = '3-5';
-      targetMs = 17500;
+      targetMs = 23000;
     } else {
       tier = '6+';
-      targetMs = 25000;
+      targetMs = 32000;
     }
 
     return {
       tier: tier,
-      routeMs: Math.max(4000, targetMs - coverMs - statsMs)
+      routeMs: Math.max(6000, targetMs - coverMs - statsMs)
     };
   }
 
@@ -89,7 +90,7 @@
   function buildRecapManifest(trip, opts) {
     var options = opts || {};
     var sourceStops = Array.isArray(trip.stops) ? trip.stops : [];
-    var coverMs = optionOrDefault(options, 'coverMs', 2200);
+    var coverMs = optionOrDefault(options, 'coverMs', 3400);
     var statsMs = optionOrDefault(options, 'statsMs', 3000);
     var dwellMs = optionOrDefault(options, 'dwellMs', 200);
     var mediaCount = optionOrDefault(options, 'mediaCount', 0);

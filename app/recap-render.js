@@ -68,10 +68,20 @@
     var spanX = (bx1 - bx0) || 1e-6, spanY = (by1 - by0) || 1e-6;
     var center = { x: (bx0 + bx1) / 2, y: (by0 + by1) / 2 };
     var fitScale = Math.min(viewport.w / spanX, viewport.h / spanY) * 0.82;
+
+    // 台灣全島全景（開頭俯衝的起點）：用與路線相同的投影/cosLat，鏡頭才對得上。
+    var TW = { minLat: 21.9, maxLat: 25.3, minLng: 120.0, maxLng: 122.0 };
+    var twSpanX = (TW.maxLng - TW.minLng) * cosLat || 1e-6;
+    var twSpanY = (TW.maxLat - TW.minLat) || 1e-6;
+    var taiwan = {
+      cx: (TW.minLng + TW.maxLng) / 2 * cosLat,
+      cy: -(TW.minLat + TW.maxLat) / 2,
+      scale: Math.min(viewport.w / twSpanX, viewport.h / twSpanY) * 0.9
+    };
     return {
       points: pts, cosLat: cosLat, bounds: { x0: bx0, x1: bx1, y0: by0, y1: by1 },
       center: center, spanX: spanX, spanY: spanY,
-      fitScale: fitScale, followScale: fitScale * 2.4,
+      fitScale: fitScale, followScale: fitScale * 2.4, taiwan: taiwan,
       full: full, fullCum: fullCum, fullLen: fullLen, segStartLen: segStartLen
     };
   }
@@ -226,9 +236,15 @@
     var fit = { cx: world.center.x, cy: world.center.y, scale: world.fitScale };
     var follow = { cx: carPos.x, cy: carPos.y, scale: world.followScale };
     var cam;
-    if (tMs < timing.routeStart) cam = fit;
-    else if (tMs < timing.routeEnd) {
-      var kin = clamp((tMs - timing.routeStart) / 600, 0, 1); // 進場 600ms 由全景推進到跟拍
+    if (tMs < timing.routeStart) {
+      // 開頭：從台灣全景「俯衝」到整條行程路線（fit）。前 18% 停在全景讓觀眾看清楚，再一路 zoom in。
+      // 終點停在路線全景（而非鑽到單一站）→ 落點是清晰的路線細圖，避免中段鑽太深只剩放大的低倍圖。
+      var tw = world.taiwan || fit;
+      var hold = timing.routeStart * 0.18;
+      var zk = ease(clamp((tMs - hold) / Math.max(1, timing.routeStart - hold), 0, 1));
+      cam = { cx: lerp(tw.cx, fit.cx, zk), cy: lerp(tw.cy, fit.cy, zk), scale: lerp(tw.scale, fit.scale, zk) };
+    } else if (tMs < timing.routeEnd) {
+      var kin = clamp((tMs - timing.routeStart) / 600, 0, 1); // 進場 600ms 由路線全景推進到跟拍
       var k = ease(kin);
       cam = { cx: lerp(fit.cx, follow.cx, k), cy: lerp(fit.cy, follow.cy, k), scale: lerp(fit.scale, follow.scale, k) };
     } else {

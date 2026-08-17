@@ -142,7 +142,19 @@ async function fetchBasemap(manifest) {
   if (z < 10) return null;
   var coords = [];
   for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) coords.push([x, y]);
-  var tiles = [];
+  var tiles = await fetchTileSet(z, coords);
+  // 開頭「從整個台灣俯衝」需要多層底圖（否則 z7→細節圖倍率落差太大、中段只剩放大的糊圖）。
+  // 由粗到細分三層，墊在陣列「前段 → 先畫、被後面較細的蓋過」：台灣全島(z7) → 區域(z10) → 路線細圖。
+  var cLat = (minLat + maxLat) / 2, cLng = (minLng + maxLng) / 2;
+  var overview = await fetchBboxLayer({ minLat: 21.85, maxLat: 25.35, minLng: 119.9, maxLng: 122.15 }, 7, 12).catch(() => []);
+  var mid = await fetchBboxLayer({ minLat: cLat - 0.5, maxLat: cLat + 0.5, minLng: cLng - 0.5, maxLng: cLng + 0.5 }, 10, 30).catch(() => []);
+  var all = overview.concat(mid, tiles);
+  return all.length ? { tiles: all, attribution: '© OpenStreetMap contributors', z: z } : null;
+}
+
+// 抓一組圖磚（座標陣列）→ 帶地理範圍的 tile 物件陣列。單塊失敗略過。
+async function fetchTileSet(z, coords) {
+  var out = [];
   await Promise.all(coords.map(async (xy) => {
     try {
       const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 8000);
@@ -151,14 +163,25 @@ async function fetchBasemap(manifest) {
       if (!r.ok) return;
       const buf = Buffer.from(await r.arrayBuffer());
       if (buf.length > 2 * 1024 * 1024) return;
-      tiles.push({
+      out.push({
         lngW: tileX2lng(xy[0], z), lngE: tileX2lng(xy[0] + 1, z),
         latN: tileY2lat(xy[1], z), latS: tileY2lat(xy[1] + 1, z),
         dataUrl: 'data:image/png;base64,' + buf.toString('base64')
       });
     } catch (e) {}
   }));
-  return tiles.length ? { tiles: tiles, attribution: '© OpenStreetMap contributors', z: z } : null;
+  return out;
+}
+
+// 抓某地理範圍在指定 zoom 的整片圖磚（超過 cap 塊就放棄，避免抓太多）。
+async function fetchBboxLayer(bb, z, cap) {
+  if (process.env.RECAP_BASEMAP === '0') return [];
+  var x0 = Math.floor(lng2tileX(bb.minLng, z)), x1 = Math.floor(lng2tileX(bb.maxLng, z));
+  var y0 = Math.floor(lat2tileY(bb.maxLat, z)), y1 = Math.floor(lat2tileY(bb.minLat, z));
+  var coords = [];
+  for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) coords.push([x, y]);
+  if (coords.length > (cap || 16)) return [];
+  return fetchTileSet(z, coords);
 }
 
 // 伺服器端抓照片 → data URL（避開瀏覽器 file:// 的跨源污染）。失敗回 null。
