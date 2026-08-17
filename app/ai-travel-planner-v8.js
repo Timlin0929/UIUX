@@ -5176,7 +5176,7 @@
   function memoryStudioBack() {
     if (!memoryStudioState) return closeMemoryStudio();
     if (memoryStudioState.step === 'save') memoryStudioState.saveRunId += 1;
-    const previous = { grid: 'modes', preview: 'grid', save: 'preview', result: 'preview', guide: 'result', video: 'modes', shortage: 'modes' };
+    const previous = { grid: 'modes', save: 'grid', result: 'grid', guide: 'result', video: 'modes', shortage: 'modes' };
     const next = previous[memoryStudioState.step];
     if (!next) return closeMemoryStudio();
     memoryStudioState.step = next;
@@ -5200,7 +5200,6 @@
     if (step === 'modes') return renderMemoryModes(body);
     if (step === 'shortage') return renderMemoryShortage(body);
     if (step === 'grid') return renderMemoryGridEditor(body);
-    if (step === 'preview') return renderMemoryGridPreview(body);
     if (step === 'save') return renderMemorySave(body);
     if (step === 'result') return renderMemorySaveResult();
     if (step === 'guide') return renderMemoryGuide(body);
@@ -5504,7 +5503,7 @@
             <input type="checkbox" ${memoryStudioState.gridVisible ? 'checked' : ''} onchange="memoryToggleGrid(this.checked)">
             <span>顯示切線</span>
           </label>
-          <button type="button" class="memory-secondary-btn" onclick="memoryAddCard()">＋ 加小圖</button>
+          <button type="button" class="memory-secondary-btn" onclick="memoryAddCard()">＋ 加入圖片</button>
           <button type="button" class="memory-secondary-btn memory-edit-reset" onclick="memoryResetLayout()">↺ 重設版面</button>
         </div>
         <span class="memory-edit-hint">拖小卡可移動、拉角可縮放、雙擊小卡可換照片；點標題可改字</span>
@@ -5537,7 +5536,7 @@
         </div>
         ${selected.size < 2 ? `<div class="memory-inline-note"><p>目前只有 ${selected.size} 張照片。只有主照片也能做，但多幾張才有疊卡片的層次。</p><button type="button" class="memory-secondary-btn" onclick="closeMemoryStudio()">返回旅記加照片</button></div>` : ''}
         <div class="memory-studio-actions">
-          <button type="button" class="memory-primary-btn" onclick="memoryGoPreview()" ${selected.size ? '' : 'disabled'}>下一步：預覽九張</button>
+          <button type="button" class="memory-primary-btn" onclick="memoryGoPreview()" ${selected.size ? '' : 'disabled'}>保存九張並下載</button>
         </div>
       </div>`;
     paintMemoryEditorCanvas();
@@ -5597,7 +5596,8 @@
       handle.style.aspectRatio = `${MEMORY_TILE.w} / ${MEMORY_TILE.h}`;
       handle.style.transform = `translate(-50%, -50%) rotate(${spec.angle}deg)`;
       handle.innerHTML = `<span class="memory-card-handle-no">${i + 2}</span>`
-        + `<span class="memory-card-grip" data-role="resize" aria-hidden="true"></span>`;
+        + `<span class="memory-card-grip memory-card-rotate" data-role="rotate" title="旋轉" aria-hidden="true"></span>`
+        + `<span class="memory-card-grip" data-role="resize" title="縮放" aria-hidden="true"></span>`;
       bindMemoryCardHandle(handle, i);
       overlay.appendChild(handle);
     }
@@ -5741,9 +5741,10 @@
 
   function bindMemoryCardHandle(handle, index) {
     let mode = null, startX = 0, startY = 0, startCx = 0, startCy = 0, startW = 0, boxW = 1, boxH = 1;
+    let rotCx = 0, rotCy = 0;   // 旋轉時卡片中心（螢幕座標，固定）
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-    const onDown = (e, resize) => {
+    const onDown = (e, kind) => {
       const state = memoryStudioState;
       if (!state) return;
       e.preventDefault();
@@ -5754,10 +5755,15 @@
       if (!overlay) return;
       const rect = overlay.getBoundingClientRect();
       boxW = rect.width || 1; boxH = rect.height || 1;
-      mode = resize ? 'resize' : 'move';
+      mode = kind;   // 'move' | 'resize' | 'rotate'
       startX = e.clientX; startY = e.clientY;
       const spec = state.layout.cards[index];
       startCx = spec.cx; startCy = spec.cy; startW = spec.w;
+      if (kind === 'rotate') {
+        // 卡片繞中心旋轉：rotate 不改變 bbox 中心，於按下時取一次即可
+        const hr = handle.getBoundingClientRect();
+        rotCx = hr.left + hr.width / 2; rotCy = hr.top + hr.height / 2;
+      }
       handle.setPointerCapture(e.pointerId);
       handle.classList.add('dragging');
     };
@@ -5770,6 +5776,14 @@
         spec.cy = clamp(startCy + (e.clientY - startY) / boxH, 0.06, 0.94);
         handle.style.left = (spec.cx * 100) + '%';
         handle.style.top = (spec.cy * 100) + '%';
+      } else if (mode === 'rotate') {
+        // 把手在卡片正上方 → 角度 = 中心指向游標的方位角 +90°；靠近 0/±90/±180 吸附好對正
+        let deg = Math.atan2(e.clientY - rotCy, e.clientX - rotCx) * 180 / Math.PI + 90;
+        while (deg > 180) deg -= 360;
+        while (deg < -180) deg += 360;
+        [0, 90, -90, 180, -180].forEach((s) => { if (Math.abs(deg - s) <= 5) deg = s; });
+        spec.angle = Math.round(deg);
+        handle.style.transform = `translate(-50%, -50%) rotate(${spec.angle}deg)`;
       } else {
         // 往右／往下拖都放大；取兩軸較大的位移，手感較自然
         const d = Math.max((e.clientX - startX) / boxW, (e.clientY - startY) / boxH);
@@ -5787,8 +5801,10 @@
     };
 
     const grip = handle.querySelector('[data-role="resize"]');
-    grip.addEventListener('pointerdown', (e) => onDown(e, true));
-    handle.addEventListener('pointerdown', (e) => { if (e.target !== grip) onDown(e, false); });
+    const rot = handle.querySelector('[data-role="rotate"]');
+    grip.addEventListener('pointerdown', (e) => onDown(e, 'resize'));
+    if (rot) rot.addEventListener('pointerdown', (e) => onDown(e, 'rotate'));
+    handle.addEventListener('pointerdown', (e) => { if (e.target !== grip && e.target !== rot) onDown(e, 'move'); });
     handle.addEventListener('pointermove', onMove);
     handle.addEventListener('pointerup', onUp);
     handle.addEventListener('pointercancel', onUp);
@@ -6027,94 +6043,8 @@
       feedbackToast('照片載入失敗，請確認網路後再試', 'orange');
       return;
     }
-    state.step = 'preview';
-    state.previewOrder = 1;
-    renderMemoryStudio();
-  }
-
-  function renderMemoryGridPreview(body) {
-    setMemoryStudioHeader('確認九張', '2 / 3　預覽', true);
-    const failedNames = Array.from(new Set(memoryStudioState.photoLoadFailures || []));
-    body.innerHTML = `
-      <div class="memory-preview-copy">
-        <strong>發布後你的個人檔案會長這樣</strong>
-        <p>這是同一張大圖被切成九塊；格線是切的位置，數字是發布次序。</p>
-      </div>
-      <div id="memoryGridPreview" class="memory-grid-preview" aria-label="九宮格最終排列"></div>
-      <div class="memory-guide-card"><strong>由右下角開始發布</strong><p>第 1 張在右下角，最後一張在左上角，主頁才會正確排列。</p></div>
-      ${failedNames.length ? `<div class="memory-guide-card memory-guide-warning"><strong>有 ${failedNames.length} 張照片未載入</strong><p>已略過：${escapeHtml(failedNames.join('、'))}。大圖會以其餘已載入的真實照片組成。</p></div>` : ''}
-      <div class="memory-single-preview">
-        <div class="memory-single-head"><strong>單張檢視</strong><span id="memorySinglePosition"></span></div>
-        <div class="memory-single-stage">
-          <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(-1)" aria-label="上一張">‹</button>
-          <canvas id="memorySingleCanvas" width="${Math.round(MEMORY_PREVIEW_TILE.w)}" height="${Math.round(MEMORY_PREVIEW_TILE.h)}" aria-label="目前單張預覽"></canvas>
-          <button type="button" class="memory-single-nav" onclick="memoryShiftPreview(1)" aria-label="下一張">›</button>
-        </div>
-      </div>
-      <div class="memory-inline-note"><p>下一步會把大圖切成九張，逐張提供下載按鈕（依發布順序命名），下載後再上傳到 IG。</p></div>
-      <div class="memory-studio-actions"><button type="button" class="memory-primary-btn" onclick="memoryStartSave()">保存九張並下載</button></div>`;
-    paintMemoryGridPreview();
-  }
-
-  async function paintMemoryGridPreview() {
-    const state = memoryStudioState;
-    if (!state || state.step !== 'preview') return;
-    const master = await buildMemoryMasterCanvas(MEMORY_PREVIEW.w, MEMORY_PREVIEW.h, false);
-    if (!master || memoryStudioState !== state || state.step !== 'preview') return;
-    state.masterCanvas = master;
-    const host = document.getElementById('memoryGridPreview');
-    if (!host) return;
-    host.innerHTML = '';
-    for (let row = 1; row <= 3; row += 1) {
-      for (let col = 1; col <= 3; col += 1) {
-        const meta = MEMORY_GRID_ORDER.find((item) => item.row === row && item.col === col);
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(MEMORY_PREVIEW_TILE.w);
-        canvas.height = Math.round(MEMORY_PREVIEW_TILE.h);
-        canvas.setAttribute('aria-label', `第 ${meta.order} 張，${meta.position}`);
-        canvas.getContext('2d').drawImage(master,
-          (col - 1) * MEMORY_PREVIEW_TILE.w, (row - 1) * MEMORY_PREVIEW_TILE.h,
-          MEMORY_PREVIEW_TILE.w, MEMORY_PREVIEW_TILE.h,
-          0, 0, canvas.width, canvas.height);
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'memory-grid-cell';
-        button.onclick = () => { state.previewOrder = meta.order; paintMemorySinglePreview(); };
-        const badge = document.createElement('span');
-        badge.className = 'memory-grid-order';
-        badge.textContent = String(meta.order);
-        button.append(canvas, badge);
-        host.appendChild(button);
-      }
-    }
-    paintMemorySinglePreview();
-  }
-
-  function paintMemorySinglePreview() {
-    const state = memoryStudioState;
-    if (!state || !state.masterCanvas) return;
-    const meta = MEMORY_GRID_ORDER.find((item) => item.order === state.previewOrder) || MEMORY_GRID_ORDER[0];
-    const canvas = document.getElementById('memorySingleCanvas');
-    const label = document.getElementById('memorySinglePosition');
-    if (label) label.textContent = `第 ${meta.order} 張 · ${meta.position} · r${meta.row}c${meta.col}`;
-    if (!canvas) return;
-    canvas.getContext('2d').drawImage(
-      state.masterCanvas,
-      (meta.col - 1) * 270,
-      (meta.row - 1) * 360,
-      270,
-      360,
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    );
-  }
-
-  function memoryShiftPreview(delta) {
-    if (!memoryStudioState) return;
-    memoryStudioState.previewOrder = ((memoryStudioState.previewOrder - 1 + delta + 9) % 9) + 1;
-    paintMemorySinglePreview();
+    // 單張檢視步驟已移除（與九宮格編輯＋切線預覽重複）：確認照片載入後直接進入保存下載。
+    return memoryStartSave();
   }
 
   function canvasToJpegBlob(canvas, quality = 0.9) {
@@ -6786,7 +6716,6 @@
     memoryTogglePhoto,
     memorySetHero,
     memoryGoPreview,
-    memoryShiftPreview,
     memoryStartSave,
     memoryDownloadSlice,
     memoryRetryFailed,

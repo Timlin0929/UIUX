@@ -5957,6 +5957,17 @@ button.notif-item { cursor: pointer; }
   cursor: nwse-resize; touch-action: none;
   box-shadow: 0 1px 4px rgba(0,0,0,.4);
 }
+/* 旋轉把手：卡片正上方，白底圓內一個 ↻，與右下角縮放把手區隔 */
+.memory-card-rotate {
+  right: auto; bottom: auto;
+  top: -28px; left: 50%;
+  transform: translateX(-50%);
+  display: grid; place-items: center;
+  cursor: grab; color: var(--accent2, #2f6f4f);
+  font-size: 13px; font-weight: 700; line-height: 1;
+}
+.memory-card-rotate::before { content: '↻'; }
+.memory-card-handle.dragging .memory-card-rotate { cursor: grabbing; }
 
 .memory-template-row { display: flex; gap: 6px; margin: 12px 0 2px; overflow-x: auto; }
 .memory-tpl-btn {
@@ -6069,7 +6080,8 @@ button.notif-item { cursor: pointer; }
   justify-content: center;
   gap: 10px;
   width: fit-content;
-  margin: 14px auto 20px;
+  /* 貼齊操作列最左；右側 auto 把「加入圖片／重設版面」推到最右 */
+  margin: 14px auto 20px 0;
   color: var(--ink2);
   font-size: 13px;
   font-weight: 700;
