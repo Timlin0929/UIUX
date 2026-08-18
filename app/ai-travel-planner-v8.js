@@ -13939,6 +13939,8 @@
   let currentRouteFocusBounds = null;
   let routeStageCache = [];
   let mobileRouteSheetExpanded = false;
+  // D6：使用者為某段選定的替代路線 index（本次瀏覽階段黏著；重畫路線時優先沿用）。key = 階段 index。
+  const preferredRouteByStage = {};
   let routeRenderToken = 0;
   let mapRebuildToken = 0;
   let routeViewportAnimationToken = 0;
@@ -15592,6 +15594,86 @@
     renderItineraryDisplay();
   }
 
+  // ── D6：替代路線比較面板＋套用（真實 Directions 替代路線，車/機車段） ──
+  function closeRouteAlternatives() {
+    const m = document.getElementById('routeAltModal');
+    if (m) m.remove();
+  }
+
+  function openRouteAlternatives(stageIndex) {
+    const stage = routeStageCache.find((item) => item && item.index === stageIndex);
+    if (!stage || !Array.isArray(stage.alts) || stage.alts.length < 2) {
+      feedbackToast('這段目前沒有其他可比較的路線', 'orange');
+      return;
+    }
+    closeRouteAlternatives();
+    const selIdx = Number.isInteger(stage.selectedRouteIdx) ? stage.selectedRouteIdx : 0;
+    const sel = stage.alts.find((a) => a.index === selIdx) || stage.alts[0];
+    const diffHtml = (alt) => {
+      if (alt.index === sel.index) return '<span class="route-alt-cur">目前使用</span>';
+      const dMin = alt.durationMin - sel.durationMin;
+      const dKm = (alt.distanceValue - sel.distanceValue) / 1000;
+      const tCls = dMin < 0 ? 'good' : (dMin > 0 ? 'bad' : '');
+      const tTxt = dMin === 0 ? '時間相同' : (dMin < 0 ? `快 ${-dMin} 分` : `慢 ${dMin} 分`);
+      return `<span class="route-alt-diff ${tCls}">${tTxt}</span> · <span class="route-alt-diff">${dKm >= 0 ? '+' : ''}${dKm.toFixed(1)} km</span>`;
+    };
+    const rows = stage.alts.map((alt) => `
+      <div class="route-alt-row ${alt.index === sel.index ? 'is-current' : ''}">
+        <div class="route-alt-info">
+          <div class="route-alt-summary">${escapeHtml(alt.summary)}</div>
+          <div class="route-alt-meta">🕒 ${escapeHtml(alt.durationText)}${alt.distanceText ? ' · ' + escapeHtml(alt.distanceText) : ''}</div>
+          <div class="route-alt-vs">${diffHtml(alt)}</div>
+        </div>
+        ${alt.index === sel.index
+          ? '<span class="route-alt-using">使用中</span>'
+          : `<button type="button" class="memory-primary-btn route-alt-apply" onclick="applyRouteAlternative(${stageIndex}, ${alt.index})">套用</button>`}
+      </div>`).join('');
+    const overlay = document.createElement('div');
+    overlay.id = 'routeAltModal';
+    overlay.className = 'route-alt-modal';
+    overlay.innerHTML = `
+      <div class="route-alt-panel" role="dialog" aria-label="替代路線比較">
+        <div class="route-alt-head">
+          <div>
+            <div class="route-alt-title">替代路線 · 階段 ${stageIndex + 1}</div>
+            <div class="route-alt-sub">${escapeHtml(stage.origin.name || stage.origin.title || '')} → ${escapeHtml(stage.destination.name || stage.destination.title || '')}</div>
+          </div>
+          <button type="button" class="route-alt-close" onclick="closeRouteAlternatives()" aria-label="關閉">✕</button>
+        </div>
+        <div class="route-alt-list">${rows}</div>
+        <div class="route-alt-foot">時間為 Google 依目前路況估算；套用後這段地圖與到站時間會更新（本次瀏覽有效）。</div>
+      </div>`;
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeRouteAlternatives(); });
+    document.body.appendChild(overlay);
+  }
+
+  function applyRouteAlternative(stageIndex, altIdx) {
+    const stage = routeStageCache.find((item) => item && item.index === stageIndex);
+    if (!stage || !Array.isArray(stage.alts)) return;
+    const alt = stage.alts.find((a) => a.index === Number(altIdx));
+    if (!alt) return;
+    // 1) 地圖：這段折線改走選定路線
+    const renderer = directionsRenderers[stageIndex];
+    if (renderer && typeof renderer.setPath === 'function' && alt.path) renderer.setPath(alt.path);
+    // 2) 快取：更新距離/時間/選擇，並記住偏好（重畫路線時沿用，不被自動選最短洗掉）
+    stage.distance = alt.distanceText;
+    stage.duration = alt.durationText;
+    stage.selectedRouteIdx = alt.index;
+    preferredRouteByStage[stageIndex] = alt.index;
+    // 3) 排程：改這段交通分鐘 → 後續到站時間跟著移；使用者明確互動 → 存檔
+    const oi = stage.origin && stage.origin.stopIndex;
+    if (typeof oi === 'number' && replanStops[oi]) {
+      replanStops[oi].transitMin = alt.durationMin;
+      tripUserDirty = true;
+      schedulePersistTrip();
+    }
+    syncRouteStageScheduleTimes(buildReplanSchedule());
+    renderItineraryDisplay();
+    renderMobileRouteSheet();
+    closeRouteAlternatives();
+    feedbackToast('已套用替代路線：' + alt.summary, 'green');
+  }
+
   // 桌機「路線階段」面板的邊緣收合把手（slide-to-edge）
   function toggleDirectionsPanel() {
     const panel = document.getElementById('directionsPanel');
@@ -15651,6 +15733,7 @@
       : `${stages.length} 段路徑 · 點開可收合查看`;
 
     list.innerHTML = stages.length ? stages.map((stage) => `
+      <div class="mobile-route-item-wrap">
       <button class="mobile-route-item ${activeRouteStage === stage.index ? 'active' : ''}" type="button" onclick="selectRouteStage(${stage.index})">
         <div class="mobile-route-item-main">
           <div class="mobile-route-item-head">
@@ -15661,6 +15744,8 @@
         </div>
         <div class="mobile-route-item-badge">${activeRouteStage === stage.index ? '聚焦中' : '點看'}</div>
       </button>
+      ${stage.altEligible && stage.alts ? `<button type="button" class="route-alt-btn mobile" onclick="openRouteAlternatives(${stage.index})">🔀 替代路線 (${stage.alts.length})</button>` : ''}
+      </div>
     `).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
   }
 
@@ -15856,6 +15941,22 @@
                 if (dist < minDist) { minDist = dist; bestRouteIndex = idx; }
               });
             }
+            // D6：留住所有替代路線（供比較/套用），並在使用者選過後沿用那條（本次瀏覽階段黏著）
+            const routeAlts = response.routes.map((route, idx) => {
+              const est = getGoogleLegEstimate(route.legs[0], 0);
+              return {
+                index: idx,
+                summary: route.summary || ('路線 ' + (idx + 1)),
+                durationMin: est.durationMinutes,
+                durationText: est.durationText,
+                distanceText: est.distanceText,
+                distanceValue: route.legs.reduce((s, lg) => s + (lg.distance ? lg.distance.value : 0), 0),
+                path: route.overview_path
+              };
+            });
+            const preferredIdx = preferredRouteByStage[i];
+            if (preferredIdx != null && response.routes[preferredIdx]) bestRouteIndex = preferredIdx;
+            const altEligible = (stageMode === 'car' || stageMode === 'scooter') && routeAlts.length > 1;
 
             const leg = response.routes[bestRouteIndex].legs[0];
             const segColor = ROUTE_MODE_COLORS[stageMode] || '#EA580C';
@@ -15920,6 +16021,10 @@
               routeStageCache[i].mode = stageMode;
               routeStageCache[i].distance = legEstimate.distanceText;
               routeStageCache[i].duration = legEstimate.durationText;
+              // D6：替代路線清單＋目前選擇＋是否可比較（車/機車且 >1 條）
+              routeStageCache[i].alts = routeAlts;
+              routeStageCache[i].selectedRouteIdx = bestRouteIndex;
+              routeStageCache[i].altEligible = altEligible;
 
               if (typeof origin.stopIndex === 'number' && replanStops[origin.stopIndex]) {
                 // 記憶體內一律更新，排程與畫面才會跟實測一致。
@@ -15963,6 +16068,7 @@
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${escapeHtml(shortStopName(destination.name || destination.title || '下一站'))}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
               </div>
+              ${altEligible ? `<button type="button" class="route-alt-btn" onclick="event.stopPropagation();openRouteAlternatives(${i})">🔀 替代路線 (${routeAlts.length})</button>` : ''}
             `;
 
             stageDiv.addEventListener('click', () => {

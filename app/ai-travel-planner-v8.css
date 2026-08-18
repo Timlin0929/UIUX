@@ -6786,3 +6786,54 @@ button.notif-item { cursor: pointer; }
   .travellog-material-status { display: none; }
   .travellog-spot-actions button { flex-basis: 100%; }
 }
+
+/* ── D6：替代路線 ── */
+.route-alt-btn {
+  margin-top: 8px;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--accent2, #2f6f4f);
+  background: var(--surface); color: var(--accent2, #2f6f4f);
+  font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.route-alt-btn:hover { background: var(--accent-light); }
+.route-alt-btn.mobile { margin: 2px 0 0; font-size: 12px; }
+.mobile-route-item-wrap { display: flex; flex-direction: column; gap: 0; }
+
+.route-alt-modal {
+  position: fixed; inset: 0; z-index: 4000;
+  background: rgba(15, 23, 20, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.route-alt-panel {
+  width: 100%; max-width: 460px; max-height: 82vh; overflow: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 20px; padding: 18px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+}
+.route-alt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.route-alt-title { font-size: 17px; font-weight: 800; color: var(--ink); }
+.route-alt-sub { margin-top: 2px; font-size: 13px; color: var(--ink2); }
+.route-alt-close {
+  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 10px;
+  border: 1px solid var(--border); background: transparent; color: var(--ink2);
+  font-size: 16px; cursor: pointer;
+}
+.route-alt-list { display: flex; flex-direction: column; gap: 10px; }
+.route-alt-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px; border: 1px solid var(--border); border-radius: 14px;
+}
+.route-alt-row.is-current { border-color: var(--accent2, #2f6f4f); background: var(--accent-light); }
+.route-alt-info { min-width: 0; }
+.route-alt-summary { font-size: 14px; font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.route-alt-meta { margin-top: 3px; font-size: 13px; color: var(--ink2); }
+.route-alt-vs { margin-top: 4px; font-size: 12px; color: var(--ink2); }
+.route-alt-diff { font-weight: 700; }
+.route-alt-diff.good { color: #16A34A; }
+.route-alt-diff.bad { color: #C2410C; }
+.route-alt-cur { font-weight: 700; color: var(--accent2, #2f6f4f); }
+.route-alt-using { flex: 0 0 auto; font-size: 12px; font-weight: 700; color: var(--accent2, #2f6f4f); }
+.route-alt-apply { flex: 0 0 auto; padding: 8px 16px; }
+.route-alt-foot { margin-top: 12px; font-size: 12px; color: var(--ink3, var(--ink2)); line-height: 1.5; }
