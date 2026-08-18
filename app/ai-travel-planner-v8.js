@@ -1809,6 +1809,38 @@
   });
 
   // ── C4 導航按鈕：跳轉 Google Maps 外部導航（前往指定站）──
+  // D6：某段若已套用替代路線，回傳「最能區分該路線」的中途點——即該路線離「起點→終點直線」
+  // 最遠的那個折線點。把它當成 Google Maps 導航的 waypoint，就能逼 Google Maps 走同一條替代路線。
+  // （Google Maps URL 無法直接指定用哪條替代路線，只能靠途經點誘導；非逐公尺相同但會貼合。）
+  function appliedRouteVia(stageIndex) {
+    if (stageIndex == null) return null;
+    const pref = preferredRouteByStage[stageIndex];
+    if (pref == null) return null;
+    const stage = routeStageCache.find((s) => s && s.index === stageIndex);
+    const alt = stage && Array.isArray(stage.alts) ? stage.alts.find((a) => a.index === pref) : null;
+    const path = alt && alt.path;
+    if (!path || path.length < 3 || typeof path[0].lat !== 'function') return null;
+    const a = { lat: path[0].lat(), lng: path[0].lng() };
+    const b = { lat: path[path.length - 1].lat(), lng: path[path.length - 1].lng() };
+    const dx = b.lng - a.lng, dy = b.lat - a.lat;
+    const len2 = dx * dx + dy * dy || 1e-12;
+    let best = null, bestD = -1;
+    for (let k = 1; k < path.length - 1; k++) {
+      const px = path[k].lng(), py = path[k].lat();
+      const t = ((px - a.lng) * dx + (py - a.lat) * dy) / len2;
+      const cx = a.lng + t * dx, cy = a.lat + t * dy;
+      const d = Math.hypot(px - cx, py - cy);
+      if (d > bestD) { bestD = d; best = { lat: py, lng: px }; }
+    }
+    return (best && bestD > 1e-4) ? best : null; // 幾乎不偏離就別加點，免得白佔 waypoint 額度
+  }
+
+  // 找「前往第 stopIndex 站那一段」的階段 index（origin.stopIndex === stopIndex-1）
+  function stageIndexForLegIntoStop(stopIndex) {
+    const st = routeStageCache.find((s) => s && s.origin && s.origin.stopIndex === (stopIndex - 1));
+    return st ? st.index : null;
+  }
+
   function openExternalNavigation(stopId) {
     const stop = replanStops.find((s) => s.id === stopId);
     const pos = stop && getStopLatLng(stop);
@@ -1817,7 +1849,10 @@
     const idx = replanStops.indexOf(stop);
     const prevMode = idx > 0 ? normalizeTransitMode(replanStops[idx - 1].transitMode) : 'car';
     const travelmode = prevMode === 'walk' ? 'walking' : 'driving';
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${pos.lat},${pos.lng}&travelmode=${travelmode}`;
+    // D6：前往此站那段若套用了替代路線，帶一個途經點讓 Google Maps 走同一條
+    const via = idx > 0 ? appliedRouteVia(stageIndexForLegIntoStop(idx)) : null;
+    const wp = via ? `&waypoints=${encodeURIComponent(via.lat + ',' + via.lng)}` : '';
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${pos.lat},${pos.lng}${wp}&travelmode=${travelmode}`;
     window.open(url, '_blank', 'noopener');
   }
 
@@ -1830,12 +1865,20 @@
     if (coords.length < 2) return null;
     const origin = coords[0].pos;
     const dest = coords[coords.length - 1].pos;
-    const mids = coords.slice(1, -1);
-    const waypoints = mids.slice(0, 9).map((x) => `${x.pos.lat},${x.pos.lng}`).join('|');
+    // 中停站之間交錯插入「已套用替代路線」的途經點，讓整趟導航也走使用者選的那幾條路線。
+    const wp = [];
+    for (let k = 0; k < coords.length - 1; k++) {
+      if (k > 0) wp.push(`${coords[k].pos.lat},${coords[k].pos.lng}`); // 中停站
+      const legStopIdx = replanStops.indexOf(coords[k].s);
+      const via = appliedRouteVia(stageIndexForLegIntoStop(legStopIdx + 1)); // 前往 coords[k+1] 那段
+      if (via) wp.push(`${via.lat},${via.lng}`);
+    }
+    const used = wp.slice(0, 9); // Google Maps dir URL 的 waypoints 上限 9 個
+    const waypoints = used.join('|');
     const mode = normalizeTransitMode(coords[0].s.transitMode) === 'walk' ? 'walking' : 'driving';
     const url = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lng}&destination=${dest.lat},${dest.lng}`
       + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=${mode}`;
-    return { url, totalStops: coords.length, omittedStops: Math.max(0, mids.length - 9) };
+    return { url, totalStops: coords.length, omittedStops: Math.max(0, wp.length - used.length) };
   }
 
   function openFullTripNavigation() {
@@ -13658,23 +13701,24 @@
         <div class="phone-status"><span>9:41</span><span class="status-icons">◉ ◉ ◉ 100%</span></div>
         <div class="screen-header">
           <div class="screen-title">替代路線建議</div>
-          <div class="screen-subtitle">主路段壅塞 8 分鐘，AI 建議改走河堤支線。</div>
+          <div class="screen-subtitle">塞車或想換路時，比較可替換的路線與 ETA。（此為示意畫面）</div>
         </div>
         <div class="screen-body">
           <div class="screen-card success">
-            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">推薦路線</div><div class="screen-kv-value" style="font-size:15px;">河堤支線</div></div><span class="screen-pill green">快 8 分鐘</span></div>
+            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">其他路線</div><div class="screen-kv-value" style="font-size:15px;">較快的一條</div></div><span class="screen-pill green">較快</span></div>
           </div>
           <div class="screen-card danger">
-            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">原始路線</div><div class="screen-kv-value" style="font-size:15px;">市區幹道</div></div><span class="screen-pill orange">壅塞</span></div>
+            <div class="screen-row"><div class="screen-kv"><div class="screen-kv-label">目前路線</div><div class="screen-kv-value" style="font-size:15px;">現行路線</div></div><span class="screen-pill orange">可能壅塞</span></div>
           </div>
           <div class="screen-card soft">
-            <div class="screen-pill-row"><span class="screen-pill">改道後 ETA 25 分鐘</span><span class="screen-pill">少 3 個紅燈</span></div>
+            <div class="screen-pill-row"><span class="screen-pill">比較 ETA</span><span class="screen-pill">比較距離</span><span class="screen-pill">可套用</span></div>
           </div>
           <div class="screen-actions">
-            <button class="screen-btn primary">採用新路線</button>
+            <button class="screen-btn primary">到行程路線比較</button>
             <button class="screen-btn secondary">維持原路線</button>
           </div>
         </div>
+        <div style="margin-top:10px;font-size:12px;color:var(--ink2);line-height:1.5;">實際功能：在「行程」的路線階段卡點「🔀 替代路線」即可比較 Google 真實替代路線並套用。</div>
       `
     },
     {
@@ -13898,7 +13942,7 @@
   function bindRideflowActions(modeId) {
     const modeButtons = {
       'change-road': [
-        () => openItineraryStop('shop'),
+        () => switchView('itinerary'),
         () => openItineraryStop('return')
       ],
       user: [
@@ -15652,9 +15696,13 @@
     if (!stage || !Array.isArray(stage.alts)) return;
     const alt = stage.alts.find((a) => a.index === Number(altIdx));
     if (!alt) return;
-    // 1) 地圖：這段折線改走選定路線
+    // 1) 地圖：這段折線改走選定路線；中段目的地標籤同步移到新折線中點（否則會留在舊線上）
     const renderer = directionsRenderers[stageIndex];
     if (renderer && typeof renderer.setPath === 'function' && alt.path) renderer.setPath(alt.path);
+    const midLabel = routeMidLabels[stageIndex];
+    if (midLabel && typeof midLabel.setPosition === 'function' && alt.path && alt.path.length) {
+      midLabel.setPosition(alt.path[Math.floor(alt.path.length / 2)]);
+    }
     // 2) 快取：更新距離/時間/選擇，並記住偏好（重畫路線時沿用，不被自動選最短洗掉）
     stage.distance = alt.distanceText;
     stage.duration = alt.durationText;
@@ -15670,6 +15718,15 @@
     syncRouteStageScheduleTimes(buildReplanSchedule());
     renderItineraryDisplay();
     renderMobileRouteSheet();
+    // P1：桌機 directionsPanel 那張卡是首次 callback 寫死的 innerHTML，不會被上面重繪 → 直接同步它的文字
+    const card = document.querySelector('#directionsPanel [data-index="' + stageIndex + '"]');
+    const metaText = card && card.querySelector('.stage-meta-text');
+    if (metaText) {
+      const m = getTransitModeMeta(stage.mode);
+      const tt = getRouteStageTimeText(stage) || '時間計算中';
+      const distPart = (stage.distance && !isDistanceAbnormallySmall(stage.distance)) ? ' · 距離：' + stage.distance : '';
+      metaText.textContent = `${m.icon} ${m.label} · ${tt}${distPart} · 預估 ${stage.duration}`;
+    }
     closeRouteAlternatives();
     feedbackToast('已套用替代路線：' + alt.summary, 'green');
   }
@@ -16063,7 +16120,7 @@
                 階段 ${i + 1}：${escapeHtml(origin.name || origin.title || '')} ➔ ${escapeHtml(destination.name || destination.title || '')}
               </div>
               <div style="font-size: 12px; color: var(--ink2);">
-                ${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}
+                <span class="stage-meta-text">${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}</span>
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${escapeHtml(shortStopName(destination.name || destination.title || '下一站'))}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
