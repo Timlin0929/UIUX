@@ -270,9 +270,9 @@
         <div class="hero-meta desktop-only-meta" style="display: none;">
           <div class="hero-tag">💡 探索 AI 隨行管家的各項功能</div>
         </div>
-        <div class="hero-title mobile-only-title">共乘身份與路線流程說明</div>
+        <div class="hero-title mobile-only-title">路線與行程流程說明</div>
         <div class="hero-meta mobile-only-meta">
-          <div class="hero-tag">👥 司機 / 乘客 / 協作 / 回憶</div>
+          <div class="hero-tag">🗺️ 改道 · 位置 · 行程 · 回憶</div>
         </div>
       </div>
 
@@ -296,7 +296,7 @@
         <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 24px; padding: 32px; box-shadow: var(--shadow-sm);">
           <div style="font-size: 32px; margin-bottom: 12px;">📱</div>
           <h3 style="font-size: 20px; font-weight: 800; color: var(--ink); margin-bottom: 8px;">跨裝置完美支援</h3>
-          <p style="color: var(--ink2); line-height: 1.6; font-size: 15px;">無論是在電腦前詳細規劃，或是旅行中用手機即時查看，介面皆會自動適應，更提供專屬的「司機/乘客」權限模式，讓共乘體驗更順暢。</p>
+          <p style="color: var(--ink2); line-height: 1.6; font-size: 15px;">無論是在電腦前詳細規劃，或是旅行中用手機即時查看，介面皆會自動適應，讓你隨時掌握行程節奏。</p>
         </div>
       </div>
 
@@ -306,17 +306,17 @@
         <div class="ride-preview-card">
           <div class="ride-preview-top">
             <div>
-              <div class="ride-preview-kicker" id="rideModeKicker">identity</div>
-              <div class="ride-preview-title" id="rideModeTitle">你今天的角色是？</div>
-              <div class="ride-preview-subtitle" id="rideModeSubtitle">先切換身份，再決定是開車、搭車，還是一起調整路線。</div>
+              <div class="ride-preview-kicker" id="rideModeKicker">trip detail</div>
+              <div class="ride-preview-title" id="rideModeTitle">今天行程</div>
+              <div class="ride-preview-subtitle" id="rideModeSubtitle">完整時間線與地點清單，方便總覽與分享。</div>
             </div>
-            <div class="ride-preview-badge" id="rideModeBadge">身份確認</div>
+            <div class="ride-preview-badge" id="rideModeBadge">行程總覽</div>
           </div>
           <div class="phone-shell">
             <div class="phone-screen" id="rideModeScreen"></div>
           </div>
         </div>
-        <div class="screen-footnote">點選上方任一畫面卡，就能切換下方手機預覽。這一區對應你截圖裡的身份、司機、乘客、改道與回憶等功能流程。</div>
+        <div class="screen-footnote">點選上方任一畫面卡，就能切換下方手機預覽。這一區展示改道、現在位置、今天行程與回憶等功能流程。</div>
       </div>
     </div>
 
@@ -576,49 +576,7 @@
   <button class="mobile-switch-btn" id="mobileSwitchMap" onclick="setMobileMode('map')">地圖</button>
 </div>
 
-<div class="mobile-role-switch" id="mobileRoleSwitch">
-  <button class="mobile-role-btn active" id="mobileRolePassenger" onclick="setUserRole('passenger')">乘客權限</button>
-  <button class="mobile-role-btn" id="mobileRoleDriver" onclick="setUserRole('driver')">司機權限</button>
-</div>
-
-<div class="mobile-driver-panel" id="mobileDriverPanel">
-  <div class="driver-panel-drag-handle" id="driverPanelHandle">
-    <div class="driver-panel-handle-main">
-      <div class="driver-panel-handle-title">司機行程掌控</div>
-      <div class="driver-panel-handle-sub" id="driverPanelHandleSub">尚未載入停靠點</div>
-    </div>
-    <div class="driver-panel-toggle-indicator" id="driverPanelToggleIndicator">▴</div>
-  </div>
-  <div class="driver-panel-content">
-    <div class="driver-panel-head">
-      <div>
-        <div class="driver-panel-title">司機行程掌控</div>
-        <div class="driver-panel-sub">地圖導航中 · 可即時改道與掌握停靠點</div>
-      </div>
-      <div class="driver-panel-badge">DRIVER</div>
-    </div>
-    <table class="driver-itinerary-table">
-      <thead>
-        <tr>
-          <th>時間</th>
-          <th>停靠點</th>
-          <th>狀態</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>--</td>
-          <td colspan="2" style="color: var(--ink2);">尚未載入行程</td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="driver-control-row">
-      <button class="driver-ctrl-btn maps-route-btn" onclick="openFullTripNavigation()" title="以 Google Maps 開啟整趟路線" aria-label="以 Google Maps 開啟整趟路線（新分頁）">🗺 Google Maps 路線 <span aria-hidden="true">↗</span></button>
-      <button class="driver-ctrl-btn primary" onclick="switchView('itinerary')">查看行程</button>
-      <button class="driver-ctrl-btn warn" onclick="setRideMode('change-road')">改道路線</button>
-    </div>
-  </div>
-</div>
+<!-- 「司機/乘客權限模式」與「司機行程掌控」面板已移除（C8 不符 app 定位，導航交給 Google Maps）。 -->
 
 <script src="./weather.env.js"></script>
 <script src="./poi-data.js"></script>
@@ -634,7 +592,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="./collab.js?v=20260726-fix3"></script>
 <script src="./notifications.js?v=20260722-friends2"></script>
-<script src="./ai-travel-planner-v8.js?v=20260818-shareall1"></script>
+<script src="./ai-travel-planner-v8.js?v=20260818-c8removed1"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。
