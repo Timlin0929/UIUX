@@ -6283,11 +6283,21 @@
   function renderMemoryVideo(body) {
     const { photos, videos } = memoryStudioState.material;
     setMemoryStudioHeader('旅程回顧短片', '素材摘要', true);
+    const recapTitleDefault = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string')
+      ? memoryStudioState.recapTitle
+      : (currentTripTitle || memoryStudioState.material.title || '我的旅程');
     body.innerHTML = `
       <div class="memory-video-summary">
         <h3>${escapeHtml(memoryStudioState.material.title)}</h3>
         <p>${photos.length} 張照片${videos.length ? ` · ${videos.length} 段影片` : ''}</p>
       </div>
+      <fieldset class="memory-title-field">
+        <legend>影片標題</legend>
+        <input type="text" id="recapTitleInput" class="memory-title-input" maxlength="40"
+          value="${escapeHtml(recapTitleDefault)}" placeholder="給這支影片一個標題"
+          oninput="memorySetRecapTitle(this.value)">
+        <p class="memory-title-hint">會顯示在影片開頭與角落；可在產生前自由修改。</p>
+      </fieldset>
       ${videos.length ? `<fieldset class="memory-audio-options">
         <legend>影片聲音</legend>
         <label><input type="radio" name="memoryAudioMode" value="original" ${memoryStudioState.audioMode === 'original' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 保留片段原聲</label>
@@ -6305,6 +6315,12 @@
   function memorySetAudioMode(mode) {
     if (!memoryStudioState) return;
     memoryStudioState.audioMode = mode === 'muted' ? 'muted' : 'original';
+  }
+
+  // 使用者自訂的影片標題（生成前可改）；未輸入則沿用行程名稱。
+  function memorySetRecapTitle(v) {
+    if (!memoryStudioState) return;
+    memoryStudioState.recapTitle = String(v || '').slice(0, 40);
   }
 
   // ── 旅程回顧短片：前端入口（M9）。串後端 /api/recap 渲染 job → 產出可下載 mp4。──
@@ -6512,7 +6528,8 @@
         .sort()
         .join(',');
       const audio = (memoryStudioState && memoryStudioState.audioMode) || 'original';
-      return `${(trip.stops || []).length}#${audio}#${stopSig}#${photoSig}`;
+      const title = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
+      return `${(trip.stops || []).length}#${audio}#${title}#${stopSig}#${photoSig}`;
     } catch (_e) { return ''; }
   }
 
@@ -6700,6 +6717,9 @@
     const user = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
     if (!user) { feedbackToast('請先登入再產生回顧短片', 'orange'); return; }
     const trip = collectRecapTrip();
+    // 使用者自訂的影片標題（生成前可改）優先於行程名稱
+    const customTitle = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
+    if (customTitle) trip.title = customTitle.slice(0, 40);
     if (trip.stops.length < 2) { feedbackToast('這趟行程還沒有足夠的景點座標', 'orange'); return; }
 
     recapVideoBusy = true;
@@ -6790,6 +6810,7 @@
     memoryRetryFailed,
     memoryOpenGuide,
     memorySetAudioMode,
+    memorySetRecapTitle,
     memoryResetLayout,
     memorySetTemplate,
     memoryAddCard,
