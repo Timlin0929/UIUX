@@ -6293,9 +6293,13 @@
       </div>
       <fieldset class="memory-title-field">
         <legend>影片標題</legend>
-        <input type="text" id="recapTitleInput" class="memory-title-input" maxlength="40"
-          value="${escapeHtml(recapTitleDefault)}" placeholder="給這支影片一個標題"
-          oninput="memorySetRecapTitle(this.value)">
+        <div class="memory-title-row">
+          <input type="text" id="recapTitleInput" class="memory-title-input" maxlength="40"
+            value="${escapeHtml(recapTitleDefault)}" placeholder="給這支影片一個標題"
+            oninput="memorySetRecapTitle(this.value)">
+          <button type="button" id="recapIdeaBtn" class="memory-secondary-btn recap-idea-btn" onclick="recapSuggestIdeas()">✨ 幫我想</button>
+        </div>
+        <div id="recapIdeaBox" class="recap-idea-box"></div>
         <p class="memory-title-hint">會顯示在影片開頭與角落；可在產生前自由修改。</p>
       </fieldset>
       ${videos.length ? `<fieldset class="memory-audio-options">
@@ -6321,6 +6325,110 @@
   function memorySetRecapTitle(v) {
     if (!memoryStudioState) return;
     memoryStudioState.recapTitle = String(v || '').slice(0, 40);
+  }
+
+  // ── D2：自動想標題＋hashtag（LLM 產候選，未設定/失敗則用模板 fallback）──
+  function recapSeasonLabel(dateLabel) {
+    var m = String(dateLabel || '').match(/(\d{1,2})\s*[.\-\/月]/);
+    var mo = m ? Number(m[1]) : 0;
+    if (mo >= 3 && mo <= 5) return '春';
+    if (mo >= 6 && mo <= 8) return '夏';
+    if (mo >= 9 && mo <= 11) return '秋';
+    if (mo === 12 || mo === 1 || mo === 2) return '冬';
+    return '';
+  }
+  function recapDayCount(trip) {
+    return Math.max.apply(null, (trip.stops || []).map(function (s) { return Number(s.dayIndex) || 1; }).concat([1]));
+  }
+  function recapTemplateIdeas(trip) {
+    var region = trip.region || '旅程';
+    var season = recapSeasonLabel(trip.dateLabel);
+    var names = (trip.stops || []).map(function (s) { return s.name; }).filter(Boolean);
+    var first = names[0] || region;
+    var days = recapDayCount(trip);
+    var titles = [
+      (season ? season + '遊' : '走跳') + region,
+      region + (days > 1 ? days + '天' : '一日') + '小旅行',
+      first + '・' + region + '的一天'
+    ].filter(Boolean).slice(0, 3);
+    var raw = [region, region + '旅遊', season ? season + '天' : '', trip.transportMode === 'scooter' ? '機車旅行' : '公路旅行']
+      .concat(names.slice(0, 3)).concat(['旅遊', '旅行', 'travel', 'trip', '台灣', 'taiwan']).filter(Boolean);
+    var seen = {}; var tags = [];
+    raw.forEach(function (t) { var s = '#' + String(t).replace(/\s+/g, ''); if (!seen[s]) { seen[s] = 1; tags.push(s); } });
+    return { titles: titles, hashtags: tags.slice(0, 12), source: 'template' };
+  }
+  async function generateRecapIdeas() {
+    var trip = collectRecapTrip();
+    var vertex = (typeof getVertexConfig === 'function') ? getVertexConfig() : { ready: false };
+    if (!vertex.ready) return recapTemplateIdeas(trip);
+    try {
+      var names = (trip.stops || []).map(function (s) { return s.name; }).filter(Boolean);
+      var prompt = '你是社群小編。根據以下旅程，產生吸睛的中文短影片標題與 hashtag。\n'
+        + '地區：' + (trip.region || '') + '\n天數：' + recapDayCount(trip) + '\n季節/日期：' + (trip.dateLabel || '')
+        + '\n交通：' + (trip.transportMode || '') + '\n景點：' + names.join('、') + '\n'
+        + '只回 JSON（不要多餘文字）：{"titles":["三個各不超過14字的標題"],"hashtags":["8到12個含#的標籤，中英混合，貼近地區與景點"]}';
+      var endpoint = VERTEX_API_BASE + '/publishers/google/models/' + GEMINI_MODEL + ':generateContent?key=' + encodeURIComponent(vertex.apiKey);
+      var res = await fetch(endpoint, {
+        method: 'POST', headers: await vertexAuthHeaders(),
+        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: buildGenConfig({ temperature: 0.85, maxOutputTokens: 512, thinking: 0 }) })
+      });
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      var data = await res.json();
+      var text = ((data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [])
+        .map(function (p) { return p.text || ''; }).join('');
+      var parsed = safeParseJson(text);
+      var titles = parsed && Array.isArray(parsed.titles) ? parsed.titles.map(function (t) { return String(t).slice(0, 40); }).filter(Boolean).slice(0, 3) : [];
+      var tags = parsed && Array.isArray(parsed.hashtags)
+        ? parsed.hashtags.map(function (t) { var s = String(t).trim(); return s.charAt(0) === '#' ? s : '#' + s.replace(/\s+/g, ''); }).filter(function (s) { return s.length > 1; }).slice(0, 12)
+        : [];
+      if (!titles.length) return recapTemplateIdeas(trip);
+      return { titles: titles, hashtags: tags.length ? tags : recapTemplateIdeas(trip).hashtags, source: 'ai' };
+    } catch (_e) {
+      return recapTemplateIdeas(trip);
+    }
+  }
+  function renderRecapIdeas(ideas) {
+    var box = document.getElementById('recapIdeaBox');
+    if (!box) return;
+    var chips = (ideas.titles || []).map(function (t) {
+      return '<button type="button" class="recap-idea-chip" onclick="recapUseTitle(this)">' + escapeHtml(t) + '</button>';
+    }).join('');
+    var tags = (ideas.hashtags || []).join(' ');
+    box.innerHTML = '<div class="recap-idea-row">' + chips + '</div>'
+      + (tags ? '<div class="recap-idea-tags"><span class="recap-idea-tagtext">' + escapeHtml(tags) + '</span>'
+        + '<button type="button" class="memory-secondary-btn recap-idea-copy" onclick="recapCopyHashtags()">複製 hashtag</button></div>' : '')
+      + '<p class="recap-idea-hint">' + (ideas.source === 'ai' ? 'AI 建議' : '離線建議') + '：點標題即套用；hashtag 分享時也會自動帶上。</p>';
+  }
+  window.recapSuggestIdeas = async function () {
+    var btn = document.getElementById('recapIdeaBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '想中…'; }
+    try {
+      var ideas = await generateRecapIdeas();
+      if (memoryStudioState) memoryStudioState.recapHashtags = ideas.hashtags || [];
+      renderRecapIdeas(ideas);
+    } catch (_e) {
+      feedbackToast('想標題失敗，請再試一次', 'orange');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '✨ 幫我想'; }
+    }
+  };
+  window.recapUseTitle = function (el) {
+    var input = document.getElementById('recapTitleInput');
+    var t = el ? el.textContent : '';
+    if (input) input.value = t;
+    memorySetRecapTitle(t);
+  };
+  window.recapCopyHashtags = async function () {
+    var tags = ((memoryStudioState && memoryStudioState.recapHashtags) || []).join(' ');
+    if (!tags) return;
+    try { await navigator.clipboard.writeText(tags); feedbackToast('📋 已複製 hashtag', 'green'); }
+    catch (_e) { feedbackToast('複製失敗，請手動選取', 'orange'); }
+  };
+  // D4：分享時的說明文字＝自訂標題＋hashtag（貼到 IG/LINE 就有現成 caption）
+  function recapShareCaption() {
+    var t = ((memoryStudioState && memoryStudioState.recapTitle) || '').trim();
+    var tags = ((memoryStudioState && memoryStudioState.recapHashtags) || []).join(' ');
+    return [t || '我的旅程回顧短片', tags].filter(Boolean).join('\n\n');
   }
 
   // ── 旅程回顧短片：前端入口（M9）。串後端 /api/recap 渲染 job → 產出可下載 mp4。──
@@ -6573,10 +6681,11 @@
         const resp = await fetch(url);
         if (!resp.ok) throw new Error('fetch ' + resp.status);
         const file = new File([await resp.blob()], filename, { type: 'video/mp4' });
+        const caption = recapShareCaption();
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          await navigator.share({ files: [file], title: filename, text: '我的旅程回顧短片' });
+          await navigator.share({ files: [file], title: filename, text: caption });
         } else if (navigator.share) {
-          await navigator.share({ title: filename, text: '我的旅程回顧短片' });
+          await navigator.share({ title: filename, text: caption });
         } else {
           feedbackToast('這個瀏覽器不支援分享，請改用「下載影片」再傳給朋友', 'orange');
         }

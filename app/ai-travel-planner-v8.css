@@ -6844,3 +6844,17 @@ button.notif-item { cursor: pointer; }
 .memory-title-input { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--ink); }
 .memory-title-input:focus { outline: 2px solid var(--accent2, #2f6f4f); outline-offset: 1px; }
 .memory-title-hint { margin: 6px 2px 0; font-size: 12px; color: var(--ink2); }
+
+/* 回顧短片：AI 想標題／hashtag（D2） */
+.memory-title-row { display:flex; gap:8px; align-items:stretch; }
+.memory-title-row .memory-title-input { flex:1 1 auto; }
+.recap-idea-btn { flex:0 0 auto; white-space:nowrap; }
+.recap-idea-box:empty { display:none; }
+.recap-idea-box { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+.recap-idea-row { display:flex; flex-wrap:wrap; gap:8px; }
+.recap-idea-chip { padding:7px 12px; border:1px solid var(--accent2,#2f6f4f); border-radius:999px; background:var(--surface); color:var(--accent2,#2f6f4f); font-size:13px; font-weight:600; cursor:pointer; }
+.recap-idea-chip:hover { background:var(--accent-light); }
+.recap-idea-tags { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.recap-idea-tagtext { flex:1 1 160px; min-width:0; font-size:12.5px; color:var(--ink2); line-height:1.5; word-break:break-word; }
+.recap-idea-copy { flex:0 0 auto; padding:6px 12px; font-size:12.5px; }
+.recap-idea-hint { margin:0; font-size:12px; color:var(--ink3,var(--ink2)); }
