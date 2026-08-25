@@ -45,8 +45,9 @@
     var segs = Array.isArray(manifest.segments) ? manifest.segments : [];
     var full = [];           // 串接後的完整折線（相鄰段共用站點，去重）
     var fullCum = [];        // full 各頂點的累積弧長
+    var fullBreak = [];      // fullBreak[j]=true → 從 full[j-1] 到 full[j] 是「換日連線」，畫線時斷開（不畫）
     var segStartLen = [0];   // 每個「站」在 full 上的起始弧長（segStartLen[i]=到站 i 為止的長度）
-    if (pts.length) { full.push(pts[0]); fullCum.push(0); }
+    if (pts.length) { full.push(pts[0]); fullCum.push(0); fullBreak.push(false); }
     for (var k = 0; k < segs.length; k++) {
       var raw = (Array.isArray(segs[k].points) && segs[k].points.length >= 2)
         ? segs[k].points.map(function (p) { return proj(p[0], p[1]); })
@@ -56,6 +57,7 @@
         var prev = full[full.length - 1];
         var d = Math.hypot(raw[j].x - prev.x, raw[j].y - prev.y);
         full.push(raw[j]); fullCum.push(fullCum[fullCum.length - 1] + d);
+        fullBreak.push(!!segs[k].dayBreak);   // 跨天段的每條邊都標記為斷開
       }
       segStartLen.push(fullCum[fullCum.length - 1]);
     }
@@ -82,7 +84,7 @@
       points: pts, cosLat: cosLat, bounds: { x0: bx0, x1: bx1, y0: by0, y1: by1 },
       center: center, spanX: spanX, spanY: spanY,
       fitScale: fitScale, followScale: fitScale * 2.4, taiwan: taiwan,
-      full: full, fullCum: fullCum, fullLen: fullLen, segStartLen: segStartLen
+      full: full, fullCum: fullCum, fullBreak: fullBreak, fullLen: fullLen, segStartLen: segStartLen
     };
   }
 
@@ -117,7 +119,7 @@
     }
     var routeStart = tl.coverMs;
     var routeEnd = tl.totalMs - tl.statsMs;
-    return { arrive: arrive, depart: depart, routeStart: routeStart, routeEnd: routeEnd, segs: segs };
+    return { arrive: arrive, depart: depart, routeStart: routeStart, routeEnd: routeEnd, segs: segs, dayBreaks: Array.isArray(tl.dayBreaks) ? tl.dayBreaks : [] };
   }
 
   // 媒體照片：預載 manifest.media[].src（後端為 data URL，前端可為 https/blob）
@@ -213,6 +215,19 @@
     // 起點站若有照片，會在出發前停留一段（depart[0] > routeStart）——這段視為在起點 dwell。
     if (tMs < timing.depart[0]) { var ph = at(0); return { x: ph.x, y: ph.y, ang: stopDir(0), reached: 0, heading: 1, dwelling: true, pulse: (tMs - timing.arrive[0]) / Math.max(1, timing.depart[0] - timing.arrive[0]), progLen: 0 }; }
     if (tMs >= timing.routeEnd) { var pe = at(fullLen); return { x: pe.x, y: pe.y, ang: pe.ang, reached: n - 1, heading: n - 1, dwelling: true, pulse: 0, progLen: fullLen }; }
+    // 換日轉場窗：不畫車、鏡頭落在隔天第一站，交給 renderFrame 顯示「Day N」卡
+    for (var b = 0; b < timing.dayBreaks.length; b++) {
+      var win = timing.dayBreaks[b];
+      if (tMs >= win.startMs && tMs < win.endMs) {
+        var ti = win.toStopIndex, fi = ti - 1;
+        var np = world.points[ti] || at(segStart[Math.min(ti, segStart.length - 1)]);
+        return {
+          x: np.x, y: np.y, ang: 0, reached: fi, heading: ti, dwelling: false, pulse: 0,
+          progLen: segStart[Math.min(fi, segStart.length - 1)],
+          dayBreak: true, day: win.day, breakProgress: (tMs - win.startMs) / Math.max(1, win.endMs - win.startMs)
+        };
+      }
+    }
     for (var i = 1; i < n; i++) {
       var d0 = timing.depart[i - 1], a1 = timing.arrive[i];
       if (tMs < a1) { // 在第 i 段移動中：沿折線走 progLen
@@ -329,14 +344,36 @@
   function drawRouteBase(ctx, world, cam) {
     ctx.strokeStyle = 'rgba(120,210,185,.18)'; ctx.lineWidth = 9; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.setLineDash([2, 16]);
     ctx.beginPath();
-    world.full.forEach(function (p, i) { var s = cam.toScreen(p); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+    var br = world.fullBreak || [];
+    world.full.forEach(function (p, i) { var s = cam.toScreen(p); (i === 0 || br[i]) ? ctx.moveTo(s.x, s.y) : ctx.lineTo(s.x, s.y); });
     ctx.stroke(); ctx.setLineDash([]);
   }
   function drawRouteProgress(ctx, world, cam, progLen, carScreen) {
     ctx.save(); ctx.shadowColor = 'rgba(90,220,180,.55)'; ctx.shadowBlur = 22; ctx.strokeStyle = '#63d6aa'; ctx.lineWidth = 12; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    var br = world.fullBreak || [];
     var first = cam.toScreen(world.full[0]); ctx.beginPath(); ctx.moveTo(first.x, first.y);
-    for (var j = 1; j < world.full.length && world.fullCum[j] <= progLen; j++) { var s = cam.toScreen(world.full[j]); ctx.lineTo(s.x, s.y); }
-    ctx.lineTo(carScreen.x, carScreen.y); ctx.stroke(); ctx.restore();
+    for (var j = 1; j < world.full.length && world.fullCum[j] <= progLen; j++) {
+      var s = cam.toScreen(world.full[j]);
+      br[j] ? ctx.moveTo(s.x, s.y) : ctx.lineTo(s.x, s.y);   // 跨天連線斷開，不畫
+    }
+    if (carScreen) ctx.lineTo(carScreen.x, carScreen.y);
+    ctx.stroke(); ctx.restore();
+  }
+  // 換日轉場卡：置中「Day N」，隨轉場進度淡入淡出
+  function drawDayCard(ctx, W, H, day, progress) {
+    var fade = Math.max(0, Math.min(1, Math.min(progress / 0.22, (1 - progress) / 0.22)));
+    ctx.save();
+    ctx.globalAlpha = 0.5 * fade;
+    ctx.fillStyle = '#0a1214'; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = fade;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,.72)'; ctx.font = '700 46px ' + SANS;
+    ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 18;
+    ctx.fillText('第 ' + day + ' 天', W / 2, H * 0.44);
+    ctx.fillStyle = '#fff'; ctx.font = '800 168px ' + SANS;
+    ctx.fillText('DAY ' + day, W / 2, H * 0.54);
+    ctx.shadowBlur = 0; ctx.textAlign = 'left';
+    ctx.restore();
   }
   function drawStops(ctx, screenPts, reached) {
     screenPts.forEach(function (p, i) {
@@ -420,19 +457,27 @@
       titleCard(ctx, m, W, H, ca);
     } else if (tMs < timing.routeEnd) {
       drawRouteBase(ctx, world, cam);
-      drawRouteProgress(ctx, world, cam, car.progLen, carScreen);
-      drawStops(ctx, screenPts, car.reached);
-      var mode = (m.stops[Math.min(car.heading, m.stops.length - 1)].mode) || m.transportMode;
-      drawVehicle(ctx, carScreen, car.ang, mode);
-      // 到站且該站有照片 → 顯示照片（Ken Burns），此時不畫站名卡（照片自帶標題）
-      var mediaImg = (car.dwelling && media && media.byStop[car.reached]) ? media.images[car.reached] : null;
-      if (mediaImg) {
-        drawPhotoOverlay(ctx, mediaImg, W, H, car.pulse, m.stops[car.reached].name);
+      if (car.dayBreak) {
+        // 換日轉場：畫到上一天為止的進度、不畫車，蓋上「Day N」卡（鏡頭已落在隔天第一站）
+        drawRouteProgress(ctx, world, cam, car.progLen, null);
+        drawStops(ctx, screenPts, car.reached);
+        header(ctx, m, m.transportMode);
+        drawDayCard(ctx, W, H, car.day, car.breakProgress);
       } else {
-        var idx = car.dwelling ? car.reached : car.heading;
-        stopChip(ctx, m, carScreen, idx, W);
+        drawRouteProgress(ctx, world, cam, car.progLen, carScreen);
+        drawStops(ctx, screenPts, car.reached);
+        var mode = (m.stops[Math.min(car.heading, m.stops.length - 1)].mode) || m.transportMode;
+        drawVehicle(ctx, carScreen, car.ang, mode);
+        // 到站且該站有照片 → 顯示照片（Ken Burns），此時不畫站名卡（照片自帶標題）
+        var mediaImg = (car.dwelling && media && media.byStop[car.reached]) ? media.images[car.reached] : null;
+        if (mediaImg) {
+          drawPhotoOverlay(ctx, mediaImg, W, H, car.pulse, m.stops[car.reached].name);
+        } else {
+          var idx = car.dwelling ? car.reached : car.heading;
+          stopChip(ctx, m, carScreen, idx, W);
+        }
+        header(ctx, m, mode);
       }
-      header(ctx, m, mode);
     } else {
       drawRouteBase(ctx, world, cam);
       drawRouteProgress(ctx, world, cam, world.fullLen, carScreen);

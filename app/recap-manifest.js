@@ -125,16 +125,35 @@
       totalDistance += distance;
     }
 
+    // 多日行程：跨天段（前後站 dayIndex 不同）不算「開車」，改成固定時長的「換日轉場」，
+    // 且不參與 routeMs 的距離分配 —— 否則跨天長跳會吃掉全片最長動畫、還畫出一條沒開過的連線。
+    var dayTransitionMs = optionOrDefault(options, 'dayTransitionMs', 1600);
+    var breakFlags = [];
+    var drivingDistance = 0;
     for (i = 0; i < distances.length; i += 1) {
-      travelMs = totalDistance === 0
-        ? routeMs / distances.length
-        : routeMs * (distances[i] / totalDistance);
+      var isBreak = Number(sourceStops[i].dayIndex || 1) !== Number(sourceStops[i + 1].dayIndex || 1);
+      breakFlags.push(isBreak);
+      if (!isBreak) drivingDistance += distances[i];
+    }
+    var breakCount = breakFlags.filter(function (b) { return b; }).length;
+    var drivingMs = Math.max(3000, routeMs - breakCount * dayTransitionMs);
+
+    for (i = 0; i < distances.length; i += 1) {
+      if (breakFlags[i]) {
+        travelMs = dayTransitionMs;
+      } else {
+        travelMs = drivingDistance === 0
+          ? drivingMs / Math.max(1, distances.length - breakCount)
+          : drivingMs * (distances[i] / drivingDistance);
+      }
       segments.push({
         fromIndex: i,
         toIndex: i + 1,
         mode: sourceStops[i + 1].mode || sourceStops[i].mode || trip.transportMode,
         geoDistanceKm: distances[i],
         travelMs: travelMs,
+        dayBreak: breakFlags[i],
+        toDay: Number(sourceStops[i + 1].dayIndex || 1),
         points: null
       });
     }
@@ -151,6 +170,7 @@
     }
 
     var media = [];
+    var dayBreaks = [];
     if (sourceStops.length > 0) {
       arriveMs.push(coverMs);
       currentMs = coverMs;
@@ -158,6 +178,10 @@
       currentMs += holdMs[0];
 
       for (i = 0; i < segments.length; i += 1) {
+        if (segments[i].dayBreak) {
+          // 換日轉場窗：從出發（currentMs）到抵達隔天第一站
+          dayBreaks.push({ startMs: currentMs, endMs: currentMs + segments[i].travelMs, day: segments[i].toDay, toStopIndex: i + 1 });
+        }
         currentMs += segments[i].travelMs;
         arriveMs.push(currentMs);
         subtitles.push({ atMs: currentMs, stopIndex: i + 1, text: sourceStops[i + 1].name });
@@ -167,6 +191,8 @@
       }
     }
     var totalHold = holdMs.reduce(function (a, b) { return a + b; }, 0);
+    // 實際路線動畫時間（開車段＋換日轉場），可能與 routeMs 略有出入
+    var actualRouteMs = segments.reduce(function (a, s) { return a + s.travelMs; }, 0);
 
     return {
       version: 1,
@@ -189,8 +215,9 @@
         dwellMs: dwellMs,
         photoMs: photoMs,
         holdMs: holdMs,
-        totalMs: coverMs + routeMs + totalHold + statsMs,
-        arriveMs: arriveMs
+        totalMs: coverMs + actualRouteMs + totalHold + statsMs,
+        arriveMs: arriveMs,
+        dayBreaks: dayBreaks
       },
       adaptiveTier: adaptive.tier,
       media: media,
