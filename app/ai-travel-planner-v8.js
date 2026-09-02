@@ -2924,8 +2924,13 @@
   // 登入用 wai_mytrips:<email 小寫>，未登入用 wai_mytrips。修「換帳號看到前一帳號本機行程」。
   function myTripsStorageKey() {
     try {
-      let email = (typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.email) || '';
-      if (!email) {
+      let email = '';
+      if (typeof firebaseAuth !== 'undefined' && firebaseAuth && authConfirmed) {
+        // Auth 已確認：一律以 Firebase 為準——已登出就用訪客鍵，不再退回過期的 wai_user 快取
+        //（審查 Bug1：快取說 A、實際是 B 時，退回快取會讀到 A 的行程）。
+        email = (firebaseAuth.currentUser && firebaseAuth.currentUser.email) || '';
+      } else {
+        // Auth 尚未確認（或未設定 Firebase）：只能先用快取；initFromUrl 已先 await authReady 再讀
         const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
         email = (u && u.isLoggedIn && u.currentUser && u.currentUser.email) || '';
       }
@@ -2938,6 +2943,9 @@
       const params = new URLSearchParams(window.location.search);
       const explicitTripId = params.get('id') || params.get('sharedId');
       const isGuestView = params.get('guest') === '1';
+      // 先等 Firebase Auth 首次狀態確認，再決定本機鍵／讀行程——否則會依過期的 wai_user 快取
+      // 讀到前一個帳號的行程（審查 Bug1）。4s 保底不卡住。
+      await authReady;
       const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const rememberedTripId = localStorage.getItem(ACTIVE_TRIP_LOCAL_KEY) || '';
       const fallbackTripId = rememberedTripId || (myTrips[0] && myTrips[0].id) || '';
@@ -2967,7 +2975,7 @@
         // 共編行程：本機快取可能是 join 當下的空殼（stops/members 都舊）→ 一律抓最新 Firebase 為準
         if (!isGuestView && (!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
-             await authReady;   // 等 Auth 還原，否則被 rules 擋、成員重整看到 0 站（E2E #2）
+             // Auth 已在 initFromUrl 開頭 await authReady 確認過（E2E #2：成員重整不再被 rules 擋成 0 站）
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
              if (doc.exists) {
                const fresh = doc.data();
@@ -17068,8 +17076,9 @@
   // 否則 request.auth 仍是 null、被 rules 擋下 → 共編成員看到 0 站、只能從「我的微旅行」重進。
   // 逾時 4s 保底，不會卡住未設定 Firebase 的環境。
   let _authReadyResolve = null;
+  let authConfirmed = false;   // onAuthStateChanged 真的回過（非 4s 保底）→ 之後才以 Firebase Auth 為身分依據
   const authReady = new Promise((resolve) => { _authReadyResolve = resolve; setTimeout(resolve, 4000); });
-  function markAuthReady() { if (_authReadyResolve) { const r = _authReadyResolve; _authReadyResolve = null; r(); } }
+  function markAuthReady() { authConfirmed = true; if (_authReadyResolve) { const r = _authReadyResolve; _authReadyResolve = null; r(); } }
 
   function setupAuthListener() {
     if (!firebaseEnabled || !firebaseAuth) { markAuthReady(); return; }

@@ -1251,7 +1251,7 @@ async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
     });
   } catch (error) {
     clearTimeout(_idleTimer);
-    if (error && error.name === 'AbortError') throw new Error('AI 連線逾時（60s），請再試一次。');
+    if (error && error.name === 'AbortError') throw new Error('AI 連線逾時（90s），請再試一次。');
     throw error;
   }
   if (!response.ok || !response.body) {
@@ -3348,7 +3348,7 @@ async function fillTripTimeBudget(middleStops, wizardData, destination, startCoo
     let parsed; try { parsed = parsePlanJsonFromText(text); } catch (e) { break; }
     let cands = (parsed && Array.isArray(parsed.stops))
       ? parsed.stops.filter(s => s && s.name && !usedNorm.has(normalizeLookupText(s.name)))
-        .map(s => ({ name: s.name, emoji: s.emoji || '📍', desc: s.desc || '', duration: Math.max(15, Math.min(90, Number(s.duration) || 45)), businessHours: s.businessHours || null }))
+        .map(s => ({ name: s.name, emoji: s.emoji || '📍', desc: s.desc || '', duration: Math.max(15, Math.min(90, Number(s.duration) || 45)), businessHours: s.businessHours || null, dayIndex: Number(s.dayIndex) || undefined }))
       : [];
     if (!cands.length) break;
     cands = await enrichMissingCoordinates(cands, destination);
@@ -3499,7 +3499,21 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
       _mid.forEach((s, i) => { s.dayIndex = Math.max(1, Math.min(dayCount, Math.floor(i / _mid.length * dayCount) + 1)); });
     }
   }
-  return finalStops;
+  // 公休最終再過濾（審查 Bug2）：前面的 Places 驗證時，補時候選／被重建的站可能還沒有 dayIndex，
+  // 公休會退回用第 1 天判斷；等 dayIndex 在上方正規化完成後，依「該站所屬日」再檢查一次。
+  // 只信任 Google 7 行制的營業時間（≥5 段），AI 自寫的單行文字不在此處刪站，避免誤殺。
+  const dropClosed = finalStops.filter((s) => {
+    if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return true;
+    if (typeof isLodgingStop === 'function' && isLodgingStop(s)) return true;
+    const segs = String(s.businessHours).split(/\r?\n|；|;/).map((x) => x.trim()).filter(Boolean);
+    if (segs.length < 5) return true;
+    const win = extractDayHoursWindow(s.businessHours, stopServiceDate(s, wizardData));
+    return !(win && win.closed);
+  });
+  if (dropClosed.length !== finalStops.length) {
+    console.info('[公休再過濾] 依所屬日移除', finalStops.length - dropClosed.length, '站');
+  }
+  return dropClosed;
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -3606,7 +3620,8 @@ async function loadState() {
   try {
     const u = JSON.parse(localStorage.getItem('wai_user')||'{}');
     if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
-    if (isLoggedIn) migrateGuestTripsToUser();   // 依帳號隔離後，訪客行程一次性搬進帳號
+    // 注意：訪客行程的搬移（migrateGuestTripsToUser）不在這裡做——此處的 currentUser 來自可能過期的
+    // wai_user 快取；搬移是不可逆動作，必須等 Firebase Auth 確認真實帳號後才執行（見 onAuthStateChanged 登入分支）。
     likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
     ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
@@ -4627,6 +4642,9 @@ if (typeof firebase !== 'undefined') {
         startFriendsSubscriptions(user.email);
       }
       startNotifSubscription(user.email); // F1 通知中心：登入後啟動訂閱
+      // Auth 已確認真實帳號、currentUser 已指派 → 此時才把訪客行程一次性搬進該帳號
+      //（審查 Bug1：原本在 loadState 依過期的 wai_user 快取就搬，會把訪客行程搬給錯的帳號並清掉訪客鍵）。
+      migrateGuestTripsToUser();
       await loadState();
       renderUserMenu();
       renderGrid();
