@@ -119,6 +119,17 @@
   // 路線回填 transitMin 後的「顯示端」補壓縮：載入時先用估算交通做超時壓縮，
   // Google 實測交通通常更長，會把剛好壓進時限的行程再推回超時（橫幅顯示「超出規劃時間 N 分」）。
   // 這裡在路線全部回填後補跑一次壓縮——只改記憶體不存檔；使用者互動過就不再自動壓（避免蓋手動時間）。
+  // 路線回填 transitMin 後「一律」重繪行程卡（與存檔/補壓縮無關）：否則卡片的交通分鐘數停在
+  // 估算值，而時段／階段面板已是 Google 實測 → 同一段兩邊分鐘數對不上（E2E #6）。debounce 收斂多段。
+  let itineraryRerenderTimer = null;
+  function scheduleItineraryRerender() {
+    clearTimeout(itineraryRerenderTimer);
+    itineraryRerenderTimer = setTimeout(() => {
+      itineraryRerenderTimer = null;
+      try { renderItineraryDisplay(); } catch (_e) {}
+    }, 400);
+  }
+
   let routeRefitTimer = null;
   function scheduleDisplayRefit() {
     if (tripUserDirty) return;
@@ -1358,12 +1369,12 @@
   async function persistParkingRecords() {
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
     try {
-      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const index = myTrips.findIndex((trip) => trip.id === currentItineraryId);
       if (index >= 0) {
         const progress = { ...(myTrips[index].tripProgress || {}), parking: parkingRecords, parkingReports };
         myTrips[index] = { ...myTrips[index], parkingRecords, tripProgress: progress };
-        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+        localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips));
       }
     } catch (_e) {}
 
@@ -1884,9 +1895,12 @@
   function openFullTripNavigation() {
     const info = getFullTripNavigationInfo();
     if (!info) return feedbackToast('行程站點不足或缺座標，無法整趟導航', 'orange');
-    if (info.omittedStops > 0) feedbackToast(`中停點超過 Google Maps 上限，僅帶入前 9 站（省略 ${info.omittedStops} 站）`, 'orange');
-    const url = info.url;
-    window.open(url, '_blank', 'noopener');
+    // 超過上限先確認再開（原本 toast 與開啟同時發生，使用者看不到提示就跳走了；E2E #9）
+    if (info.omittedStops > 0) {
+      const ok = window.confirm(`Google Maps 最多帶 9 個中停點，這趟會省略 ${info.omittedStops} 站（只帶前 9 站）。\n仍要開啟嗎？`);
+      if (!ok) return;
+    }
+    window.open(info.url, '_blank', 'noopener');
   }
 
   window.openMapShareDialog = function() {
@@ -2678,6 +2692,12 @@
   // 端點站（起點/終點）預設停留 0；但若該端點本身是合併大景點（含子景點，如綠島起點富岡漁港
   // 一帶的富岡燈塔/地質公園），需保留停留時間才能遊覽其子景點。其餘端點維持 0。
   function resolveStopStayMin(s, fallback) {
+    // 使用者手動設定過的停留（durationLocked）一律尊重——連起/終點（如離島港口）也是。
+    // 原本起/終點無條件回 0，使得港口手動改的 15 分在重載時被清掉、再落回預設 45（E2E #3）。
+    if (s && s.durationLocked === true) {
+      const locked = Number(s.stayMin ?? s.duration);
+      if (Number.isFinite(locked) && locked >= 0) return locked;
+    }
     const isEndpoint = s && (s.type === 'start' || s.type === 'end');
     const hasMergedSubSpots = s && s.isMergedAttraction
       && Array.isArray(s.mergedSubSpots) && s.mergedSubSpots.length > 0;
@@ -2900,12 +2920,25 @@
     return text.replace(/\s+/g, ' ').trim();
   }
 
+  // 本機「我的微旅行」依帳號隔離（與 explore 頁 myTripsStorageKey 同規則）：
+  // 登入用 wai_mytrips:<email 小寫>，未登入用 wai_mytrips。修「換帳號看到前一帳號本機行程」。
+  function myTripsStorageKey() {
+    try {
+      let email = (typeof firebaseAuth !== 'undefined' && firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.email) || '';
+      if (!email) {
+        const u = JSON.parse(localStorage.getItem('wai_user') || '{}');
+        email = (u && u.isLoggedIn && u.currentUser && u.currentUser.email) || '';
+      }
+      return email ? ('wai_mytrips:' + String(email).toLowerCase()) : 'wai_mytrips';
+    } catch (_e) { return 'wai_mytrips'; }
+  }
+
   async function initFromUrl() {
     try {
       const params = new URLSearchParams(window.location.search);
       const explicitTripId = params.get('id') || params.get('sharedId');
       const isGuestView = params.get('guest') === '1';
-      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const rememberedTripId = localStorage.getItem(ACTIVE_TRIP_LOCAL_KEY) || '';
       const fallbackTripId = rememberedTripId || (myTrips[0] && myTrips[0].id) || '';
       const tripId = explicitTripId || fallbackTripId;
@@ -2934,6 +2967,7 @@
         // 共編行程：本機快取可能是 join 當下的空殼（stops/members 都舊）→ 一律抓最新 Firebase 為準
         if (!isGuestView && (!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
+             await authReady;   // 等 Auth 還原，否則被 rules 擋、成員重整看到 0 站（E2E #2）
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
              if (doc.exists) {
                const fresh = doc.data();
@@ -9431,7 +9465,7 @@
     // 保留 localStorage 中的完整 trip 物件，供 Firebase 首次建立時補齊頂層欄位
     let localTrip = null;
     try {
-      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const tripIndex = myTrips.findIndex((t) => t.id === currentItineraryId);
       if (tripIndex >= 0) {
         const patch = { 
@@ -9446,7 +9480,7 @@
         }
         myTrips[tripIndex] = patch;
         localTrip = patch;
-        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+        localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips));
       }
     } catch (e) {
       console.warn('Failed to persist trip stops to localStorage:', e);
@@ -9751,7 +9785,9 @@
         ? `<div class="replan-day-divider">第 ${stop.dayIndex} 天</div>`
         : ''}
       <div class="replan-card ${activeStopMenuId === stop.id ? 'selected' : ''}" draggable="${(collabReadOnly || stop.type === 'start' || stop.type === 'end' || (isModifyWindowOpen && modifyTargetStopId === stop.id)) ? 'false' : 'true'}" data-stop-id="${stop.id}">
-        <div class="replan-handle">⋮⋮</div>
+        ${(collabReadOnly || stop.type === 'start' || stop.type === 'end')
+          ? '<div class="replan-handle fixed" title="起點／終點是行程錨點，固定不可拖曳；中間站可拖曳或用上移／下移">📌</div>'
+          : '<div class="replan-handle" title="按住拖曳可調整順序">⋮⋮</div>'}
         <div class="replan-time">${minutesToClock(stop.start)} - ${minutesToClock(stop.end)}</div>
         <div class="replan-spot">
           <div>
@@ -9816,11 +9852,11 @@
 
   function updateLocalTripField(tripId, field, value) {
     try {
-      const myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+      const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const idx = myTrips.findIndex(t => t.id === tripId);
       if (idx >= 0) {
         myTrips[idx][field] = value;
-        localStorage.setItem('wai_mytrips', JSON.stringify(myTrips));
+        localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips));
       }
     } catch (e) {
       console.warn('Failed to update local trip field:', e);
@@ -16216,6 +16252,7 @@
               if (typeof origin.stopIndex === 'number' && replanStops[origin.stopIndex]) {
                 // 記憶體內一律更新，排程與畫面才會跟實測一致。
                 replanStops[origin.stopIndex].transitMin = legEstimate.durationMinutes;
+                scheduleItineraryRerender();   // 卡片交通文字同步到 Google 實測（E2E #6）
 
                 // ★ 寫回 Firestore 的條件維持不變：只有「使用者實際互動過」才存檔。
                 //   載入路徑必須維持只讀不寫——否則每次重新整理都會用當下路況
@@ -17027,9 +17064,17 @@
     updatePlannerNotifBadge();
   }
 
+  // Firebase Auth 還原完成的信號（E2E #2）：直接重整 Planner 時，initFromUrl 讀共編行程必須等它——
+  // 否則 request.auth 仍是 null、被 rules 擋下 → 共編成員看到 0 站、只能從「我的微旅行」重進。
+  // 逾時 4s 保底，不會卡住未設定 Firebase 的環境。
+  let _authReadyResolve = null;
+  const authReady = new Promise((resolve) => { _authReadyResolve = resolve; setTimeout(resolve, 4000); });
+  function markAuthReady() { if (_authReadyResolve) { const r = _authReadyResolve; _authReadyResolve = null; r(); } }
+
   function setupAuthListener() {
-    if (!firebaseEnabled || !firebaseAuth) return;
+    if (!firebaseEnabled || !firebaseAuth) { markAuthReady(); return; }
     firebaseAuth.onAuthStateChanged(async (user) => {
+      markAuthReady();
       if (user) {
         let name = user.displayName || user.email?.split('@')[0] || '使用者';
         let emoji = '😊';

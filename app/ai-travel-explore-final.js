@@ -796,7 +796,7 @@ function getPromptRuleLines(wizardData, mode) {
       lines.push(`16. 第一天安排 12:00-13:30 彈性午餐；最後一天若於 ${win.day2End} 前結束，午餐視結束時間彈性安排`);
       const _lodging = String(wizardData.lodgingName || '').trim();
       lines.push(_lodging
-        ? `17. 住宿錨點：住宿地點為「${_lodging}」。每天最後一站請安排在住宿附近（車程 20 分鐘內），隔天第一站由住宿出發、也從鄰近景點開始，避免每天大幅折返`
+        ? `17. 住宿錨點（必須輸出成站）：住宿地點為「${_lodging}」。除最後一天外，每天的「最後一站」必須就是這個住宿本身（name 完全等於「${_lodging}」、emoji 🏨、desc 寫「回住宿休息」、停留 0 分），隔天的「第一站」也必須是同一個住宿（desc 寫「從住宿出發」、停留 0 分）；其餘景點請安排在住宿車程 20 分鐘內，避免每天大幅折返`
         : `17. 未指定住宿：請在 reply 用一句話推薦適合的住宿區域，並讓每天最後一站鄰近該區域、隔天第一站由該區域出發`);
     }
     const dest = wizardData.dest || wizardData.destCustom || '台東';
@@ -1235,11 +1235,11 @@ async function fetchGeminiStream({ apiKey, model, payload, onChunk }) {
   const vertex = getVertexConfig();
   if (!vertex.ready) throw new Error('尚未設定 Vertex AI：請在 weather.env.js 填入 VERTEX_PROJECT_ID 與 VERTEX_API_KEY。');
   const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(vertex.apiKey)}`;
-  // 串流的逾時策略：連線階段 60s——實測 SSE 的 response headers 會等到「第一個 token」才送出，
+  // 串流的逾時策略：連線階段 90s（離島/多日大 prompt 首 token 常 >60s，E2E #8）——實測 SSE 的 response headers 會等到「第一個 token」才送出，
   // 大 prompt＋thinking 的 TTFT 可超過 30s（實測 15s/30s 都會誤殺正常請求）；此逾時只防真掛死。
   // 開始收流後不設硬限，改用「距上次 chunk 90s 無資料」的 idle 偵測 abort。
   const _streamCtrl = new AbortController();
-  let _idleTimer = setTimeout(() => _streamCtrl.abort(), 60000);
+  let _idleTimer = setTimeout(() => _streamCtrl.abort(), 90000);
   const _resetIdle = (ms) => { clearTimeout(_idleTimer); _idleTimer = setTimeout(() => _streamCtrl.abort(), ms); };
   let response;
   try {
@@ -2349,12 +2349,28 @@ function parseBusinessHoursWindow(value) {
   return { open, close };
 }
 
+// 該站所屬的實際日期：多日行程第 N 天 = 出發日 + (N-1) 天。公休檢查必須用這個，
+// 不能一律用出發日（否則第二天的站會被拿第一天的星期去判斷；E2E #5）。
+function stopServiceDate(stop, wizardData) {
+  const base = wizardData && wizardData.departureDate;
+  if (!base) return '';
+  const di = Math.max(1, Number(stop && stop.dayIndex) || 1);
+  if (di === 1) return base;
+  const d = new Date(base + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return base;
+  d.setDate(d.getDate() + (di - 1));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function extractDayHoursWindow(businessHoursStr, departureDate) {
   if (!businessHoursStr) return null;
   if (!departureDate) return parseBusinessHoursWindow(businessHoursStr);
   const jsDay = new Date(departureDate + 'T00:00:00').getDay();
   const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
-  const lines = String(businessHoursStr).split('\n');
+  // 快取餐廳（restaurant-data.js）的 businessHours 是用「；」串接、不是換行；只切 \n 會拿不到
+  // 「星期二」那一行 → 公休判不出來、公休餐廳照排（E2E #5）。兩種分隔都支援。
+  const lines = String(businessHoursStr).split(/\r?\n|；|;/).map((s) => s.trim()).filter(Boolean);
   const dayLine = lines[apiIndex];
   if (!dayLine) return parseBusinessHoursWindow(businessHoursStr);
   if (/休息|closed|不營業/i.test(dayLine)) return { closed: true, label: dayLine };
@@ -2379,7 +2395,7 @@ function applyTripPlanningRules(stops, wizardData = {}) {
     let currentMinutes = defaultStart;
 
     // 營業時間調整：若需等候且等候時長在上限內，推遲開始
-    const businessWindow = extractDayHoursWindow(normalized.businessHours, wizardData.departureDate);
+    const businessWindow = extractDayHoursWindow(normalized.businessHours, stopServiceDate(normalized, wizardData));
     if (businessWindow) {
       if (businessWindow.closed) {
         normalized.scheduleWarning = 'outside_business_hours';
@@ -2731,7 +2747,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
       if (_localHit.businessHours) {
         stop.businessHours = _localHit.businessHours;
         if (wizardData.departureDate) {
-          const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+          const dayWindow = extractDayHoursWindow(stop.businessHours, stopServiceDate(stop, wizardData));
           if (dayWindow && dayWindow.closed) return null;
         }
       }
@@ -2745,7 +2761,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
     if (stop.coordinateSource === 'google_places_matched'
         && Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))) {
       if (stop.businessHours && wizardData.departureDate) {
-        const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+        const dayWindow = extractDayHoursWindow(stop.businessHours, stopServiceDate(stop, wizardData));
         if (dayWindow && dayWindow.closed) return null; // 出發日休息 → 照舊過濾
       }
       stop.placeVerified = true;
@@ -2787,7 +2803,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
       if (Array.isArray(hours) && hours.length) {
         stop.businessHours = hours.join('\n');
         if (wizardData.departureDate) {
-          const dayWindow = extractDayHoursWindow(stop.businessHours, wizardData.departureDate);
+          const dayWindow = extractDayHoursWindow(stop.businessHours, stopServiceDate(stop, wizardData));
           if (dayWindow && dayWindow.closed) return null;
         }
       }
@@ -2869,9 +2885,20 @@ function isFoodStop(stop) {
   return FOOD_NAME_RE.test(name);
 }
 
+// 是否為「住宿站」：住宿永不參與合併——多日行程的住宿會在「前一天最後一站」與「隔天第一站」
+// 各出現一次（同名同座標），若被同名家族規則併成一站，隔天「從住宿出發」就消失（E2E #4）。
+const LODGING_NAME_RE = /民宿|飯店|旅館|旅宿|旅店|汽車旅館|客棧|青年旅|渡假村|度假村|hotel|hostel|motel|resort/i;
+function isLodgingStop(stop) {
+  if (!stop) return false;
+  if (stop.type === 'lodging') return true;
+  if (String(stop.emoji || '').trim() === '🏨') return true;
+  return LODGING_NAME_RE.test(String(stop.name || stop.title || ''));
+}
+
 // 是否該歸入同一大景區（以距離為主）
 function shouldClusterStops(a, b) {
   if (isFoodStop(a) || isFoodStop(b)) return false; // 餐廳閘門：用餐站不與他站合併
+  if (isLodgingStop(a) || isLodgingStop(b)) return false; // 住宿閘門：住宿站不與他站合併（含同名的隔日住宿站）
   const ca = getStopCoordinate(a);
   const cb = getStopCoordinate(b);
   if (ca && cb) {
@@ -3060,6 +3087,7 @@ async function enrichBigAttractionSubSpots(stops, destination) {
   const _passesGate = (stop) => {
     if (!stop || stop.type === 'start' || stop.type === 'end') return false;
     if (isFoodStop(stop)) return false; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
+    if (isLodgingStop(stop)) return false; // 住宿閘門：住宿站不被標為合併大景點、不補子景點（E2E #4）
     if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) return false; // 交通樞紐閘門
     return !!getStopCoordinate(stop);
   };
@@ -3535,23 +3563,54 @@ function serializeTripForStorage(trip) {
   return rest;
 }
 
+// 本機「我的微旅行」依帳號隔離：登入用 wai_mytrips:<email 小寫>，未登入（訪客）用 wai_mytrips。
+// 修「同一個 Chrome Profile 換帳號登入，會看到前一個帳號的本機行程」（E2E #1，隱私風險）。
+// planner 頁的 myTripsStorageKey 必須同規則。
+function myTripsStorageKey() {
+  try {
+    const email = (currentUser && currentUser.email) || '';
+    return email ? ('wai_mytrips:' + String(email).toLowerCase()) : 'wai_mytrips';
+  } catch (_e) { return 'wai_mytrips'; }
+}
+// 訪客期間建立的行程，在登入後搬進該帳號（一次性）；帶有「其他人 ownerEmail」的一律不搬，避免舊資料外洩。
+function migrateGuestTripsToUser() {
+  try {
+    const key = myTripsStorageKey();
+    if (key === 'wai_mytrips') return;
+    const guest = JSON.parse(localStorage.getItem('wai_mytrips') || '[]');
+    if (!Array.isArray(guest) || !guest.length) return;
+    const me = String((currentUser && currentUser.email) || '').toLowerCase();
+    const mine = JSON.parse(localStorage.getItem(key) || '[]');
+    const ids = new Set(mine.map(t => t && t.id));
+    const keep = [];
+    guest.forEach(t => {
+      const owner = String((t && t.ownerEmail) || '').toLowerCase();
+      if (owner && owner !== me) { keep.push(t); return; }   // 別人的：留在訪客鍵、不搬
+      if (t && !ids.has(t.id)) { mine.push(t); ids.add(t.id); }
+    });
+    localStorage.setItem(key, JSON.stringify(mine));
+    localStorage.setItem('wai_mytrips', JSON.stringify(keep));
+  } catch (_e) {}
+}
+
 function saveState() {
   try {
     localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
     localStorage.setItem('wai_likes', JSON.stringify([...likedTrips]));
     localStorage.setItem('wai_ratings', JSON.stringify(ratedTrips));
     localStorage.setItem('wai_copied', JSON.stringify(copiedTrips));
-    localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+    localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
   } catch(e){}
 }
 async function loadState() {
   try {
     const u = JSON.parse(localStorage.getItem('wai_user')||'{}');
     if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
+    if (isLoggedIn) migrateGuestTripsToUser();   // 依帳號隔離後，訪客行程一次性搬進帳號
     likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
     ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
-    myTrips = JSON.parse(localStorage.getItem('wai_mytrips')||'[]').map(serializeTripForStorage);
+    myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey())||'[]').map(serializeTripForStorage);
     
     // 必須等 firebaseAuth.currentUser 真的就緒才查 Firestore：開機時 localStorage 說「已登入」
     // 但 Auth token 尚未還原（request.auth=null），查詢會被安全規則擋下、噴 permission 錯誤。
@@ -3585,7 +3644,7 @@ async function loadState() {
               }
            });
            myTrips = mergedTrips;
-           localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+           localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
            if (document.getElementById('myTripsView').style.display !== 'none') {
              renderMyTrips();
            }
@@ -3600,7 +3659,7 @@ async function loadState() {
            const collabTrips = await WAI_COLLAB.fetchMyCollabTrips(currentUser.email);
            collabTrips.forEach(t => upsertCollabTripLocal(t));
            startMyCollabTripsLiveSync(currentUser.email);
-          localStorage.setItem('wai_mytrips', JSON.stringify(myTrips.map(serializeTripForStorage)));
+          localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
           renderSideMyTrips();
           const mtv = document.getElementById('myTripsView');
           if (mtv && mtv.style.display !== 'none') renderMyTrips();
@@ -4584,6 +4643,10 @@ if (typeof firebase !== 'undefined') {
       isLoggedIn = false;
       currentUser = null;
       localStorage.removeItem('wai_user');
+      // 依帳號隔離後：此刻記憶體裡的 myTrips 仍是剛登出帳號的，直接 saveState 會寫進「訪客鍵」
+      // 反向外洩給下一個登入者。改成先讀回訪客鍵的內容，再存（等於不動訪客資料）。
+      try { myTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]').map(serializeTripForStorage); }
+      catch (_e) { myTrips = []; }
       saveState();
       renderUserMenu();
       renderGrid();
@@ -4900,7 +4963,9 @@ function renderMyTrips() {
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
-          <button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>
+          ${(t.collab && t.role !== 'owner')
+            ? `<button class="mt-action-btn delete" title="退出共編（不會刪除擁有者的行程）" aria-label="退出共編" onclick="deleteMyTrip('${t.id}')">🚪</button>`
+            : `<button class="mt-action-btn delete" title="刪除行程" aria-label="刪除行程" onclick="deleteMyTrip('${t.id}')">🗑</button>`}
         </div>
       </div>
     </div>`).join('');
@@ -5062,6 +5127,13 @@ async function renameMyTrip(id) {
 
 async function deleteMyTrip(id) {
   const t = myTrips.find(x => x.id === id);
+  // 共編成員按的是「退出」不是「刪除」——語意要清楚、且要有確認（E2E #10）
+  const isLeave = !!(t && t.collab && t.role !== 'owner');
+  const tripName = (t && (t.title || t.name)) || '';
+  const msg = isLeave
+    ? `要退出共編行程「${tripName}」嗎？\n退出後你將不再看到此行程；擁有者的行程不會被刪除。`
+    : `確定要刪除行程「${tripName}」嗎？此動作無法復原。`;
+  if (!window.confirm(msg)) return;
   myTrips = myTrips.filter(x => x.id !== id);
   if (collabState && collabState.tripId === id) closeCollabPanel(); // 刪到正在看的就先關面板
   saveState(); renderMyTrips(); renderSideMyTrips();

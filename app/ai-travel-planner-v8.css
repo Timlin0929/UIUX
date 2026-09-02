@@ -560,7 +560,10 @@ body.prototype-mode .prototype-id-chip {
   color: var(--ink3);
   text-align: center;
   user-select: none;
+  cursor: grab;
 }
+/* 起點／終點錨點：不可拖曳，把手改成固定圖示，不再誤導使用者去拖（E2E #7） */
+.replan-handle.fixed { cursor: default; opacity: .7; }
 
 .replan-time {
   font-size: 12px;
