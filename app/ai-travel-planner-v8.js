@@ -9725,15 +9725,13 @@
     const hours = String(stop.businessHours || '').trim();
     if (!hours || hours === '24小時') return '';
     const departureDate = getStopServiceDate(stop);
-    let checkLine = hours.split('\n')[0] || hours;
-    if (departureDate) {
-      const serviceDate = new Date(departureDate + 'T00:00:00');
-      const jsDay = serviceDate.getDay();
-      const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
-      const lines = hours.split('\n');
-      if (lines[apiIndex]) checkLine = lines[apiIndex];
-      if (/休息|closed|不營業/i.test(checkLine)) return '⚠️ 當天公休';
-    }
+    // 與主行程卡、explore 端同一個解析來源（business-hours.js）。原本這裡另用 lines[jsDay-1]
+    // 固定索引，會和主卡對同一家店給出相反結論（重排畫面說公休、主卡說營業）。
+    const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+    const st = H ? H.parseDayStatus(hours, departureDate) : { status: 'unknown', label: '' };
+    if (st.status === 'closed') return '⚠️ 當天公休';
+    if (st.status === 'unknown') return '';   // 資訊不足 → 不顯示警告，也不臆測時段
+    let checkLine = st.label;
     const window = parseBusinessHoursWindow(checkLine);
     if (!window) return '';
     const { open, close } = window;
@@ -16419,23 +16417,17 @@
   // 取「該日」的營業時間字串。依「星期X」標籤比對，不用固定索引——原本假設一定是
   // 「週一起 7 行」，遇到週日起或缺行的資料會顯示錯誤的那一天（與 explore 端的
   // extractDayHoursWindow 同口徑，兩邊對同一家店必須給出同一個答案）。
+  // 顯示「該日」的營業時間。解析委派給全站唯一來源 business-hours.js，與 explore 端同口徑。
+  // 注意：unknown 時只顯示第一段當概覽，且**不可**用 🕐（會把寫著「休息」的行誤示為營業）——
+  // 改用中性的 ℹ️，並保留原字讓使用者自己判讀。回傳值會進 innerHTML，故一律 escapeHtml。
   function formatDayBusinessHours(businessHoursStr, departureDate) {
     if (!businessHoursStr) return '';
-    const lines = String(businessHoursStr).split(/\r?\n|；|;/).map((s) => s.trim()).filter(Boolean);
-    if (departureDate) {
-      const jsDay = new Date(departureDate + 'T00:00:00').getDay();
-      const DAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-      const ALT_LABELS = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
-      const EN_LABELS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-      const hasLabels = lines.some((l) => DAY_LABELS.some((d) => l.includes(d)) || ALT_LABELS.some((d) => l.includes(d))
-        || EN_LABELS.some((d) => l.toLowerCase().includes(d)));
-      const dayLine = hasLabels
-        ? lines.find((l) => l.includes(DAY_LABELS[jsDay]) || l.includes(ALT_LABELS[jsDay])
-          || l.toLowerCase().includes(EN_LABELS[jsDay]))
-        : lines[jsDay === 0 ? 6 : jsDay - 1];
-      if (dayLine) return /休息|closed|不營業/i.test(dayLine) ? '🔴 ' + dayLine : '🕐 ' + dayLine;
-    }
-    return '🕐 ' + (lines[0] || businessHoursStr);
+    const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+    const segs = H ? H.splitSegments(businessHoursStr) : String(businessHoursStr).split(/\r?\n|；|;/);
+    const st = H ? H.parseDayStatus(businessHoursStr, departureDate) : { status: 'unknown', label: '' };
+    if (st.status === 'closed') return '🔴 ' + escapeHtml(st.label);
+    if (st.status === 'open') return '🕐 ' + escapeHtml(st.label);
+    return 'ℹ️ ' + escapeHtml(segs[0] || String(businessHoursStr));
   }
 
   function showPinInfo(pinId) {

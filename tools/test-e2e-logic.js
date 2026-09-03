@@ -62,7 +62,12 @@ function makeSandbox(extra) {
     currentUser: null,
     console,
     JSON, Math, Number, String, Boolean, Array, Object, Date, RegExp, Set, Map, isNaN, parseInt, parseFloat,
-    serializeTripForStorage: (t) => t   // 測試用：不改形狀
+    serializeTripForStorage: (t) => t,   // 測試用：不改形狀
+    // 真實依賴：解析器必須是 app 內同一支，否則測到的是 fallback 而不是實際路徑
+    WAI_HOURS: require(path.join(__dirname, '..', 'app', 'business-hours.js')),
+    escapeHtml: (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
   }, extra || {});
   vm.createContext(ctx);
   return ctx;
@@ -153,7 +158,8 @@ check('缺 departureDate → 空字串', ctx.stopServiceDate({ dayIndex: 2 }, {}
 // ══════════════════════════════════════════════════════════════
 section('3. 生成末端公休過濾：空白天 / 時間空檔 / 刪過頭');
 
-// 複製 app 末端的公休處理（現為「只標記、不刪站」，與 ai-travel-explore-final.js 一致）
+// 注意：這是 app 末端公休處理的鏡像。它與 app 本尊分歧時測試會失去意義，
+// 因此下方 section 6 有一致性守門（比對 app 原始碼仍是「標記」而非「刪站」）。
 function markClosed(finalStops, wizardData) {
   finalStops.forEach((s) => {
     if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return;
@@ -286,6 +292,64 @@ check('兩端公休結論一致（' + crossChecked + ' 天次）', crossMismatch
 // 週日起格式：兩端都必須答對
 check('週日起格式：planner 星期一不顯示公休', !pctx.formatDayBusinessHours(SUNDAY_FIRST, '2026-08-31').startsWith('🔴'));
 check('週日起格式：planner 星期日顯示公休', pctx.formatDayBusinessHours(SUNDAY_FIRST, '2026-09-06').startsWith('🔴'));
+
+// ══════════════════════════════════════════════════════════════
+section('6. 共用解析器 business-hours.js（全站唯一來源）');
+const H = require(path.join(APP, 'business-hours.js'));
+
+// 區間標籤
+const RANGE_CLOSED = '星期一至星期五: 休息\n星期六: 09:00 – 17:00\n星期日: 09:00 – 17:00';
+check('區間標籤：星期二（區間內）判為公休', H.parseDayStatus(RANGE_CLOSED, '2026-09-01').status === 'closed',
+  H.parseDayStatus(RANGE_CLOSED, '2026-09-01').status);
+check('區間標籤：星期六（區間外）判為營業', H.parseDayStatus(RANGE_CLOSED, '2026-09-05').status === 'open');
+check('區間標籤：週一~週五 寫法也支援',
+  H.parseDayStatus('週一~週五: 休息\n週六: 09:00 – 17:00\n週日: 休息', '2026-09-02').status === 'closed');
+check('跨週區間：週五至週一 涵蓋星期日',
+  H.parseDayStatus('星期五至星期一: 休息', '2026-09-06').status === 'closed');
+
+// 英文與縮寫
+check('英文全名', H.parseDayStatus('Monday: Closed\nTuesday: 09:00 – 17:00', '2026-08-31').status === 'closed');
+check('英文縮寫 Mon/Tue', H.parseDayStatus('Mon: Closed\nTue: 09:00 – 17:00', '2026-08-31').status === 'closed');
+check('英文縮寫不誤判他日', H.parseDayStatus('Mon: Closed\nTue: 09:00 – 17:00', '2026-09-01').status === 'open');
+
+// 有標籤但缺當天 → unknown（不臆測）
+check('有標籤但缺當天 → unknown', H.parseDayStatus('星期日: 休息\n星期一: 09:00 – 17:00', '2026-09-02').status === 'unknown');
+// 無標籤且非 7 段 → unknown
+check('無標籤單行 → unknown', H.parseDayStatus('每日 09:00-18:00，週三休息', '2026-09-02').status === 'unknown');
+// 無標籤但剛好 7 段 → 允許週一起推測
+check('無標籤 7 段 → 週一起推測', H.parseDayStatus('休息\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00', '2026-08-31').status === 'closed');
+check('缺日期 → unknown', H.parseDayStatus('星期一: 休息', '').status === 'unknown');
+
+// 真實資料仍全對
+let sharedMismatch = 0;
+withHours.forEach((r) => {
+  const lines = r.businessHours.split('\n');
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(base + 'T00:00:00'); d.setDate(d.getDate() + i);
+    const st = H.parseDayStatus(r.businessHours, isoLocal(d));
+    const lineClosed = /休息|closed|不營業/i.test(lines[i]);
+    if (lineClosed !== (st.status === 'closed')) sharedMismatch++;
+  }
+});
+check('共用解析器對真實資料 637 天次全對', sharedMismatch === 0, sharedMismatch + ' 筆不一致');
+
+// 三處呼叫端都已委派給共用解析器（防止有人再寫第四份）
+const ESRC = SRC, PSRC2 = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+check('explore extractDayHoursWindow 委派共用解析器', /extractDayHoursWindow[\s\S]{0,600}?WAI_HOURS/.test(ESRC));
+check('planner formatDayBusinessHours 委派共用解析器', /formatDayBusinessHours[\s\S]{0,600}?WAI_HOURS/.test(PSRC2));
+check('planner getBusinessHoursWarning 委派共用解析器', /getBusinessHoursWarning[\s\S]{0,600}?WAI_HOURS/.test(PSRC2));
+check('已無殘留的 lines[apiIndex] 固定索引解析', !/const apiIndex[\s\S]{0,200}?lines\[apiIndex\]/.test(PSRC2));
+
+// 末端處理必須是「標記」不是「刪站」（避免 app 改回刪站而測試仍綠）
+check('app 末端仍為標記而非刪站', /scheduleWarning = 'closed_today'/.test(ESRC) && !/dropClosed/.test(ESRC));
+
+// 無 Firebase 時不得清空訪客鍵（改為合併顯示）
+check('無 Firebase 分支不呼叫不可逆搬移',
+  !/typeof firebase === 'undefined' \|\| !firebaseEnabled\) migrateGuestTripsToUser/.test(ESRC));
+check('無 Firebase 時改為合併顯示訪客行程', /合併顯示|guestTrips/.test(ESRC));
+
+// formatDayBusinessHours 輸出需 escapeHtml（會進 innerHTML）
+check('formatDayBusinessHours 輸出經 escapeHtml', /formatDayBusinessHours[\s\S]{0,800}?escapeHtml/.test(PSRC2));
 
 // ══════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════');

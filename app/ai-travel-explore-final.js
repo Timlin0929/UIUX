@@ -2366,34 +2366,14 @@ function stopServiceDate(stop, wizardData) {
 function extractDayHoursWindow(businessHoursStr, departureDate) {
   if (!businessHoursStr) return null;
   if (!departureDate) return parseBusinessHoursWindow(businessHoursStr);
-  const jsDay = new Date(departureDate + 'T00:00:00').getDay();
-  const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
-  // 分隔符同時支援換行與分號（不同來源格式不一）。
-  const lines = String(businessHoursStr).split(/\r?\n|；|;/).map((s) => s.trim()).filter(Boolean);
-  // ★ 依「星期X」標籤比對，不用固定索引：原本假設一定是「週一起 7 行」，
-  //   遇到週日起或缺行的資料會整個對錯日子——雙向都錯（把營業日誤判公休、真公休漏掉）。
-  //   有標籤就用標籤；完全沒有標籤才退回舊的索引推測。
-  const DAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-  const ALT_LABELS = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
-  const EN_LABELS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  let dayLine = null;
-  const hasLabels = lines.some((l) => DAY_LABELS.some((d) => l.includes(d)) || ALT_LABELS.some((d) => l.includes(d))
-    || EN_LABELS.some((d) => l.toLowerCase().includes(d)));
-  if (hasLabels) {
-    dayLine = lines.find((l) => l.includes(DAY_LABELS[jsDay]) || l.includes(ALT_LABELS[jsDay])
-      || l.toLowerCase().includes(EN_LABELS[jsDay])) || null;
-    if (!dayLine) return null;   // 有標籤卻沒有這天 → 資訊不足，不臆測
-  } else {
-    dayLine = lines[apiIndex];
-  }
-  if (!dayLine) return parseBusinessHoursWindow(businessHoursStr);
-  if (/休息|closed|不營業/i.test(dayLine)) return { closed: true, label: dayLine };
-  const match = dayLine.match(/(\d{1,2}):(\d{2})\s*[–\-~]+\s*(\d{1,2}):(\d{2})/);
-  if (!match) return null;
-  const open = Number(match[1]) * 60 + Number(match[2]);
-  const close = Number(match[3]) * 60 + Number(match[4]);
-  if (!Number.isFinite(open) || !Number.isFinite(close)) return null;
-  return { open, close: close < open ? close + 1440 : close, closed: false, label: dayLine };
+  // 解析一律委派給全站唯一來源 business-hours.js（window.WAI_HOURS），避免各畫面各自解析
+  // 而對同一家店給出不同答案。unknown 一律回 null＝「資訊不足」，呼叫端不得據以判公休。
+  const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+  if (!H) return parseBusinessHoursWindow(businessHoursStr);
+  const st = H.parseDayStatus(businessHoursStr, departureDate);
+  if (st.status === 'closed') return { closed: true, label: st.label };
+  if (st.status === 'open') return { open: st.open, close: st.close, closed: false, label: st.label };
+  return null;
 }
 
 function applyTripPlanningRules(stops, wizardData = {}) {
@@ -3638,15 +3618,22 @@ async function loadState() {
   try {
     const u = JSON.parse(localStorage.getItem('wai_user')||'{}');
     if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
-    // 訪客行程搬移的時機：正常情況等 Firebase Auth 確認真實帳號後才做（見 onAuthStateChanged 登入分支），
-    // 因為搬移不可逆、依過期快取會搬給錯的帳號。
-    // 但 Firebase 不可用時（CDN 沒載到／離線）永遠不會有 auth callback，若完全不搬，
-    // 訪客鍵裡的行程會在畫面上「消失」——此時退而求其次，用快取身分搬（沒有更好的來源）。
-    if (isLoggedIn && (typeof firebase === 'undefined' || !firebaseEnabled)) migrateGuestTripsToUser();
+    // 訪客行程搬移「只在 Firebase Auth 確認真實帳號後」做（見 onAuthStateChanged 登入分支）——
+    // 搬移會清空訪客鍵、不可逆，依過期快取身分搬會把行程送給錯的帳號、之後也搬不回來。
     likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
     ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
     myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey())||'[]').map(serializeTripForStorage);
+    // Firebase 不可用時（CDN 未載入／離線）不會有 auth callback，也就不會有搬移。
+    // 這時只「合併顯示」訪客鍵的行程，不寫入、不清空——使用者看得到，資料歸屬也還沒被決定，
+    // 等真的登入確認身分後再由 migrateGuestTripsToUser() 做不可逆的搬移。
+    if (isLoggedIn && (typeof firebase === 'undefined' || !firebaseEnabled)) {
+      try {
+        const guestTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]').map(serializeTripForStorage);
+        const seen = new Set(myTrips.map((t) => t && t.id));
+        guestTrips.forEach((t) => { if (t && !seen.has(t.id)) { myTrips.push(t); seen.add(t.id); } });
+      } catch (_e) {}
+    }
     
     // 必須等 firebaseAuth.currentUser 真的就緒才查 Firestore：開機時 localStorage 說「已登入」
     // 但 Auth token 尚未還原（request.auth=null），查詢會被安全規則擋下、噴 permission 錯誤。
