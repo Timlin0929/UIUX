@@ -27,6 +27,9 @@
   var EN = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   var EN3 = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
   var CLOSED_RE = /休息|公休|closed|不營業|休業/i;
+  // 「24 小時營業」沒有時間區間，但語意明確＝全天營業，不可判成 unknown
+  // 涵蓋「24 小時營業」「全天候開放」「全天開放」「終年開放」等（戶外景點大量使用）
+  var ALLDAY_RE = /24\s*小時|全天候?(?:營業|開放)?|全年無休|終年開放|open\s*24|24\s*hours?/i;
   var RANGE_SEP = /\s*(?:至|到|~|～|-|–|—|through|to)\s*/;
 
   function splitSegments(str) {
@@ -80,6 +83,19 @@
     return atHead >= 0 ? [atHead] : [];
   }
 
+  // 這段文字裡「有沒有出現任何星期字樣」（不限段首）。用來辨識「每日…，週三休息」這類
+  // 各天不同的自由寫法——它不能被當成「每天都一樣」。
+  function mentionsAnyDay(seg) {
+    var t = String(seg || '');
+    var tl = t.toLowerCase();
+    for (var i = 0; i < 7; i++) {
+      if (t.indexOf(ZH[i]) >= 0 || t.indexOf(ZH2[i]) >= 0 || t.indexOf(ZH3[i]) >= 0) return true;
+      if (tl.indexOf(EN[i]) >= 0) return true;
+      if (new RegExp('\\b' + EN3[i] + '\\b').test(tl)) return true;
+    }
+    return false;
+  }
+
   function parseTimeWindow(seg) {
     var m = String(seg || '').match(/(\d{1,2}):(\d{2})\s*[–\-~～]+\s*(\d{1,2}):(\d{2})/);
     if (!m) return null;
@@ -117,11 +133,19 @@
       if (seg === null) return UNKNOWN;   // 有標籤卻沒有這一天 → 不臆測
     } else if (segs.length === 7) {
       seg = segs[jsDay === 0 ? 6 : jsDay - 1];   // 無標籤但剛好 7 段 → 週一起推測
+    } else if (segs.length === 1) {
+      // 單段且無星期標籤（如「10:00–22:00」「24 小時營業」「全天候開放」）＝每天適用。
+      // 但若句中「提及」某個星期（如「每日 09:00-18:00，週三休息」），代表各天並不相同，
+      // 而這種自由文字無法可靠拆出每天狀態 → 一律 unknown，不可把整句套到每一天
+      //（否則星期一也會因為句中有「休息」二字被誤判公休）。
+      if (mentionsAnyDay(segs[0])) return { status: 'unknown', label: segs[0] };
+      seg = segs[0];
     } else {
       return UNKNOWN;
     }
 
     if (CLOSED_RE.test(seg)) return { status: 'closed', label: seg };
+    if (ALLDAY_RE.test(seg)) return { status: 'open', label: seg, open: 0, close: 1440 };
     var win = parseTimeWindow(seg);
     if (!win) return { status: 'unknown', label: seg };
     return { status: 'open', label: seg, open: win.open, close: win.close };

@@ -314,8 +314,12 @@ check('英文縮寫不誤判他日', H.parseDayStatus('Mon: Closed\nTue: 09:00 �
 
 // 有標籤但缺當天 → unknown（不臆測）
 check('有標籤但缺當天 → unknown', H.parseDayStatus('星期日: 休息\n星期一: 09:00 – 17:00', '2026-09-02').status === 'unknown');
-// 無標籤且非 7 段 → unknown
-check('無標籤單行 → unknown', H.parseDayStatus('每日 09:00-18:00，週三休息', '2026-09-02').status === 'unknown');
+// 混合單行（句中提及星期）→ unknown，不可誤判成該星期專屬
+check('混合單行（句中提及星期）→ unknown', H.parseDayStatus('每日 09:00-18:00，週三休息', '2026-09-02').status === 'unknown');
+check('自由描述 → unknown', H.parseDayStatus('開放時間依部落為主', '2026-09-02').status === 'unknown');
+check('「未知」→ unknown', H.parseDayStatus('未知', '2026-09-02').status === 'unknown');
+check('全天候開放 → open', H.parseDayStatus('全天候開放', '2026-09-02').status === 'open');
+check('全天開放 → open', H.parseDayStatus('全天開放', '2026-09-02').status === 'open');
 // 無標籤但剛好 7 段 → 允許週一起推測
 check('無標籤 7 段 → 週一起推測', H.parseDayStatus('休息\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00\n09:00-17:00', '2026-08-31').status === 'closed');
 check('缺日期 → unknown', H.parseDayStatus('星期一: 休息', '').status === 'unknown');
@@ -332,6 +336,37 @@ withHours.forEach((r) => {
   }
 });
 check('共用解析器對真實資料 637 天次全對', sharedMismatch === 0, sharedMismatch + ' 筆不一致');
+
+// 24 小時營業 / 單行無標籤：語意明確，不可判 unknown（景點資料大量使用這兩種寫法）
+check('24 小時營業 → open', H.parseDayStatus('星期一: 24 小時營業\n星期二: 24 小時營業\n星期三: 24 小時營業\n星期四: 24 小時營業\n星期五: 24 小時營業\n星期六: 24 小時營業\n星期日: 24 小時營業', '2026-09-02').status === 'open');
+check('單行時間（無星期標籤）→ 每天適用 open', H.parseDayStatus('10:00–22:00', '2026-09-02').status === 'open');
+check('單行時間在任一天皆 open', H.parseDayStatus('10:00–22:00', '2026-09-06').status === 'open');
+check('單行「休息」仍判 closed', H.parseDayStatus('休息', '2026-09-02').status === 'closed');
+check('Open 24 hours → open', H.parseDayStatus('Open 24 hours', '2026-09-02').status === 'open');
+
+// 真實景點資料（poi-data.js）：不可有大量 unknown，否則畫面會退化成 ℹ️ 概覽
+(function () {
+  const c = { window: {} };
+  vm.createContext(c);
+  vm.runInContext(fs.readFileSync(path.join(APP, 'poi-data.js'), 'utf8'), c);
+  const d = c.window.WAI_POI_DATA || {};
+  let pois = [];
+  Object.keys(d).filter((k) => Array.isArray(d[k])).forEach((k) => { pois = pois.concat(d[k]); });
+  const wh = pois.filter((p) => p && p.businessHours);
+  let unknown = 0, total = 0;
+  wh.forEach((p) => {
+    for (let i = 0; i < 7; i++) {
+      const dt = new Date(base + 'T00:00:00'); dt.setDate(dt.getDate() + i);
+      total++;
+      if (H.parseDayStatus(p.businessHours, isoLocal(dt)).status === 'unknown') unknown++;
+    }
+  });
+  // 剩下的 unknown 應只有「未知／預約制／依部落為主」這類自由描述——本來就無法判日別，
+  // 顯示 ℹ️ 概覽是正確行為。門檻設 5%：超過代表又有可解析的樣態被漏掉。
+  const rate = total ? (unknown / total) : 0;
+  check('真實景點資料 unknown 比例 <5%（' + unknown + '/' + total + '）', rate < 0.05,
+    (rate * 100).toFixed(1) + '% 判為 unknown → 畫面會退化成 ℹ️ 概覽');
+})();
 
 // 三處呼叫端都已委派給共用解析器（防止有人再寫第四份）
 const ESRC = SRC, PSRC2 = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
