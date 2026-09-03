@@ -2945,7 +2945,8 @@
       const isGuestView = params.get('guest') === '1';
       // 先等 Firebase Auth 首次狀態確認，再決定本機鍵／讀行程——否則會依過期的 wai_user 快取
       // 讀到前一個帳號的行程（審查 Bug1）。4s 保底不卡住。
-      await authReady;
+      // 訪客連結例外：它只走後端 shareToken、完全不需要 Auth，不該被 Auth 慢／離線拖到 4 秒。
+      if (!isGuestView) await authReady;
       const myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey()) || '[]');
       const rememberedTripId = localStorage.getItem(ACTIVE_TRIP_LOCAL_KEY) || '';
       const fallbackTripId = rememberedTripId || (myTrips[0] && myTrips[0].id) || '';
@@ -16415,14 +16416,24 @@
   // ── 行程標點導覽資料與邏輯 ──
   const pinData = {};
 
+  // 取「該日」的營業時間字串。依「星期X」標籤比對，不用固定索引——原本假設一定是
+  // 「週一起 7 行」，遇到週日起或缺行的資料會顯示錯誤的那一天（與 explore 端的
+  // extractDayHoursWindow 同口徑，兩邊對同一家店必須給出同一個答案）。
   function formatDayBusinessHours(businessHoursStr, departureDate) {
     if (!businessHoursStr) return '';
-    const lines = String(businessHoursStr).split('\n');
+    const lines = String(businessHoursStr).split(/\r?\n|；|;/).map((s) => s.trim()).filter(Boolean);
     if (departureDate) {
       const jsDay = new Date(departureDate + 'T00:00:00').getDay();
-      const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
-      const dayLine = lines[apiIndex];
-      if (dayLine) return /休息|closed/i.test(dayLine) ? '🔴 ' + dayLine : '🕐 ' + dayLine;
+      const DAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+      const ALT_LABELS = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+      const EN_LABELS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const hasLabels = lines.some((l) => DAY_LABELS.some((d) => l.includes(d)) || ALT_LABELS.some((d) => l.includes(d))
+        || EN_LABELS.some((d) => l.toLowerCase().includes(d)));
+      const dayLine = hasLabels
+        ? lines.find((l) => l.includes(DAY_LABELS[jsDay]) || l.includes(ALT_LABELS[jsDay])
+          || l.toLowerCase().includes(EN_LABELS[jsDay]))
+        : lines[jsDay === 0 ? 6 : jsDay - 1];
+      if (dayLine) return /休息|closed|不營業/i.test(dayLine) ? '🔴 ' + dayLine : '🕐 ' + dayLine;
     }
     return '🕐 ' + (lines[0] || businessHoursStr);
   }
@@ -17078,12 +17089,14 @@
   let _authReadyResolve = null;
   let authConfirmed = false;   // onAuthStateChanged 真的回過（非 4s 保底）→ 之後才以 Firebase Auth 為身分依據
   const authReady = new Promise((resolve) => { _authReadyResolve = resolve; setTimeout(resolve, 4000); });
-  function markAuthReady() { authConfirmed = true; if (_authReadyResolve) { const r = _authReadyResolve; _authReadyResolve = null; r(); } }
+  // confirmed=true 只有「onAuthStateChanged 真的回呼」時才傳；沒有 Firebase 或 4s 保底只 resolve，
+  // 不可宣稱 Auth 已確認（否則之後若改以 authConfirmed 決定信任來源會誤判）。
+  function markAuthReady(confirmed) { if (confirmed) authConfirmed = true; if (_authReadyResolve) { const r = _authReadyResolve; _authReadyResolve = null; r(); } }
 
   function setupAuthListener() {
-    if (!firebaseEnabled || !firebaseAuth) { markAuthReady(); return; }
+    if (!firebaseEnabled || !firebaseAuth) { markAuthReady(false); return; }
     firebaseAuth.onAuthStateChanged(async (user) => {
-      markAuthReady();
+      markAuthReady(true);
       if (user) {
         let name = user.displayName || user.email?.split('@')[0] || '使用者';
         let emoji = '😊';

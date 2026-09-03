@@ -2368,10 +2368,24 @@ function extractDayHoursWindow(businessHoursStr, departureDate) {
   if (!departureDate) return parseBusinessHoursWindow(businessHoursStr);
   const jsDay = new Date(departureDate + 'T00:00:00').getDay();
   const apiIndex = jsDay === 0 ? 6 : jsDay - 1;
-  // 快取餐廳（restaurant-data.js）的 businessHours 是用「；」串接、不是換行；只切 \n 會拿不到
-  // 「星期二」那一行 → 公休判不出來、公休餐廳照排（E2E #5）。兩種分隔都支援。
+  // 分隔符同時支援換行與分號（不同來源格式不一）。
   const lines = String(businessHoursStr).split(/\r?\n|；|;/).map((s) => s.trim()).filter(Boolean);
-  const dayLine = lines[apiIndex];
+  // ★ 依「星期X」標籤比對，不用固定索引：原本假設一定是「週一起 7 行」，
+  //   遇到週日起或缺行的資料會整個對錯日子——雙向都錯（把營業日誤判公休、真公休漏掉）。
+  //   有標籤就用標籤；完全沒有標籤才退回舊的索引推測。
+  const DAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+  const ALT_LABELS = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+  const EN_LABELS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  let dayLine = null;
+  const hasLabels = lines.some((l) => DAY_LABELS.some((d) => l.includes(d)) || ALT_LABELS.some((d) => l.includes(d))
+    || EN_LABELS.some((d) => l.toLowerCase().includes(d)));
+  if (hasLabels) {
+    dayLine = lines.find((l) => l.includes(DAY_LABELS[jsDay]) || l.includes(ALT_LABELS[jsDay])
+      || l.toLowerCase().includes(EN_LABELS[jsDay])) || null;
+    if (!dayLine) return null;   // 有標籤卻沒有這天 → 資訊不足，不臆測
+  } else {
+    dayLine = lines[apiIndex];
+  }
   if (!dayLine) return parseBusinessHoursWindow(businessHoursStr);
   if (/休息|closed|不營業/i.test(dayLine)) return { closed: true, label: dayLine };
   const match = dayLine.match(/(\d{1,2}):(\d{2})\s*[–\-~]+\s*(\d{1,2}):(\d{2})/);
@@ -3499,21 +3513,25 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
       _mid.forEach((s, i) => { s.dayIndex = Math.max(1, Math.min(dayCount, Math.floor(i / _mid.length * dayCount) + 1)); });
     }
   }
-  // 公休最終再過濾（審查 Bug2）：前面的 Places 驗證時，補時候選／被重建的站可能還沒有 dayIndex，
+  // 公休最終再檢查：前面的 Places 驗證時，補時候選／被重建的站可能還沒有 dayIndex，
   // 公休會退回用第 1 天判斷；等 dayIndex 在上方正規化完成後，依「該站所屬日」再檢查一次。
-  // 只信任 Google 7 行制的營業時間（≥5 段），AI 自寫的單行文字不在此處刪站，避免誤殺。
-  const dropClosed = finalStops.filter((s) => {
-    if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return true;
-    if (typeof isLodgingStop === 'function' && isLodgingStop(s)) return true;
-    const segs = String(s.businessHours).split(/\r?\n|；|;/).map((x) => x.trim()).filter(Boolean);
-    if (segs.length < 5) return true;
+  //
+  // ★ 這裡刻意「只標記、不刪站」：本函式已跑完缺日防護、applyTripPlanningRules（時間已寫進
+  //   stop.time）與 fitGeneratedStopsToTimeLimit。在最末端刪站會推翻這三道保證——實測會造成
+  //   「某一天變成空白」與「後續站點時間留下空檔」。標記讓使用者自己決定要不要換，風險最低。
+  let closedMarked = 0;
+  finalStops.forEach((s) => {
+    if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return;
+    if (typeof isLodgingStop === 'function' && isLodgingStop(s)) return;
     const win = extractDayHoursWindow(s.businessHours, stopServiceDate(s, wizardData));
-    return !(win && win.closed);
+    if (win && win.closed) {
+      s.scheduleWarning = 'closed_today';
+      s.closedOnDate = stopServiceDate(s, wizardData);
+      closedMarked++;
+    }
   });
-  if (dropClosed.length !== finalStops.length) {
-    console.info('[公休再過濾] 依所屬日移除', finalStops.length - dropClosed.length, '站');
-  }
-  return dropClosed;
+  if (closedMarked) console.info('[公休標記] 依所屬日標記', closedMarked, '站當天公休');
+  return finalStops;
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -3620,8 +3638,11 @@ async function loadState() {
   try {
     const u = JSON.parse(localStorage.getItem('wai_user')||'{}');
     if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
-    // 注意：訪客行程的搬移（migrateGuestTripsToUser）不在這裡做——此處的 currentUser 來自可能過期的
-    // wai_user 快取；搬移是不可逆動作，必須等 Firebase Auth 確認真實帳號後才執行（見 onAuthStateChanged 登入分支）。
+    // 訪客行程搬移的時機：正常情況等 Firebase Auth 確認真實帳號後才做（見 onAuthStateChanged 登入分支），
+    // 因為搬移不可逆、依過期快取會搬給錯的帳號。
+    // 但 Firebase 不可用時（CDN 沒載到／離線）永遠不會有 auth callback，若完全不搬，
+    // 訪客鍵裡的行程會在畫面上「消失」——此時退而求其次，用快取身分搬（沒有更好的來源）。
+    if (isLoggedIn && (typeof firebase === 'undefined' || !firebaseEnabled)) migrateGuestTripsToUser();
     likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
     ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
@@ -4627,6 +4648,9 @@ if (typeof firebase !== 'undefined') {
           if (doc.exists) {
             const data = doc.data();
             userData = { ...userData, ...data };
+            // 身分 email 一律以 Firebase Auth 為準：users/{uid} 註冊時寫入的 email 可能已過期
+            //（使用者改過 Auth email），被展開覆蓋後會害帳號鍵與訪客搬移落到舊 email。
+            userData.email = user.email;
             if (data.visitedSpots && Array.isArray(data.visitedSpots)) {
               localStorage.setItem('wai_visited_places', JSON.stringify(data.visitedSpots));
             }
