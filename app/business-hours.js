@@ -44,15 +44,17 @@
     var head = text.split(/[:：]/)[0] || text;
     var headLower = head.toLowerCase();
 
+    // ★ 必須「錨定在字串開頭」：只有寫在最前面的才是這一段的日別標籤。
+    //   若用非錨定的 indexOf，「非星期三休息日」這種說明文字會被當成星期三專屬 → 誤判公休。
     function indexOfDay(s) {
-      var sl = s.toLowerCase();
+      var t = String(s || '').replace(/^[\s　]+/, '');   // 去前導半形/全形空白
+      var tl = t.toLowerCase();
       for (var i = 0; i < 7; i++) {
-        if (s.indexOf(ZH[i]) >= 0 || s.indexOf(ZH2[i]) >= 0 || s.indexOf(ZH3[i]) >= 0) return i;
+        if (t.indexOf(ZH[i]) === 0 || t.indexOf(ZH2[i]) === 0 || t.indexOf(ZH3[i]) === 0) return i;
       }
       for (var j = 0; j < 7; j++) {
-        // 英文全名優先，再看三字縮寫（用邊界避免 sun 命中 sunday 以外的字）
-        if (sl.indexOf(EN[j]) >= 0) return j;
-        if (new RegExp('\\b' + EN3[j] + '\\b').test(sl)) return j;
+        if (tl.indexOf(EN[j]) === 0) return j;                       // 英文全名
+        if (new RegExp('^' + EN3[j] + '\\b').test(tl)) return j;      // 三字縮寫
       }
       return -1;
     }
@@ -72,13 +74,10 @@
         return out;
       }
     }
+    // indexOfDay 已錨定在開頭，因此 head（冒號前）與整段開頭都試一次即可。
     var single = indexOfDay(head);
     if (single >= 0) return [single];
-    // 沒有冒號的寫法（如「星期三 休息」）：標籤必須在「段首」才算這一段的日別。
-    // 否則像「每日 09:00-18:00，週三休息」這種句中提及，會被誤判成整段都是星期三
-    // （於是星期三判公休、其他天判 unknown，兩邊都錯）。段首找不到就視為無標籤。
-    var headOnly = text.slice(0, 6);
-    var atHead = indexOfDay(headOnly);
+    var atHead = indexOfDay(text);   // 沒有冒號的寫法，如「星期三 休息」
     void lower; void headLower;
     return atHead >= 0 ? [atHead] : [];
   }
@@ -97,12 +96,15 @@
   }
 
   function parseTimeWindow(seg) {
-    var m = String(seg || '').match(/(\d{1,2}):(\d{2})\s*[–\-~～]+\s*(\d{1,2}):(\d{2})/);
+    // 分隔符含 to（英文寫法 09:00 to 17:00）
+    var m = String(seg || '').match(/(\d{1,2}):(\d{2})\s*(?:[–\-~～]+|to)\s*(\d{1,2}):(\d{2})/i);
     if (!m) return null;
-    var open = Number(m[1]) * 60 + Number(m[2]);
-    var close = Number(m[3]) * 60 + Number(m[4]);
-    if (!isFinite(open) || !isFinite(close)) return null;
-    return { open: open, close: close < open ? close + 1440 : close };
+    var h1 = Number(m[1]), n1 = Number(m[2]), h2 = Number(m[3]), n2 = Number(m[4]);
+    // 時間值必須合法：原本不檢查，「25:99-26:99」會被當成正常營業時間排進行程
+    if (!(h1 >= 0 && h1 <= 23 && n1 >= 0 && n1 <= 59 && h2 >= 0 && h2 <= 23 && n2 >= 0 && n2 <= 59)) return null;
+    var open = h1 * 60 + n1;
+    var close = h2 * 60 + n2;
+    return { open: open, close: close < open ? close + 1440 : close };   // 跨午夜 → 加一天
   }
 
   /**

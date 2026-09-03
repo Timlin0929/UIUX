@@ -3605,13 +3605,19 @@ function migrateGuestTripsToUser() {
   } catch (_e) {}
 }
 
+// 可寫入帳號鍵的行程：排除 __transientGuest（Firebase 不可用時「僅暫時顯示」的訪客行程）。
+// 那些行程尚未確認歸屬，寫進去等於歸給快取裡的舊帳號，且之後再也搬不回正確帳號。
+function persistableMyTrips() {
+  return myTrips.filter((t) => !(t && t.__transientGuest)).map(serializeTripForStorage);
+}
+
 function saveState() {
   try {
     localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
     localStorage.setItem('wai_likes', JSON.stringify([...likedTrips]));
     localStorage.setItem('wai_ratings', JSON.stringify(ratedTrips));
     localStorage.setItem('wai_copied', JSON.stringify(copiedTrips));
-    localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
+    localStorage.setItem(myTripsStorageKey(), JSON.stringify(persistableMyTrips()));
   } catch(e){}
 }
 async function loadState() {
@@ -3625,13 +3631,17 @@ async function loadState() {
     copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
     myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey())||'[]').map(serializeTripForStorage);
     // Firebase 不可用時（CDN 未載入／離線）不會有 auth callback，也就不會有搬移。
-    // 這時只「合併顯示」訪客鍵的行程，不寫入、不清空——使用者看得到，資料歸屬也還沒被決定，
-    // 等真的登入確認身分後再由 migrateGuestTripsToUser() 做不可逆的搬移。
+    // 這時把訪客鍵的行程標成 __transientGuest 併進 myTrips「只供顯示」——
+    // ★ 不可直接混進去：saveState() 會把整個 myTrips 寫回帳號鍵，等於偷偷把訪客行程
+    //   歸給了「快取裡的那個帳號」（可能是別人）。saveState 會濾掉這個旗標。
+    //   真正的歸屬仍等 Auth 確認後由 migrateGuestTripsToUser() 處理。
     if (isLoggedIn && (typeof firebase === 'undefined' || !firebaseEnabled)) {
       try {
         const guestTrips = JSON.parse(localStorage.getItem('wai_mytrips') || '[]').map(serializeTripForStorage);
         const seen = new Set(myTrips.map((t) => t && t.id));
-        guestTrips.forEach((t) => { if (t && !seen.has(t.id)) { myTrips.push(t); seen.add(t.id); } });
+        guestTrips.forEach((t) => {
+          if (t && !seen.has(t.id)) { myTrips.push({ ...t, __transientGuest: true }); seen.add(t.id); }
+        });
       } catch (_e) {}
     }
     
@@ -3667,7 +3677,7 @@ async function loadState() {
               }
            });
            myTrips = mergedTrips;
-           localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
+           localStorage.setItem(myTripsStorageKey(), JSON.stringify(persistableMyTrips()));
            if (document.getElementById('myTripsView').style.display !== 'none') {
              renderMyTrips();
            }
@@ -3682,7 +3692,7 @@ async function loadState() {
            const collabTrips = await WAI_COLLAB.fetchMyCollabTrips(currentUser.email);
            collabTrips.forEach(t => upsertCollabTripLocal(t));
            startMyCollabTripsLiveSync(currentUser.email);
-          localStorage.setItem(myTripsStorageKey(), JSON.stringify(myTrips.map(serializeTripForStorage)));
+          localStorage.setItem(myTripsStorageKey(), JSON.stringify(persistableMyTrips()));
           renderSideMyTrips();
           const mtv = document.getElementById('myTripsView');
           if (mtv && mtv.style.display !== 'none') renderMyTrips();

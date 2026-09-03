@@ -9731,10 +9731,10 @@
     const st = H ? H.parseDayStatus(hours, departureDate) : { status: 'unknown', label: '' };
     if (st.status === 'closed') return '⚠️ 當天公休';
     if (st.status === 'unknown') return '';   // 資訊不足 → 不顯示警告，也不臆測時段
-    let checkLine = st.label;
-    const window = parseBusinessHoursWindow(checkLine);
-    if (!window) return '';
-    const { open, close } = window;
+    // 直接沿用共用模組算好的時間窗，不再二次解析：舊的 parseBusinessHoursWindow 以
+    // close <= open 視為無效，會讓跨午夜店家（18:00–01:30）漏掉非營業時間警告。
+    if (!Number.isFinite(st.open) || !Number.isFinite(st.close)) return '';
+    const open = st.open, close = st.close;
     const rawStart = stop.start ?? 0;
     const startMin = rawStart % (24 * 60);
     const endMin = startMin + Math.max(0, (stop.end ?? (rawStart + (stop.stayMin || 0))) - rawStart);

@@ -368,6 +368,24 @@ check('Open 24 hours → open', H.parseDayStatus('Open 24 hours', '2026-09-02').
     (rate * 100).toFixed(1) + '% 判為 unknown → 畫面會退化成 ℹ️ 概覽');
 })();
 
+// 標籤必須錨定段首：說明文字不可被當成日別標籤（Codex 四輪：段首規則原為死碼）
+check('「非星期三休息日」不得判為公休', H.parseDayStatus('非星期三休息日', '2026-09-02').status === 'unknown',
+  H.parseDayStatus('非星期三休息日', '2026-09-02').status);
+check('「星期三 09:00-17:00」（無冒號）仍正確', H.parseDayStatus('星期三 09:00-17:00', '2026-09-02').status === 'open');
+check('前導全形空白仍正確', H.parseDayStatus('　星期三：休息', '2026-09-02').status === 'closed');
+
+// 時間值必須合法（原本 25:99 會被當成正常營業時間）
+check('不合法時間 25:99 → 不視為 open', H.parseDayStatus('Monday: 25:99-26:99', '2026-08-31').status !== 'open',
+  H.parseDayStatus('Monday: 25:99-26:99', '2026-08-31').status);
+check('英文 to 分隔符可解析', H.parseDayStatus('Monday: 09:00 to 17:00', '2026-08-31').status === 'open');
+
+// 跨午夜：共用模組把收店正規化成隔日分鐘數
+(function () {
+  const st = H.parseDayStatus('星期一: 18:00 – 01:30', '2026-08-31');
+  check('跨午夜營業 → open 且 close > open', st.status === 'open' && st.close > st.open,
+    JSON.stringify(st));
+})();
+
 // 三處呼叫端都已委派給共用解析器（防止有人再寫第四份）
 const ESRC = SRC, PSRC2 = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
 check('explore extractDayHoursWindow 委派共用解析器', /extractDayHoursWindow[\s\S]{0,600}?WAI_HOURS/.test(ESRC));
@@ -385,6 +403,23 @@ check('無 Firebase 時改為合併顯示訪客行程', /合併顯示|guestTrips
 
 // formatDayBusinessHours 輸出需 escapeHtml（會進 innerHTML）
 check('formatDayBusinessHours 輸出經 escapeHtml', /formatDayBusinessHours[\s\S]{0,800}?escapeHtml/.test(PSRC2));
+check('getBusinessHoursWarning 不再二次解析時間窗',
+  !/getBusinessHoursWarning[\s\S]{0,900}?parseBusinessHoursWindow\(checkLine\)/.test(PSRC2));
+
+// 行為測試：無 Firebase 的暫時訪客行程，絕不可被 saveState 寫進帳號鍵
+(function () {
+  const sctx = makeSandbox();
+  ['myTripsStorageKey', 'persistableMyTrips'].forEach((n) => vm.runInContext(extractFunction(ESRC, n), sctx));
+  sctx.currentUser = { email: 'd@example.com' };
+  sctx.myTrips = [{ id: 'own-1' }, { id: 'guest-x', __transientGuest: true }];
+  const out = sctx.persistableMyTrips();
+  check('persistableMyTrips 濾掉暫時訪客行程', out.length === 1 && out[0].id === 'own-1',
+    JSON.stringify(out.map((t) => t.id)));
+  check('三處寫入皆改用 persistableMyTrips',
+    (ESRC.match(/localStorage\.setItem\(myTripsStorageKey\(\), JSON\.stringify\(persistableMyTrips\(\)\)\)/g) || []).length === 3);
+  check('已無直接寫入 myTrips 全量的路徑',
+    !/setItem\(myTripsStorageKey\(\), JSON\.stringify\(myTrips\.map/.test(ESRC));
+})();
 
 // ══════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════');
