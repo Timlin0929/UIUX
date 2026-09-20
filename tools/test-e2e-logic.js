@@ -386,6 +386,20 @@ check('英文 to 分隔符可解析', H.parseDayStatus('Monday: 09:00 to 17:00',
     JSON.stringify(st));
 })();
 
+// 單段文字的危險寫法：若誤當成「每天適用」，整句狀態會套到所有日子。
+// 實測「週末公休」曾讓星期一也被判公休 → 這類一律 unknown。
+check('「週末公休」星期一不得判公休', H.parseDayStatus('週末公休', '2026-09-07').status === 'unknown',
+  H.parseDayStatus('週末公休', '2026-09-07').status);
+check('「例假日休息」星期一不得判公休', H.parseDayStatus('例假日休息', '2026-09-07').status === 'unknown');
+check('「假日不營業」星期一不得判公休', H.parseDayStatus('假日不營業', '2026-09-07').status === 'unknown');
+check('「非全天開放」不得判全天營業', H.parseDayStatus('非全天開放', '2026-09-02').status === 'unknown',
+  H.parseDayStatus('非全天開放', '2026-09-02').status);
+check('「僅夏季全天開放」不得判全天營業', H.parseDayStatus('僅夏季全天開放', '2026-09-02').status === 'unknown');
+// 收緊後不可誤傷正常寫法
+check('「全天開放」仍為 open', H.parseDayStatus('全天開放', '2026-09-02').status === 'open');
+check('「24 小時營業」仍為 open', H.parseDayStatus('24 小時營業', '2026-09-02').status === 'open');
+check('單段「休息」仍為 closed', H.parseDayStatus('休息', '2026-09-02').status === 'closed');
+
 // 收店 24:00（＝午夜）是合法寫法，不可被時間驗證擋掉；開店 24:00 則不合法
 check('收店 24:00 → open', H.parseDayStatus('星期三: 09:00-24:00', '2026-09-02').status === 'open',
   H.parseDayStatus('星期三: 09:00-24:00', '2026-09-02').status);

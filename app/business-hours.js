@@ -30,6 +30,12 @@
   // 「24 小時營業」沒有時間區間，但語意明確＝全天營業，不可判成 unknown
   // 涵蓋「24 小時營業」「全天候開放」「全天開放」「終年開放」等（戶外景點大量使用）
   var ALLDAY_RE = /24\s*小時|全天候?(?:營業|開放)?|全年無休|終年開放|open\s*24|24\s*hours?/i;
+  // 否定／限定詞：出現代表句子有前提或轉折（「非全天開放」「僅夏季全天開放」），
+  // 不可把整句當成單純的全天營業／全天公休 → 一律 unknown
+  var QUALIFIER_RE = /非|不|僅|限|除|暫停|另|視情況|依|but|except|only|unless/i;
+  // 指涉「某些天」而非「每天」的字眼。這類單段文字無法可靠拆出每天狀態，
+  // 若誤當成「每天適用」會災難性地套到所有日子（實測「週末公休」曾讓星期一也判公休）
+  var PARTIAL_DAYS_RE = /週末|周末|假日|例假|平日|工作日|weekend|weekday|holiday/i;
   var RANGE_SEP = /\s*(?:至|到|~|～|-|–|—|through|to)\s*/;
 
   function splitSegments(str) {
@@ -143,7 +149,11 @@
       // 但若句中「提及」某個星期（如「每日 09:00-18:00，週三休息」），代表各天並不相同，
       // 而這種自由文字無法可靠拆出每天狀態 → 一律 unknown，不可把整句套到每一天
       //（否則星期一也會因為句中有「休息」二字被誤判公休）。
-      if (mentionsAnyDay(segs[0])) return { status: 'unknown', label: segs[0] };
+      // 除了「提及特定星期」，還要擋掉「指涉部分日子」與「帶否定/限定詞」的寫法，
+      // 否則會把整句狀態套到每一天（例：「週末公休」→ 星期一也判公休）。
+      if (mentionsAnyDay(segs[0]) || PARTIAL_DAYS_RE.test(segs[0]) || QUALIFIER_RE.test(segs[0])) {
+        return { status: 'unknown', label: segs[0] };
+      }
       seg = segs[0];
     } else {
       return UNKNOWN;
