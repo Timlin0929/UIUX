@@ -8868,7 +8868,18 @@
           businessStatus: hours && hours.businessStatus || null,
           isOpenNow: hours && typeof hours.isOpenNow === 'boolean' ? hours.isOpenNow : place.isOpenNow,
           isOpen24Hours: Boolean(hours && hours.isOpen24Hours),
-          todayHours: weekdayText[new Date().getDay()] || ''
+          // Places 的 weekdayText 是「週一起算」，而 getDay() 是「週日起算(0=日)」——
+          // 直接用 getDay() 當索引會整整差一天（星期日顯示星期一的時間）。
+          // 改用全站唯一解析器依「星期X」標籤比對，與其他三處同口徑。
+          todayHours: (() => {
+            if (!weekdayText.length) return '';
+            const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+            if (!H) return '';
+            const now = new Date();
+            const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+            const st = H.parseDayStatus(weekdayText.join('\n'), iso);
+            return st.label || '';
+          })()
         };
       }));
       addPlaceSearchResults.sort((a, b) => {

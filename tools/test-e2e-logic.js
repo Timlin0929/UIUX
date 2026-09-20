@@ -386,6 +386,25 @@ check('英文 to 分隔符可解析', H.parseDayStatus('Monday: 09:00 to 17:00',
     JSON.stringify(st));
 })();
 
+// 收店 24:00（＝午夜）是合法寫法，不可被時間驗證擋掉；開店 24:00 則不合法
+check('收店 24:00 → open', H.parseDayStatus('星期三: 09:00-24:00', '2026-09-02').status === 'open',
+  H.parseDayStatus('星期三: 09:00-24:00', '2026-09-02').status);
+check('開店 24:00 → 不視為 open', H.parseDayStatus('星期三: 24:00-25:00', '2026-09-02').status !== 'open');
+
+// Places 的 weekdayText 是「週一起算」，getDay() 是「週日起算」——直接當索引會差一天。
+// 這裡用「只有星期日公休」的資料驗證：星期日必須是公休，星期一必須營業。
+(function () {
+  const weekdayText = ['星期一: 09:00 – 17:00', '星期二: 09:00 – 17:00', '星期三: 09:00 – 17:00',
+    '星期四: 09:00 – 17:00', '星期五: 09:00 – 17:00', '星期六: 09:00 – 17:00', '星期日: 休息'];
+  const joined = weekdayText.join('\n');
+  check('weekdayText：星期日判公休（不可差一天）', H.parseDayStatus(joined, '2026-09-06').status === 'closed');
+  check('weekdayText：星期一判營業（不可差一天）', H.parseDayStatus(joined, '2026-09-07').status === 'open');
+  // 守門：todayHours 不得再用 getDay() 當索引
+  const PS = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  check('todayHours 不再用 getDay() 當 weekdayText 索引',
+    !/weekdayText\[new Date\(\)\.getDay\(\)\]/.test(PS));
+})();
+
 // 三處呼叫端都已委派給共用解析器（防止有人再寫第四份）
 const ESRC = SRC, PSRC2 = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
 check('explore extractDayHoursWindow 委派共用解析器', /extractDayHoursWindow[\s\S]{0,600}?WAI_HOURS/.test(ESRC));

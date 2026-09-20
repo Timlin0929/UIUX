@@ -100,8 +100,11 @@
     var m = String(seg || '').match(/(\d{1,2}):(\d{2})\s*(?:[–\-~～]+|to)\s*(\d{1,2}):(\d{2})/i);
     if (!m) return null;
     var h1 = Number(m[1]), n1 = Number(m[2]), h2 = Number(m[3]), n2 = Number(m[4]);
-    // 時間值必須合法：原本不檢查，「25:99-26:99」會被當成正常營業時間排進行程
-    if (!(h1 >= 0 && h1 <= 23 && n1 >= 0 && n1 <= 59 && h2 >= 0 && h2 <= 23 && n2 >= 0 && n2 <= 59)) return null;
+    // 時間值必須合法：原本不檢查，「25:99-26:99」會被當成正常營業時間排進行程。
+    // 收店允許 24:00（＝午夜，常見寫法）；開店不可為 24:00。
+    var openOk = h1 >= 0 && h1 <= 23 && n1 >= 0 && n1 <= 59;
+    var closeOk = n2 >= 0 && n2 <= 59 && (h2 >= 0 && h2 <= 23 || (h2 === 24 && n2 === 0));
+    if (!openOk || !closeOk) return null;
     var open = h1 * 60 + n1;
     var close = h2 * 60 + n2;
     return { open: open, close: close < open ? close + 1440 : close };   // 跨午夜 → 加一天
