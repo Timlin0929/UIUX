@@ -580,6 +580,98 @@ section('8. 探索首頁：假社群資料已移除');
     '直接在 IIFE 裡初始化會拿到還沒載入的 WAI_POI_DATA（實測 0 個範本）');
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('9. poi-data.js 資料規格');
+(() => {
+  const c = { window: {} };
+  vm.createContext(c);
+  vm.runInContext(fs.readFileSync(path.join(APP, 'poi-data.js'), 'utf8'), c);
+  const d = c.window.WAI_POI_DATA || {};
+  const all = Object.keys(d).filter((k) => Array.isArray(d[k]))
+    .reduce((a, k) => a.concat(d[k]), []);
+
+  check('有景點資料', all.length > 300, all.length + ' 筆');
+
+  // 必填欄位：缺任何一個，前端就得到處寫 fallback
+  const REQUIRED = ['name', 'lat', 'lng', 'duration', 'kind', 'district'];
+  REQUIRED.forEach((f) => {
+    const miss = all.filter((x) => x[f] === undefined || x[f] === null || x[f] === '');
+    check('必填欄位 ' + f + ' 無缺漏', miss.length === 0,
+      miss.length + ' 筆缺，例：' + (miss[0] || {}).name);
+  });
+
+  // ★「有欄位」就等於「有值」。原本 desc/address/businessHours 一律寫入，
+  //   於是覆蓋率看起來 100% 但其中 104/86/44 筆是空字串——報表會騙人。
+  const withEmpty = all.filter((x) => Object.keys(x).some((k) => x[k] === '' || x[k] === null));
+  check('沒有空字串／null 欄位', withEmpty.length === 0,
+    withEmpty.length + ' 筆，例：' + (withEmpty[0] || {}).name);
+
+  // 型別一致
+  const types = {};
+  all.forEach((x) => Object.keys(x).forEach((k) => {
+    const t = Array.isArray(x[k]) ? 'array' : typeof x[k];
+    (types[k] = types[k] || new Set()).add(t);
+  }));
+  const mixed = Object.keys(types).filter((k) => types[k].size > 1);
+  check('每個欄位型別一致', mixed.length === 0,
+    mixed.map((k) => k + ':' + [...types[k]].join('/')).join('、'));
+
+  // kind 只能是這四種
+  const KINDS = ['scenic', 'food', 'transit', 'lodging'];
+  const badKind = all.filter((x) => KINDS.indexOf(x.kind) < 0);
+  check('kind 只用約定的四種值', badKind.length === 0,
+    [...new Set(badKind.map((x) => x.kind))].join('、'));
+
+  // 值域
+  const badLat = all.filter((x) => !(x.lat > 21.5 && x.lat < 23.6));
+  const badLng = all.filter((x) => !(x.lng > 120.5 && x.lng < 122.1));
+  check('座標落在台東縣範圍內', badLat.length === 0 && badLng.length === 0,
+    (badLat[0] || badLng[0] || {}).name);
+  const badRating = all.filter((x) => x.rating !== undefined && !(x.rating > 0 && x.rating <= 5));
+  check('rating 落在 0–5', badRating.length === 0, (badRating[0] || {}).name);
+  const badDur = all.filter((x) => !(x.duration > 0 && x.duration <= 180));
+  check('duration 落在 1–180 分', badDur.length === 0,
+    badDur.map((x) => x.name + ':' + x.duration).slice(0, 2).join('、'));
+
+  // 推定的行政區必須標記出來，不能跟地址判定的混為一談
+  const inferred = all.filter((x) => x.districtInferred);
+  check('districtInferred 只出現在有 district 的項目上',
+    inferred.every((x) => !!x.district), '有標記卻沒有 district');
+  check('推定比例合理（< 40%）', inferred.length / all.length < 0.4,
+    (inferred.length / all.length * 100).toFixed(0) + '% 是推定的');
+
+  // 名稱不得只是地區名
+  const bare = all.filter((x) => /^(台東|臺東|綠島|蘭嶼)$/.test(String(x.name).trim()));
+  check('名稱不是純地區名', bare.length === 0, bare.length + ' 筆');
+
+  // 交通節點與餐廳必須被分類出來（不是留在 scenic 裡）
+  const transitInScenic = all.filter((x) => x.kind === 'scenic' && /車站|機場|碼頭/.test(x.name));
+  check('車站／機場／碼頭不在 scenic', transitInScenic.length === 0,
+    transitInScenic.map((x) => x.name).slice(0, 3).join('、'));
+})();
+
+// ══════════════════════════════════════════════════════════════
+section('10. 前端依 kind 取用');
+(() => {
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const T = fs.readFileSync(path.join(APP, 'explore-templates.js'), 'utf8');
+  const re = /poi\.kind && poi\.kind !== 'scenic'/;
+  check('explore getLocalPoiList 過濾非景點', re.test(ESRC));
+  check('planner getLocalPoiList 過濾非景點', re.test(P));
+  check('範本引擎改用 kind', /p\.kind \|\| \(isTransit/.test(T));
+
+  // 實測：把交通節點餵進範本引擎，不該出現在結果裡
+  const TM = require(path.join(APP, 'explore-templates.js'));
+  const c = { window: {} };
+  vm.createContext(c);
+  vm.runInContext(fs.readFileSync(path.join(APP, 'poi-data.js'), 'utf8'), c);
+  const buckets = TM.bucketByDistrict(c.window.WAI_POI_DATA);
+  const flat = Object.keys(buckets).reduce((a, k) => a.concat(buckets[k]), []);
+  check('範本桶內全是 scenic', flat.every((x) => !x.kind || x.kind === 'scenic'),
+    (flat.find((x) => x.kind && x.kind !== 'scenic') || {}).name);
+})();
+
+
 
 // ══════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════');

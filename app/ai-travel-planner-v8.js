@@ -13401,6 +13401,10 @@
         || (stripped && (stripped.includes(k) || k.includes(stripped)));
       if (!match) continue;
       for (const poi of data[key]) {
+        // ★ 依 kind 只取景點。poi-data 裡混了交通節點（台東火車站，duration 480 分）
+        //   與 restaurant-data.js 已收錄的餐廳；不濾掉會被當成「景點候選」餵給 AI。
+        //   舊資料沒有 kind 欄位時視為景點，維持相容。
+        if (poi && poi.kind && poi.kind !== 'scenic') continue;
         const id = poi && poi.name ? String(poi.name).trim() : '';
         if (id && seen.has(id)) continue;
         if (id) seen.add(id);

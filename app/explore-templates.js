@@ -90,7 +90,10 @@
       if (destKey === '__generatedAt' || !Array.isArray(poiData[destKey])) return;
       poiData[destKey].forEach(function (p) {
         if (!p || !p.name || !isFinite(p.lat) || !isFinite(p.lng)) return;
-        if (isTransit(p.name) || isLodging(p.name)) return;
+        // 分類由 export:local 寫進 kind（交叉比對過 restaurant-data.js）；
+        // 舊資料沒有 kind 時退回名稱正則，維持相容。
+        var kind = p.kind || (isTransit(p.name) ? 'transit' : (isLodging(p.name) ? 'lodging' : 'scenic'));
+        if (kind !== 'scenic') return;
         // 離島：poi-data 的桶名就是目的地，不看 district
         var key = ISLANDS[destKey] ? destKey : p.district;
         if (!key) return;                 // 沒有行政區就不進鄉鎮桶（不用座標猜）

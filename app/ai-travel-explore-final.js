@@ -300,6 +300,10 @@ function getLocalPoiList(destination, data = (typeof window !== 'undefined' && w
       || (stripped && (stripped.includes(k) || k.includes(stripped)));
     if (!match) continue;
     for (const poi of data[key]) {
+      // ★ 依 kind 只取景點。poi-data 裡混了交通節點（台東火車站，duration 480 分）
+      //   與 restaurant-data.js 已收錄的餐廳；不濾掉會被當成「景點候選」餵給 AI。
+      //   舊資料沒有 kind 欄位時視為景點，維持相容。
+      if (poi && poi.kind && poi.kind !== 'scenic') continue;
       const id = poi && poi.name ? String(poi.name).trim() : '';
       if (id && seen.has(id)) continue;
       if (id) seen.add(id);
@@ -310,6 +314,8 @@ function getLocalPoiList(destination, data = (typeof window !== 'undefined' && w
 }
 
 // 從獨立的餐廳快取 window.WAI_RESTAURANT_DATA 取某目的地的餐廳清單（重用景點桶比對邏輯）。
+// restaurant-data.js 的項目沒有 kind 欄位，上面「沒有 kind 就視為景點」的相容分支
+// 會讓它們全部通過，行為與過去一致。
 function getLocalFoodList(destination) {
   return getLocalPoiList(destination, (typeof window !== 'undefined' && window.WAI_RESTAURANT_DATA) || null);
 }

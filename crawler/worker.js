@@ -1094,19 +1094,91 @@ function estimateDuration(data) {
 }
 
 // 把一筆 scenic_points 文件映射成前端要的精簡 POI（只保留變動不大的穩定欄位）
+// ── 景點分類與行政區推定（export:local 專用） ─────────────────────────
+//
+// 為什麼要分類：getLocalPoiList 會把整份清單當成「景點候選」餵給 AI，
+// 但 poi-data 裡混了車站（台東火車站 duration=480 分）、民宿，以及
+// restaurant-data.js 已經有的餐廳。不分類的話 AI 會把火車站排成景點。
+//
+// 分類不刪資料——各端自行依 kind 取用，避免任何一方誤刪對別人有用的東西。
+const POI_KIND_RE = {
+  transit: /車站|火車站|機場|碼頭|轉運站|客運站/,
+  lodging: /民宿|飯店|旅店|旅館|酒店|villa|hotel|hostel|inn\b/i,
+  // 補上實測漏網的寫法：津芳冰城／秘食-私廚／藍蜻蜓速食店／阿鋐炸雞／
+  // 東粄香客家米食／只有海-午餐輕食晚餐。注意不可只用「茶」「食」等單字，
+  // 會把「奉茶樹」（池上的地標樹）誤判成餐飲。
+  food: /餐廳|食堂|小吃|咖啡廳|咖啡館|咖啡店|cafe|廚房|私廚|麵館|燒烤|火鍋|茶飲|早餐店|冰店|冰城|小館|速食|炸雞|米食|輕食|便當|pizza|義大利麵/i
+};
+
+function loadRestaurantNameSet() {
+  const set = new Set();
+  try {
+    const file = path.join(__dirname, '..', 'app', 'restaurant-data.js');
+    if (!fs.existsSync(file)) return set;
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
+    const d = sandbox.window.WAI_RESTAURANT_DATA || {};
+    Object.keys(d).forEach((k) => {
+      if (!Array.isArray(d[k])) return;
+      d[k].forEach((r) => {
+        if (r && r.name) set.add(normalizeText(String(r.name).replace(/臺/g, '台')));
+      });
+    });
+  } catch (e) {
+    console.warn('讀取 restaurant-data.js 失敗，餐廳交叉比對略過：', e.message);
+  }
+  return set;
+}
+
+function classifyPoiKind(name, restaurantNames) {
+  const n = String(name || '').replace(/臺/g, '台');
+  if (POI_KIND_RE.transit.test(n)) return 'transit';
+  if (POI_KIND_RE.lodging.test(n)) return 'lodging';
+  // restaurant-data.js 已收錄的，一律算餐飲（避免同一家店在兩份資料各出現一次）
+  if (restaurantNames && restaurantNames.has(normalizeText(n))) return 'food';
+  if (POI_KIND_RE.food.test(n)) return 'food';
+  return 'scenic';
+}
+
+// 名稱只是地區名（「台東」「綠島」）的不是景點，直接排除
+const BARE_REGION_RE = /^(台東|臺東|綠島|蘭嶼|知本|池上|成功|關山|鹿野|長濱|海端|東河|延平|卑南|金峰|太麻里|大武|達仁)(縣|市|鄉|鎮)?$/;
+// 名稱只有類別詞、沒有專名（「咖啡廳」「餐廳」「公園」）也不是可用的景點——
+// 使用者看不出那是哪一家，AI 也沒辦法驗證座標。實測有一筆「咖啡廳」的座標
+// 落在新北市金山（25.2065, 121.525），完全不在台東。
+const GENERIC_NAME_RE = /^(咖啡廳|咖啡館|咖啡店|餐廳|小吃|民宿|飯店|旅館|夜市|公園|步道|海灘|沙灘|景點|廁所|停車場)$/;
+
+// 以「最近 3 個已知鄰居投票」推定行政區。
+// 先前用的「最近重心」法留一驗證只有 86.7%（而且會把沒地址的全倒進地理居中的
+// 台東市）；kNN(k=3) 是 94.9%，且錯的都落在相鄰鄉鎮（卑南↔台東、金峰↔太麻里）。
+// 推定值一律標 districtInferred，呼叫端要知道這不是地址判定出來的。
+function inferDistrictByNeighbours(target, known, k) {
+  if (!known.length) return null;
+  const scored = known.map((q) => ({
+    d: Math.hypot(target.lat - q.lat, (target.lng - q.lng) * Math.cos(target.lat * Math.PI / 180)),
+    district: q.district
+  })).sort((a, b) => a.d - b.d).slice(0, k || 3);
+  const votes = {};
+  scored.forEach((x) => { votes[x.district] = (votes[x.district] || 0) + 1; });
+  const best = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+  return best || null;
+}
+
 function toLocalPoi(data) {
   const coord = data.scenicCoordinates || {};
   const lat = toNumber(coord.lat != null ? coord.lat : data.lat);
   const lng = toNumber(coord.lng != null ? coord.lng : data.lng);
   if (!data.name || lat === null || lng === null) return null;
-  const poi = {
-    name: String(data.name).trim(),
-    lat,
-    lng,
-    desc: data.desc || data.description || '',
-    address: data.formatted_address || data.address || '',
-    businessHours: data.placeOpeningHours || data.openTime || data.businessHours || ''
-  };
+  // 空字串不輸出：原本 desc / address / businessHours 一律寫入，
+  // 於是「欄位覆蓋率 100%」但其中 104 / 86 / 44 筆其實是空的，
+  // 看報表會誤以為資料很完整。有值才寫，缺就是缺。
+  const poi = { name: String(data.name).trim(), lat, lng };
+  const desc = String(data.desc || data.description || '').trim();
+  const addr = String(data.formatted_address || data.address || '').trim();
+  const hours = String(data.placeOpeningHours || data.openTime || data.businessHours || '').trim();
+  if (desc) poi.desc = desc;
+  if (addr) poi.address = addr;
+  if (hours) poi.businessHours = hours;
   // 行政區（去掉鄉/鎮/市，如「長濱」「太麻里」）。前端探索頁用它做鄉鎮分頁——
   // poi-data.js 本身是照目的地鍵（台東/綠島/蘭嶼）分桶的，桶內看不出鄉鎮。
   // 先取 region（import 時就是 town），再退回從地址解析；都沒有就不寫這個欄位，
@@ -1485,18 +1557,42 @@ async function exportLocal(db) {
     if (String(out.businessHours || '').trim() === '未知') {
       const alt = [better, worse].map((p) => String(p.businessHours || '').trim())
         .find((h) => h && h !== '未知');
-      out.businessHours = alt || '';
+      // 沒有替代值時要「刪掉欄位」而不是設成空字串——
+      // 整份資料的規格是「有欄位就等於有值」，留空字串會破壞這個保證。
+      if (alt) out.businessHours = alt; else delete out.businessHours;
     }
     return out;
   }
 
+  const restaurantNames = loadRestaurantNameSet();
   const candidates = {};          // destKey → Map(正規化名稱 → 合併後的 poi)
+  let droppedBareRegion = 0;
+  const droppedOutOfBounds = [];
+  let clampedDuration = 0;
   for (const doc of snap.docs) {
     const data = doc.data();
     if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
     if (data.placePermanentlyClosed === true) continue; // 跳過 Places 標記已永久歇業者
     const poi = toLocalPoi(data);
     if (!poi) continue;
+    // 名稱只是地區名（「台東」）或純類別詞（「咖啡廳」）的不是景點，排除
+    const trimmedName = String(poi.name).trim();
+    if (BARE_REGION_RE.test(trimmedName) || GENERIC_NAME_RE.test(trimmedName)) {
+      droppedBareRegion += 1; continue;
+    }
+    // 座標必須落在台東縣範圍內。錯誤座標會讓行程把使用者導到別的縣市，
+    // 也會污染「最近鄰居」的行政區推定。
+    if (!isInsideTaitungBounds(poi.lat, poi.lng)) {
+      droppedOutOfBounds.push(trimmedName + '(' + poi.lat.toFixed(3) + ',' + poi.lng.toFixed(3) + ')');
+      continue;
+    }
+    poi.kind = classifyPoiKind(poi.name, restaurantNames);
+    // estimateDuration 對交通節點會估出離譜的值（實測台東火車站 480 分）。
+    // 這個欄位是用來排行程的，超過半天的單站停留一定是估錯。
+    if (!(poi.duration > 0 && poi.duration <= 180)) {
+      clampedDuration += 1;
+      poi.duration = Math.max(20, Math.min(180, Number(poi.duration) || 45));
+    }
     const destKey = deriveDestKey(data);
     if (!destKey) continue;
     if (!candidates[destKey]) candidates[destKey] = new Map();
@@ -1511,6 +1607,26 @@ async function exportLocal(db) {
     buckets[k] = [...candidates[k].values()];
     total += buckets[k].length;
   });
+
+  // ── 行政區推定：地址判不出來的，用「最近 3 個已知鄰居投票」補 ──
+  const flat = Object.keys(buckets).reduce((a, k) => a.concat(buckets[k]), []);
+  const knownDistrict = flat.filter((x) => x.district && x.lat && x.lng);
+  let inferred = 0;
+  flat.forEach((x) => {
+    if (x.district || !x.lat || !x.lng) return;
+    const guess = inferDistrictByNeighbours(x, knownDistrict, 3);
+    if (guess) { x.district = guess; x.districtInferred = true; inferred += 1; }
+  });
+
+  const kindCount = {};
+  flat.forEach((x) => { kindCount[x.kind] = (kindCount[x.kind] || 0) + 1; });
+  console.log('分類：', kindCount);
+  console.log('行政區：地址判定 ' + knownDistrict.length + '，鄰居推定 ' + inferred
+    + '，仍缺 ' + flat.filter((x) => !x.district).length);
+  if (droppedBareRegion) console.log('排除泛稱／地區名 ' + droppedBareRegion + ' 筆');
+  if (droppedOutOfBounds.length) console.log('排除座標超出台東縣 ' + droppedOutOfBounds.length
+    + ' 筆：' + droppedOutOfBounds.slice(0, 5).join('、'));
+  if (clampedDuration) console.log('修正離譜的停留時長 ' + clampedDuration + ' 筆');
 
   const summary = Object.keys(buckets).map((k) => `${k}:${buckets[k].length}`).join(', ');
   console.log(`Export-local prepared ${total} POIs across keys → ${summary || '(none)'}`);
