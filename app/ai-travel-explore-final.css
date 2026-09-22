@@ -95,7 +95,13 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 /* ─── LAYOUT ─── */
 .explore-layout{display:grid;grid-template-columns:1fr 280px;gap:0;align-items:start;max-width:1400px;margin:0 auto;}
 .trips-section{padding:24px 28px;}
-.trips-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:18px;}
+.trips-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:18px;
+  /* Grid 預設 align-items:stretch 會讓同一列的卡片等高——展開其中一張時，
+     旁邊沒展開的卡片會被拉長，底部多出一塊空白，看起來像「它們也展開了」。
+     改成 start，每張卡照自己的內容決定高度。 */
+  align-items:start;
+}
 
 /* ─── TRIP CARD ─── */
 .trip-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:transform .2s,box-shadow .2s;}

@@ -768,6 +768,10 @@ section('12. 範本卡：景點清單摺疊');
     'renderGrid 重跑會把剛展開的卡收回去');
   check('切換時同步更新狀態集合',
     /expandedTplKeys\.add\(key\)[\s\S]{0,40}?expandedTplKeys\.delete\(key\)/.test(ESRC));
+  // Grid 預設 stretch 會讓同列卡片等高：展開一張，旁邊沒展開的會被拉長，
+  // 底部多出一塊空白，使用者看起來像「同一列的也跟著展開了」。
+  check('卡片格線不拉伸（align-items:start）', /\.trips-grid\{[\s\S]{0,300}?align-items:\s*start/.test(C),
+    '否則展開一張卡會把同列其他卡一起拉長');
 })();
 
 
