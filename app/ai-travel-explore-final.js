@@ -2,33 +2,18 @@
 // ══════════════════════════════════════════════════
 // DATA
 // ══════════════════════════════════════════════════
-const COMMUNITY_TRIPS = [
-  {id:'t1',cover:'🌊',cc:'c0',title:'台東海岸半日放空之旅',region:'台東',tags:['自然','海岸','半日'],author:'小美 🌿',ava:'👩',authorTrips:12,days:1,budget:'$1,500',people:'2人',likes:284,rating:4.8,copies:156,desc:'只有一個下午的空檔？從海濱公園到觀光夜市，感受台東最純粹的自然魅力。',
-    days_data:[
-      {icon:'🌊',label:'第 1 天',title:'抵達台東·海濱漫步',spots:[{emoji:'🚄',name:'台東車站出發',time:'14:00',tag:'transit'},{emoji:'🚲',name:'租單車騎行',time:'14:30',tag:'walk'},{emoji:'🌅',name:'海濱公園看夕陽',time:'16:30',tag:'sight'},{emoji:'🍜',name:'觀光夜市',time:'18:30',tag:'food'}]}
-    ]},
-  {id:'t2',cover:'⛩️',cc:'c2',title:'京都嵐山一日文化散策',region:'日本',tags:['文化','都市','1天'],author:'Ken 🎌',ava:'👨',authorTrips:28,days:1,budget:'$3,500',people:'2人',likes:521,rating:4.9,copies:342,desc:'善用一天的時間，從嵐山竹林到金閣寺，濃縮京都最精華的文化體驗。',
-    days_data:[
-      {icon:'⛩️',label:'第 1 天',title:'京都·嵐山·金閣寺',spots:[{emoji:'🎋',name:'嵐山竹林步道',time:'09:00',tag:'nature'},{emoji:'🍱',name:'嵐山商店街午餐',time:'12:00',tag:'food'},{emoji:'🏯',name:'金閣寺',time:'14:30',tag:'sight'},{emoji:'🚉',name:'準備回程',time:'16:30',tag:'transit'}]}
-    ]},
-  {id:'t3',cover:'🌸',cc:'c4',title:'首爾弘大半日美食巡禮',region:'韓國',tags:['美食','購物','半日'],author:'Jenny ☕',ava:'👧',authorTrips:9,days:1,budget:'$2,000',people:'3人',likes:398,rating:4.7,copies:228,desc:'轉機或短暫停留首爾？5小時走訪弘大咖啡廳與特色小店。',
-    days_data:[
-      {icon:'🌸',label:'第 1 天',title:'弘大商圈',spots:[{emoji:'☕',name:'弘大特色咖啡廳',time:'13:00',tag:'food'},{emoji:'🛍',name:'弘大商圈逛街',time:'15:00',tag:'walk'},{emoji:'🍱',name:'延南洞小吃',time:'17:00',tag:'food'}]}
-    ]},
-  {id:'t4',cover:'🌿',cc:'c0',title:'花蓮七星潭半日親子遊',region:'花蓮',tags:['親子','自然','半日'],author:'大雄家族 🏔',ava:'👨‍👩‍👧',authorTrips:5,days:1,budget:'$1,800',people:'4人',likes:187,rating:4.6,copies:94,desc:'抵達花蓮後的第一個下午，輕鬆走訪七星潭與漁港，適合親子的短暫放風。',
-    days_data:[
-      {icon:'🚞',label:'第 1 天',title:'抵達花蓮·七星潭',spots:[{emoji:'🚞',name:'搭車抵達花蓮',time:'13:00',tag:'transit'},{emoji:'🌊',name:'七星潭石灘散步',time:'14:30',tag:'nature'},{emoji:'🐟',name:'柴魚博物館',time:'16:30',tag:'sight'},{emoji:'🍱',name:'花蓮港漁市晚餐',time:'18:00',tag:'food'}]}
-    ]},
-  {id:'t5',cover:'🏛',cc:'c1',title:'羅馬競技場周邊半日遊',region:'歐洲',tags:['深度遊','文化','半日'],author:'Marco旅遊 🇮🇹',ava:'🧑',authorTrips:31,days:1,budget:'$2,500',people:'2人',likes:612,rating:4.9,copies:445,desc:'羅馬轉車的短暫空檔，用 4.5 小時快速巡禮古羅馬競技場與周邊遺跡。',
-    days_data:[
-      {icon:'🏛',label:'第 1 天',title:'特米尼車站周邊',spots:[{emoji:'🚉',name:'羅馬特米尼車站出發',time:'14:00',tag:'transit'},{emoji:'🏟',name:'羅馬競技場外觀',time:'14:30',tag:'sight'},{emoji:'🏛',name:'古羅馬廣場漫步',time:'16:00',tag:'walk'},{emoji:'🍦',name:'享用義式冰淇淋',time:'17:30',tag:'food'}]}
-    ]},
-  {id:'t6',cover:'🌆',cc:'c3',title:'台北週末都市兩日遊',region:'台北',tags:['文青','都市','2天'],author:'Yuki ☕',ava:'👩‍🎨',authorTrips:7,days:2,budget:'$4,500',people:'2人',likes:143,rating:4.5,copies:87,desc:'大稻埕老街、松山文創、中山站咖啡廳，台北最有質感的週末。',
-    days_data:[
-      {icon:'🏙',label:'第 1 天',title:'大稻埕·中山',spots:[{emoji:'🏘',name:'大稻埕迪化街',time:'10:00',tag:'walk'},{emoji:'☕',name:'中山站咖啡廳',time:'14:00',tag:'food'},{emoji:'🍸',name:'赤峰街酒吧',time:'20:00',tag:'food'}]},
-      {icon:'🎨',label:'第 2 天',title:'松山文創·信義',spots:[{emoji:'🎨',name:'松山文創園區',time:'10:30',tag:'sight'},{emoji:'🏬',name:'信義區逛街',time:'14:00',tag:'walk'},{emoji:'🌆',name:'象山夜景',time:'18:30',tag:'nature'}]}
-    ]},
-];
+// 官方精選範本：由 app/explore-templates.js 依 poi-data.js 的真實景點即時組出。
+//
+// 這裡原本是 6 筆寫死的「社群行程」（羅馬競技場、京都嵐山、首爾弘大…，
+// 作者 Marco旅遊／Ken／Jenny 與讚數、複製數、星等全是編的）。移除的理由有兩個：
+//   1. 這個 app 沒有公開行程功能，沒有任何真實來源可以支撐那些社群訊號
+//   2. 那些目的地的本地景點資料是 0，使用者點進去按生成也做不出行程
+// 改成即時從真實資料組範本：只展示做得到的地方，數字也都是實算的。
+//
+// poi-data.js 是 defer 載入，所以這裡先留空，由 initOfficialTemplates()
+// 在 DOMContentLoaded 後填入。
+let OFFICIAL_TEMPLATES = [];
+let DISTRICT_BUCKETS = {};
 
 // wizard step definitions
 const WIZ_TOTAL = 4;
@@ -42,12 +27,12 @@ const WIZ_DESTS = [
 ];
 
 // ── STATE ──
-let likedTrips = new Set();
-let ratedTrips = {};
-let copiedTrips = [];
+// 按讚／評分／已複製這三個狀態隨假社群行程一起移除：
+// 官方精選範本沒有社群互動，使用者按讚也沒有任何地方會看到。
+// 舊的 localStorage 鍵（wai_likes / wai_ratings / wai_copied）留著不動，
+// 不主動刪除使用者資料；不再讀寫即可。
 let currentPreviewId = null;
 let activeCat = 'all';
-let activeSort = 'hot';
 let searchQ = '';
 let isLoggedIn = false;
 let currentUser = null;
@@ -77,6 +62,13 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// defer 的 <script>（poi-data.js / explore-templates.js）保證在 DOMContentLoaded
+// 之前執行完；若事件已經過了就直接跑。
+function whenDeferredScriptsReady(fn) {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
+  else fn();
 }
 
 // ── GEMINI & FIREBASE CONFIG ──
@@ -134,7 +126,20 @@ let wizardPreviewDebounceTimer = null;
   }
 
   renderUserMenu();
-  renderGrid();
+  // ★ poi-data.js 與 explore-templates.js 都是 defer，而這段 INIT 是立即執行的 IIFE
+  //   （主程式的 <script> 沒有 defer，會在解析階段就跑）。直接在這裡叫
+  //   initOfficialTemplates() 會拿到還沒載入的 WAI_POI_DATA，結果是 0 個範本。
+  //   defer 腳本保證在 DOMContentLoaded 之前執行完，所以掛在那裡。
+  whenDeferredScriptsReady(() => {
+    initOfficialTemplates();
+    renderDistrictTabs();
+    const tabHost = document.getElementById('districtTabs');
+    if (tabHost) tabHost.addEventListener('click', onDistrictTabClick);
+    renderGrid();
+    renderDestSidebar();
+    renderHeroStats();
+    renderHomeMyTrips();
+  });
   renderSideMyTrips();
   renderMyTrips();
 
@@ -3616,9 +3621,6 @@ function persistableMyTrips() {
 function saveState() {
   try {
     localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
-    localStorage.setItem('wai_likes', JSON.stringify([...likedTrips]));
-    localStorage.setItem('wai_ratings', JSON.stringify(ratedTrips));
-    localStorage.setItem('wai_copied', JSON.stringify(copiedTrips));
     localStorage.setItem(myTripsStorageKey(), JSON.stringify(persistableMyTrips()));
   } catch(e){}
 }
@@ -3628,9 +3630,6 @@ async function loadState() {
     if(u.isLoggedIn){isLoggedIn=true;currentUser=u.currentUser;}
     // 訪客行程搬移「只在 Firebase Auth 確認真實帳號後」做（見 onAuthStateChanged 登入分支）——
     // 搬移會清空訪客鍵、不可逆，依過期快取身分搬會把行程送給錯的帳號、之後也搬不回來。
-    likedTrips = new Set(JSON.parse(localStorage.getItem('wai_likes')||'[]'));
-    ratedTrips = JSON.parse(localStorage.getItem('wai_ratings')||'{}');
-    copiedTrips = JSON.parse(localStorage.getItem('wai_copied')||'[]');
     myTrips = JSON.parse(localStorage.getItem(myTripsStorageKey())||'[]').map(serializeTripForStorage);
     // Firebase 不可用時（CDN 未載入／離線）不會有 auth callback，也就不會有搬移。
     // 這時把訪客鍵的行程標成 __transientGuest 併進 myTrips「只供顯示」——
@@ -4705,70 +4704,246 @@ function tagColorClass(tag) {
   if (['都市','購物','蜜月','單人','文青'].includes(tag)) return 'p';
   return 'gold';
 }
-function starStr(r) {
-  const f = Math.round(r);
-  return '★'.repeat(f) + '☆'.repeat(5-f);
-}
-function getFiltered() {
-  let list = [...COMMUNITY_TRIPS];
-  if (activeCat !== 'all') list = list.filter(t => t.region === activeCat);
-  if (searchQ) {
-    const q = searchQ.toLowerCase();
-    list = list.filter(t => t.title.includes(q)||t.region.includes(q)||t.tags.some(x=>x.includes(q))||t.desc.includes(q));
-  }
-  if (activeSort==='hot') list.sort((a,b)=>(b.likes+b.copies*2)-(a.likes+a.copies*2));
-  else if (activeSort==='rating') list.sort((a,b)=>b.rating-a.rating);
-  else if (activeSort==='copy') list.sort((a,b)=>b.copies-a.copies);
-  else list.sort((a,b)=>b.id.localeCompare(a.id));
-  return list;
-}
-function renderGrid() {
-  const grid = document.getElementById('tripsGrid');
-  const list = getFiltered();
-  if (!list.length) {
-    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--ink3)"><div style="font-size:48px;margin-bottom:12px">🔍</div><div>找不到符合的行程</div></div>`;
+// ── 官方精選範本：初始化與渲染 ──────────────────────────────
+// poi-data.js 與 explore-templates.js 都是 defer，要等 DOM 就緒後才有值。
+function initOfficialTemplates() {
+  if (typeof WAI_TEMPLATES === 'undefined' || !WAI_TEMPLATES) {
+    console.warn('[templates] explore-templates.js 未載入，官方精選範本停用');
     return;
   }
-  grid.innerHTML = list.map(t => {
-    const liked = likedTrips.has(t.id);
-    const myRating = ratedTrips[t.id] || t.rating;
-    const isCopied = copiedTrips.includes(t.id);
-    return `<div class="trip-card">
-      <div class="trip-card-cover ${t.cc}">${t.cover}
-        <div class="tc-badge">${t.days}天 · ${t.people}</div>
-        <div class="tc-copy-badge">📋 ${t.copies+(isCopied?1:0)}</div>
-      </div>
-      <div class="trip-card-body">
-        <div class="tc-tags">
-          ${t.tags.map(tag=>`<span class="tc-tag ${tagColorClass(tag)}">${tag}</span>`).join('')}
-          ${isCopied?'<span class="tc-tag copied">✓ 已複製</span>':''}
-        </div>
-        <div class="tc-title">${t.title}</div>
-        <div class="tc-meta">
-          <span>💰 ${t.budget}</span>
-          <span style="color:var(--gold)">${starStr(myRating)}</span>
-          <span>${myRating.toFixed(1)}</span>
-        </div>
-        <div class="tc-author-row">
-          <div class="tc-ava">${t.ava}</div>
-          <div class="tc-author">${t.author}</div>
-          <div class="tc-actions">
-            <button class="tc-like-btn${liked?' liked':''}" onclick="toggleLike(event,'${t.id}')" aria-label="${liked?'取消喜歡':'喜歡這個行程'}">${liked?'❤️':'🤍'} ${t.likes+(liked?1:0)}</button>
-            <button class="tc-preview-btn" onclick="openPreview('${t.id}')">預覽</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
+  const poi = (typeof window !== 'undefined' && window.WAI_POI_DATA) ? window.WAI_POI_DATA : null;
+  if (!poi) {
+    console.warn('[templates] poi-data.js 未載入，官方精選範本停用');
+    return;
+  }
+  DISTRICT_BUCKETS = WAI_TEMPLATES.bucketByDistrict(poi);
+  OFFICIAL_TEMPLATES = WAI_TEMPLATES.GROUPS
+    .reduce((acc, g) => acc.concat(g.keys), [])
+    .map((k) => WAI_TEMPLATES.buildTemplate(k, DISTRICT_BUCKETS))
+    .filter(Boolean);
+}
+
+// 首頁只放 6 張（桌機 3 欄＝兩排）。首頁要的是「挑一個開始」，不是把 16 區攤成型錄。
+const HOME_PICKS = ['台東', '綠島', '蘭嶼', '卑南', '成功', '東河'];
+
+function getFiltered() {
+  if (activeCat !== 'all') return OFFICIAL_TEMPLATES.filter((t) => t.key === activeCat);
+  if (searchQ) {
+    const q = searchQ.toLowerCase();
+    return OFFICIAL_TEMPLATES.filter((t) =>
+      t.key.includes(q) || t.title.toLowerCase().includes(q) || t.group.includes(q)
+      || t.stops.some((s) => String(s.name).toLowerCase().includes(q)));
+  }
+  const picked = HOME_PICKS.map((k) => OFFICIAL_TEMPLATES.find((t) => t.key === k)).filter(Boolean);
+  return picked.length ? picked : OFFICIAL_TEMPLATES.slice(0, 6);
+}
+
+function renderGrid() {
+  const grid = document.getElementById('tripsGrid');
+  if (!grid) return;
+  const list = getFiltered();
+  const note = document.getElementById('secNote');
+  if (note) {
+    note.textContent = !OFFICIAL_TEMPLATES.length ? ''
+      : (activeCat === 'all' ? '挑一份直接開始，或切上面的地區看別的' : '目前只看「' + activeCat + '」');
+  }
+  if (!list.length) {
+    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--ink3)">'
+      + '<div style="font-size:48px;margin-bottom:12px">\u{1F5FA}</div>'
+      + '<div>' + (OFFICIAL_TEMPLATES.length ? '這個地區還沒有足夠的景點資料' : '景點資料尚未載入') + '</div></div>';
+    return;
+  }
+  grid.innerHTML = list.map((t) => {
+    const gate = WAI_TEMPLATES.GATE.name;
+    const last = t.stops[t.stops.length - 1];
+    const routeText = t.island ? '島上環線'
+      : escapeHtml(gate) + ' <i>→</i> ' + escapeHtml(last.name) + ' <i>→</i> 返回';
+    const stopsHtml = t.stops.map((s) =>
+      '<div class="tpl-stop' + (s.via ? ' via' : '') + '">'
+      + '<span class="tpl-dot"></span>'
+      + '<span class="tpl-stop-name">' + escapeHtml(s.name) + '</span>'
+      + '<span class="tpl-kind ' + (s.via ? 'via' : 'main') + '">'
+      + (s.via ? escapeHtml(s.fromDistrict || '') + '・沿途' : '主軸') + '</span></div>').join('');
+    const mixHtml = t.island
+      ? '島上 <b>' + t.mainCount + '</b> 站環線，沒有陸路往返，不需要沿途補點。'
+      : '<b>' + t.mainCount + '</b> 站在' + escapeHtml(t.key) + '，<b>' + t.viaCount + '</b> 站是'
+        + escapeHtml(gate) + '往返途中順路加入的。';
+    const farHtml = t.farForOneDay
+      ? '<br><span class="tpl-far">⚠️ 來回 ' + Math.round(t.km) + ' km，當天往返太趕，建議排兩日。</span>'
+      : '';
+    const ratingHtml = t.rating
+      ? '<span class="tpl-fact">★ <b>' + t.rating.toFixed(1) + '</b>'
+        + '<span class="tpl-rated-n">' + t.ratedCount + '/' + t.stops.length + '</span></span>'
+      : '';
+    return '<article class="tpl-card">'
+      + '<div class="tpl-cover">'
+      + WAI_TEMPLATES.routeSvg(t, t.key)
+      + '<div class="tpl-cover-top">'
+      + '<span class="tpl-chip official">✦ 官方精選</span>'
+      + '<span class="tpl-chip' + (t.farForOneDay ? ' far' : '') + '">'
+      + t.stops.length + ' 站 · ' + Math.round(t.km) + ' km</span></div>'
+      + '<div class="tpl-cover-foot">'
+      + '<span class="tpl-region">' + escapeHtml(t.emoji + ' ' + t.key) + '</span>'
+      + '<span class="tpl-route">' + routeText + '</span></div></div>'
+      + '<div class="tpl-body">'
+      + '<h3 class="tpl-title">' + escapeHtml(t.title) + '</h3>'
+      + '<div class="tpl-stops">' + stopsHtml + '</div>'
+      + '<p class="tpl-mix">' + mixHtml + farHtml + '</p>'
+      + '<div class="tpl-facts">'
+      + '<span class="tpl-fact">⏱ 停留 <b>' + WAI_TEMPLATES.fmtDuration(t.stayMin) + '</b></span>'
+      + ratingHtml
+      + '<button class="tpl-btn" onclick="openPreview(\'' + escapeHtml(t.key) + '\')">預覽</button>'
+      + '</div></div></article>';
   }).join('');
 }
-function filterCat(btn, cat) {
-  document.querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'));
-  btn.classList.add('active'); activeCat = cat; renderGrid();
+
+// ── 行政區分頁（依地理分組） ──
+function renderDistrictTabs() {
+  const host = document.getElementById('districtTabs');
+  if (!host || typeof WAI_TEMPLATES === 'undefined') return;
+  const count = (k) => (DISTRICT_BUCKETS[k] || []).length;
+  const rows = WAI_TEMPLATES.GROUPS.map((g) => {
+    const tabs = g.keys.filter(count).map((k) =>
+      '<button class="dtab' + (k === activeCat ? ' on' : '') + (count(k) < 10 ? ' thin' : '') + '"'
+      + ' data-k="' + escapeHtml(k) + '">' + escapeHtml(k) + '<b>' + count(k) + '</b></button>').join('');
+    return tabs ? '<div class="tabrow"><span class="grouplab">' + g.label + '</span>' + tabs + '</div>' : '';
+  }).join('');
+  host.innerHTML = '<div class="tabrow"><span class="grouplab">　</span>'
+    + '<button class="dtab' + (activeCat === 'all' ? ' on' : '') + '" data-k="all">全部</button></div>' + rows;
 }
-function filterCatByName(cat) {
-  activeCat = cat;
-  document.querySelectorAll('.filter-tab').forEach(t => t.classList.toggle('active', t.textContent.includes(cat)));
+
+function onDistrictTabClick(e) {
+  const btn = e.target.closest('.dtab');
+  if (!btn) return;
+  activeCat = btn.dataset.k;
+  searchQ = '';
+  renderDistrictTabs();
   renderGrid();
+}
+
+// ── 側欄：可規劃的目的地（台東本島合計 / 綠島 / 蘭嶼） ──
+function renderDestSidebar() {
+  const host = document.getElementById('destSidebar');
+  if (!host || typeof WAI_TEMPLATES === 'undefined') return;
+  const islands = ['綠島', '蘭嶼'];
+  const allKeys = WAI_TEMPLATES.GROUPS.reduce((acc, g) => acc.concat(g.keys), []);
+  const mainlandKeys = allKeys.filter((k) => islands.indexOf(k) < 0);
+  const mainland = mainlandKeys.reduce((a, k) => a + (DISTRICT_BUCKETS[k] || []).length, 0);
+  const townCount = mainlandKeys.filter((k) => (DISTRICT_BUCKETS[k] || []).length).length;
+  const rows = [
+    { k: '台東', emoji: '\u{1F30A}', n: mainland, sub: '含 ' + townCount + ' 個鄉鎮市' },
+    { k: '綠島', emoji: '\u{1F3DD}', n: (DISTRICT_BUCKETS['綠島'] || []).length, sub: '船班往返' },
+    { k: '蘭嶼', emoji: '⛰', n: (DISTRICT_BUCKETS['蘭嶼'] || []).length, sub: '船班往返' }
+  ].filter((r) => r.n);
+  if (!rows.length) { host.innerHTML = ''; return; }
+  const max = Math.max.apply(null, rows.map((r) => r.n));
+  host.innerHTML = rows.map((r) =>
+    '<div class="dest-row" onclick="filterCatByName(\'' + escapeHtml(r.k) + '\')">'
+    + '<div class="dest-mark">' + r.emoji + '</div>'
+    + '<div class="dest-body">'
+    + '<div class="dest-name">' + escapeHtml(r.k) + '</div>'
+    + '<div class="dest-sub">' + escapeHtml(r.sub) + '</div>'
+    + '<div class="dest-bar"><i style="width:' + Math.round(r.n / max * 100) + '%"></i></div></div>'
+    + '<div class="dest-n">' + r.n + '</div></div>').join('');
+}
+
+// ── Hero 數據：實算，取代原本寫死的 2,481 / 18,340 / 4.8 ──
+function renderHeroStats() {
+  const poi = (typeof window !== 'undefined' && window.WAI_POI_DATA) ? window.WAI_POI_DATA : null;
+  if (!poi) return;
+  const all = Object.keys(poi).filter((k) => Array.isArray(poi[k]))
+    .reduce((a, k) => a.concat(poi[k]), []);
+  const seen = new Set();
+  const uniq = all.filter((p) => {
+    if (!p || !p.name || seen.has(p.name)) return false;
+    seen.add(p.name); return true;
+  });
+  const rated = uniq.filter((p) => Number(p.rating) > 0);
+  const towns = Object.keys(DISTRICT_BUCKETS).length;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('hstatSpots', uniq.length.toLocaleString('en-US'));
+  set('hstatDistricts', towns || '--');
+  set('totalRating', rated.length
+    ? (rated.reduce((a, p) => a + Number(p.rating), 0) / rated.length).toFixed(1) : '--');
+}
+
+// 從首頁的行程卡開啟。沿用「我的微旅行」頁既有的行為：
+// 生成到一半的個人行程要繼續生成，不能直接跳去 planner（那邊會拿到空行程）。
+function openMyTrip(id) {
+  const t = (myTrips || []).find((x) => String(x.id) === String(id));
+  if (!t) return;
+  if (typeof isUnfinishedPersonalTrip === 'function' && isUnfinishedPersonalTrip(t)
+      && typeof resumePersonalTripGeneration === 'function') {
+    resumePersonalTripGeneration(t.id);
+    return;
+  }
+  window.location = 'ai-travel-planner-v8.html?id=' + encodeURIComponent(t.id);
+}
+
+// ── 首頁的「我的行程」區塊 ──
+function renderHomeMyTrips() {
+  const host = document.getElementById('homeMyTrips');
+  const note = document.getElementById('myTripsNote');
+  if (!host) return;
+  if (!isLoggedIn) {
+    if (note) note.textContent = '';
+    host.innerHTML = '<div class="home-mt-empty">'
+      + '<div class="ico">\u{1F5FA}</div>'
+      + '<p>登入後，你生成的行程會留在這裡，換裝置也看得到。<br>'
+      + '也可以直接挑上面的範本開始規劃。</p>'
+      + '<button onclick="openLogin()">登入 / 註冊</button></div>';
+    return;
+  }
+  const list = (myTrips || []).slice()
+    .sort((a, b) => String(b.id).localeCompare(String(a.id)))
+    .slice(0, 6);
+  if (note) note.textContent = list.length ? ('最近 ' + list.length + ' 份') : '';
+  if (!list.length) {
+    host.innerHTML = '<div class="home-mt-empty">'
+      + '<div class="ico">✨</div>'
+      + '<p>還沒有行程。挑一份上面的精選範本開始，或用 AI 規劃你自己的。</p>'
+      + '<button onclick="openWizard()">＋ 建立微旅行</button></div>';
+    return;
+  }
+  const label = (typeof MT_STATUS_LABEL !== 'undefined' && MT_STATUS_LABEL) ? MT_STATUS_LABEL : {};
+  host.innerHTML = '<div class="home-mt-grid">' + list.map((t) => {
+    const stops = Array.isArray(t.stops) ? t.stops.length : 0;
+    return '<div class="home-mt">'
+      + '<div class="home-mt-top">'
+      + '<div class="home-mt-emoji">' + escapeHtml(t.emoji || '\u{1F9ED}') + '</div>'
+      + '<div style="min-width:0">'
+      + '<div class="home-mt-name">' + escapeHtml(t.title || '未命名行程') + '</div>'
+      + '<div class="home-mt-when">' + escapeHtml(t.createdAt || '') + '</div></div>'
+      + '<span class="home-mt-status tc-tag ' + tagColorClass(t.status || '') + '">'
+      + escapeHtml(label[t.status] || '規劃中') + '</span></div>'
+      + '<div class="home-mt-meta">'
+      + '<span>\u{1F4CD} ' + (stops ? stops + ' 站' : '尚未生成') + '</span>'
+      + '<span>\u{1F5D3} ' + escapeHtml(String(t.days || '--')) + '</span>'
+      + '<span>\u{1F465} ' + escapeHtml(String(t.people || '--')) + '</span></div>'
+      + '<div class="home-mt-acts">'
+      + '<button class="go" onclick="openMyTrip(\'' + escapeHtml(String(t.id)) + '\')">開啟</button>'
+      + '</div></div>';
+  }).join('') + '</div>';
+}
+
+function filterCat(btn, cat) {
+  activeCat = cat;
+  renderDistrictTabs();
+  renderGrid();
+}
+// 側欄的「台東」指的是整個本島（14 個鄉鎮的合計），沒有單一分頁對應它，
+// 所以視為回到「全部」；綠島／蘭嶼本身就是分頁，直接切過去。
+function filterCatByName(cat) {
+  const hasTab = !!(DISTRICT_BUCKETS && DISTRICT_BUCKETS[cat]
+    && DISTRICT_BUCKETS[cat].length && cat !== '台東');
+  activeCat = hasTab ? cat : 'all';
+  searchQ = '';
+  const input = document.getElementById('searchInput');
+  if (input) input.value = '';
+  renderDistrictTabs();
+  renderGrid();
+  const grid = document.getElementById('tripsGrid');
+  if (grid && grid.scrollIntoView) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 // 搜尋 debounce：oninput 每鍵都整格 innerHTML 重建，清單長時輸入卡頓
 let _searchDebounceTimer = null;
@@ -4777,112 +4952,94 @@ function handleSearch() {
   clearTimeout(_searchDebounceTimer);
   _searchDebounceTimer = setTimeout(renderGrid, 250);
 }
-function handleSort(v) { activeSort = v; renderGrid(); }
 function searchTag(tag) { document.getElementById('searchInput').value = tag; searchQ = tag; renderGrid(); }
-
-// ══════════════════════════════════════════════════
-// LIKE
-// ══════════════════════════════════════════════════
-function toggleLike(e, id) {
-  e.stopPropagation();
-  if (!isLoggedIn) { openLogin(); return; }
-  if (likedTrips.has(id)) { likedTrips.delete(id); showToast('已取消按讚'); }
-  else { likedTrips.add(id); showToast('❤️ 已按讚！', 'green'); }
-  saveState(); renderGrid();
-  if (currentPreviewId===id) updatePmLike();
-}
 
 // ══════════════════════════════════════════════════
 // PREVIEW MODAL
 // ══════════════════════════════════════════════════
-function openPreview(id) {
-  const t = COMMUNITY_TRIPS.find(t=>t.id===id);
+function openPreview(key) {
+  const t = OFFICIAL_TEMPLATES.find((x) => x.key === key);
   if (!t) return;
-  currentPreviewId = id;
+  currentPreviewId = key;
   const hdr = document.getElementById('pmHeader');
-  hdr.className = `pm-header ${t.cc}`;
+  const THEME_CC = { '海線': 'c0', '市區': 'c1', '縱谷': 'c0', '南迴': 'c3', '離島': 'c2' };
+  hdr.className = 'pm-header ' + (THEME_CC[t.group] || 'c0');
   document.getElementById('pmTitle').textContent = t.title;
-  document.getElementById('pmTags').innerHTML = t.tags.map(tag=>`<span class="pm-tag">${tag}</span>`).join('');
-  document.getElementById('pmStats').innerHTML = `
-    <div><div class="pmstat-val">${t.days}</div><div class="pmstat-label">天</div></div>
-    <div><div class="pmstat-val">${t.budget}</div><div class="pmstat-label">預算</div></div>
-    <div><div class="pmstat-val">${t.copies}</div><div class="pmstat-label">次複製</div></div>`;
-  document.getElementById('pmAva').textContent = t.ava;
-  document.getElementById('pmAuthor').textContent = t.author;
-  document.getElementById('pmAuthorSub').textContent = `已分享 ${t.authorTrips} 份行程`;
-  renderPmStars(ratedTrips[id]||0);
-  document.getElementById('pmBody').innerHTML = t.days_data.map(day=>`
-    <div class="pm-day">
-      <div class="pm-day-hdr">
-        <div class="pm-day-icon">${day.icon}</div>
-        <div><div class="pm-day-label">${day.label}</div><div class="pm-day-title">${day.title}</div></div>
-      </div>
-      <div class="pm-spots">
-        ${day.spots.map(s=>`
-          <div class="pm-spot">
-            <span class="pm-spot-emoji">${s.emoji}</span>
-            <span class="pm-spot-name">${s.name}</span>
-            <span class="pm-spot-time">${s.time}</span>
-            <span class="pm-spot-tag ${s.tag}">${{sight:'景點',food:'美食',walk:'步行',nature:'自然',transit:'交通'}[s.tag]||s.tag}</span>
-          </div>`).join('')}
-      </div>
-    </div>`).join('');
-  updatePmLike(); updatePmCopy();
+  document.getElementById('pmTags').innerHTML =
+    [t.group, t.island ? '離島' : '本島', t.farForOneDay ? '建議兩日' : '一日']
+      .map((tag) => '<span class="pm-tag">' + escapeHtml(tag) + '</span>').join('');
+  document.getElementById('pmStats').innerHTML =
+    '<div><div class="pmstat-val">' + t.stops.length + '</div><div class="pmstat-label">站</div></div>'
+    + '<div><div class="pmstat-val">' + Math.round(t.km) + '</div><div class="pmstat-label">公里</div></div>'
+    + '<div><div class="pmstat-val">' + WAI_TEMPLATES.fmtDuration(t.stayMin) + '</div><div class="pmstat-label">停留</div></div>';
+  document.getElementById('pmAuthorSub').textContent = t.island
+    ? ('島上 ' + t.mainCount + ' 站環線')
+    : (t.mainCount + ' 站在' + t.key + '，' + t.viaCount + ' 站沿途順路');
+
+  // 時間是「從台東車站出發後依停留時長累加」的示意，不是排好的行程——
+  // 真正的時間要等 AI 依營業時間與車程重排，所以這裡標明是預估。
+  let clock = 9 * 60;
+  const rows = t.stops.map((s2) => {
+    const hh = String(Math.floor(clock / 60) % 24).padStart(2, '0');
+    const mm = String(clock % 60).padStart(2, '0');
+    clock += (s2.duration || 45) + 20;   // 停留 + 粗估車程
+    const kind = s2.via ? 'transit' : 'sight';
+    const kindLabel = s2.via ? ((s2.fromDistrict || '') + '・沿途') : '主軸';
+    return '<div class="pm-spot">'
+      + '<span class="pm-spot-emoji">' + (s2.via ? '\u{1F697}' : '\u{1F4CD}') + '</span>'
+      + '<span class="pm-spot-name">' + escapeHtml(s2.name) + '</span>'
+      + '<span class="pm-spot-time">' + hh + ':' + mm + '</span>'
+      + '<span class="pm-spot-tag ' + kind + '">' + escapeHtml(kindLabel) + '</span>'
+      + '</div>';
+  }).join('');
+  document.getElementById('pmBody').innerHTML =
+    '<div class="pm-day">'
+    + '<div class="pm-day-hdr">'
+    + '<div class="pm-day-icon">' + t.emoji + '</div>'
+    + '<div><div class="pm-day-label">' + escapeHtml(t.key) + '</div>'
+    + '<div class="pm-day-title">' + escapeHtml(t.group) + '・'
+    + escapeHtml(t.island ? '島上環線' : (WAI_TEMPLATES.GATE.name + ' 往返')) + '</div></div></div>'
+    + '<div class="pm-spots">' + rows + '</div>'
+    + '<p style="font-size:13px;color:var(--ink3);margin:10px 4px 0;line-height:1.7;text-wrap:pretty;">'
+    + 'ℹ 時間為依停留時長累加的預估；實際行程會由 AI 依各站營業時間與車程重新安排。</p>'
+    + '</div>';
+  updatePmCopy();
   document.getElementById('previewOverlay').classList.add('open');
 }
 function closePreview() {
   document.getElementById('previewOverlay').classList.remove('open');
   currentPreviewId = null;
 }
-function renderPmStars(my) {
-  const row = document.getElementById('pmStars');
-  row.innerHTML = `<span style="font-size:13px;color:rgba(255,255,255,.7);margin-right:4px">${my?'你給了 '+my+'星':'為行程評分'}</span>
-    ${[1,2,3,4,5].map(i=>`
-      <button class="pm-star" onclick="rateTrip(${i})" aria-label="評分 ${i} 星" style="color:${i<=my?'#f5c842':'rgba(255,255,255,.35)'}">★</button>`).join('')}`;
-}
-function rateTrip(stars) {
-  if (!currentPreviewId) return;
-  if (!isLoggedIn) { closePreview(); openLogin(); return; }
-  ratedTrips[currentPreviewId] = stars;
-  renderPmStars(stars); renderGrid(); saveState();
-  showToast(`⭐ 已評 ${stars} 星！`, 'green');
-}
-function updatePmLike() {
-  if (!currentPreviewId) return;
-  const t = COMMUNITY_TRIPS.find(t=>t.id===currentPreviewId);
-  const liked = likedTrips.has(currentPreviewId);
-  document.getElementById('pmLikeBtn').className = `pm-like-btn${liked?' liked':''}`;
-  document.getElementById('pmLikeIcon').textContent = liked ? '❤️' : '🤍';
-  document.getElementById('pmLikeCount').textContent = t.likes+(liked?1:0);
-}
-function togglePreviewLike() { toggleLike({stopPropagation:()=>{}}, currentPreviewId); }
 function updatePmCopy() {
-  const done = copiedTrips.includes(currentPreviewId);
   const btn = document.getElementById('pmCopyBtn');
-  btn.textContent = done ? '✅ 已複製到我的微旅行' : '📋 複製這份行程';
-  btn.className = `pm-copy-btn${done?' done':''}`;
+  if (!btn) return;
+  btn.textContent = '✨ 用這份開始規劃';
+  btn.className = 'pm-copy-btn';
 }
 
 // ══════════════════════════════════════════════════
-// COPY TRIP
+// 用範本開始規劃
 // ══════════════════════════════════════════════════
+// 原本的 copyTrip 是把假行程複製成 myTrips 的一筆（status:'copied'）。
+// 範本沒有既成的行程內容可以「複製」——它是一組起點建議，所以改成帶著
+// 目的地與想去的景點開精靈，讓 AI 真的生成一份。
 function copyTrip() {
   if (!isLoggedIn) { closePreview(); openLogin(); return; }
-  const t = COMMUNITY_TRIPS.find(t=>t.id===currentPreviewId);
+  const t = OFFICIAL_TEMPLATES.find((x) => x.key === currentPreviewId);
   if (!t) return;
-  if (copiedTrips.includes(t.id)) { showToast('已經複製過了！'); return; }
-  copiedTrips.push(t.id);
-  // add to myTrips
-  myTrips.push({
-    id: 'my_'+Date.now(), title: t.title, emoji: t.cover, cc: t.cc,
-    days: t.days, region: t.region, budget: t.budget, people: t.people,
-    status: 'copied', createdAt: new Date().toLocaleDateString('zh-TW'),
-    sourceId: t.id
-  });
-  saveState(); closePreview(); updatePmCopy(); renderGrid(); renderSideMyTrips();
-  document.getElementById('csTitle').textContent = `「${t.title}」複製成功！`;
-  document.getElementById('csDesc').innerHTML = `已加入你的行程。<br>可以在「我的微旅行」中用 AI 調整，打造專屬版本。`;
-  document.getElementById('copySuccessOverlay').classList.add('open');
+  closePreview();
+  // 離島的 dest 就是它自己；本島各鄉鎮共用「台東」這個目的地鍵（poi-data 的分桶）
+  const dest = t.island ? t.key : '台東';
+  const desired = t.stops.filter((s) => !s.via).map((s) => s.name).join('、');
+  if (typeof openWizard === 'function') {
+    openWizard();
+    wizData.dest = dest;
+    wizData.desiredSpots = desired;
+    wizData.tripName = t.title;
+    if (t.farForOneDay) wizData.days = '2天1夜';
+    if (typeof renderWizard === 'function') renderWizard();
+  }
+  showToast('已帶入「' + t.title + '」的景點，調整偏好後就能生成', 'green');
 }
 function closeCopySuccess() { document.getElementById('copySuccessOverlay').classList.remove('open'); }
 function goToMyTrips() { closeCopySuccess(); showMainView('mytrips'); }
@@ -5285,19 +5442,11 @@ async function shareTrip(id) {
   }
 }
 
+// 側欄的「我的微旅行」已升格成首頁主區塊（#homeMyTrips）。
+// 這個函式有 20 個既有呼叫點散在各處，保留名稱轉呼叫新的渲染，
+// 比逐一改動安全——也讓之後任何新增的呼叫點自動保持同步。
 function renderSideMyTrips() {
-  const el = document.getElementById('sideMyTrips');
-  if (!el) return;
-  if (!myTrips.length) {
-    el.innerHTML = `<div style="font-size:16px;color:var(--ink3);text-align:center;padding:10px 0">還沒有行程，點上方建立</div>`;
-    return;
-  }
-  el.innerHTML = `<div class="my-trips-list">${myTrips.slice(0,4).map(t=>`
-    <div class="my-trip-row" onclick="showMainView('mytrips')">
-      <span class="my-trip-emoji">${t.emoji}</span>
-      <div><div class="my-trip-name">${t.title}</div><div class="my-trip-sub">${t.days}天 · ${t.region}</div></div>
-    </div>`).join('')}</div>
-    ${myTrips.length>4?`<div style="font-size:14px;color:var(--accent);text-align:center;padding:8px 0;cursor:pointer" onclick="showMainView('mytrips')">查看全部 ${myTrips.length} 個行程 →</div>`:''}`;
+  renderHomeMyTrips();
 }
 
 // ══════════════════════════════════════════════════

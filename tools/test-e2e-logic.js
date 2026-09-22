@@ -496,6 +496,92 @@ check('getBusinessHoursWarning 不再二次解析時間窗',
 })();
 
 // ══════════════════════════════════════════════════════════════
+section('7. 官方精選範本（explore-templates.js × 真實 poi-data）');
+(() => {
+  const T = require(path.join(APP, 'explore-templates.js'));
+  const c = { window: {} };
+  vm.createContext(c);
+  vm.runInContext(fs.readFileSync(path.join(APP, 'poi-data.js'), 'utf8'), c);
+  const buckets = T.bucketByDistrict(c.window.WAI_POI_DATA);
+  const allKeys = T.GROUPS.reduce((a, g) => a.concat(g.keys), []);
+
+  check('16 個鄉鎮全部分得到桶', allKeys.every((k) => (buckets[k] || []).length),
+    allKeys.filter((k) => !(buckets[k] || []).length).join('、') + ' 沒有景點');
+
+  // 交通節點與住宿不該進範本：poi-data 混了車站（同一站三種寫法）與民宿
+  const flat = allKeys.reduce((a, k) => a.concat(buckets[k] || []), []);
+  check('桶裡沒有車站／機場／碼頭', !flat.some((p2) => T.isTransit(p2.name)),
+    (flat.find((p2) => T.isTransit(p2.name)) || {}).name);
+  check('桶裡沒有住宿', !flat.some((p2) => T.isLodging(p2.name)),
+    (flat.find((p2) => T.isLodging(p2.name)) || {}).name);
+
+  const tpls = allKeys.map((k) => T.buildTemplate(k, buckets));
+  check('16 個鄉鎮全部組得出範本', tpls.every(Boolean),
+    allKeys.filter((k, i) => !tpls[i]).join('、') + ' 組不出來');
+
+  // ★ 走廊規則：沿途候選只能來自同走廊或市區。
+  //   台東的幹道從台東市呈 V 字分岔，只看直線繞路會把縱谷景點判成去海線的順路點。
+  const crossCorridor = [];
+  tpls.filter(Boolean).forEach((t) => {
+    t.stops.filter((s2) => s2.via).forEach((s2) => {
+      const g = T.groupOf(s2.fromDistrict);
+      if (g !== t.group && g !== '市區') crossCorridor.push(t.key + '←' + s2.name + '(' + s2.fromDistrict + ')');
+    });
+  });
+  check('沿途景點不跨走廊', crossCorridor.length === 0, crossCorridor.slice(0, 3).join('、'));
+
+  // 同一份行程不該出現重複站名
+  const dupIn = tpls.filter(Boolean).filter((t) => {
+    const names = t.stops.map((s2) => s2.name);
+    return new Set(names).size !== names.length;
+  }).map((t) => t.key);
+  check('同一份範本沒有重複站名', dupIn.length === 0, dupIn.join('、'));
+
+  // 評分只平均「有評分」的站：把 rating=0 算進去會變成 ★1.1 這種假象
+  const badRating = tpls.filter(Boolean).filter((t) => t.rating !== null && (t.rating < 3 || t.rating > 5));
+  check('範本平均評分落在合理範圍（3–5 或 null）', badRating.length === 0,
+    badRating.map((t) => t.key + ':' + t.rating).join('、'));
+
+  // ★ SVG 漸層 id 必須唯一。原本把非 ASCII 濾掉，中文鄉鎮名整個被清空、
+  //   每張卡的 id 都變成 'wt-'，於是全部指向第一個漸層（實測六張卡全變橘色）。
+  const ids = tpls.filter(Boolean).map((t) => {
+    const m = T.routeSvg(t, t.key).match(/<linearGradient id="([^"]+)"/);
+    return m ? m[1] : null;
+  });
+  check('每個範本的漸層 id 唯一', new Set(ids).size === ids.length && !ids.includes(null),
+    '重複或缺漏：' + ids.length + ' 個 id 只有 ' + new Set(ids).size + ' 種');
+
+  // 離島沒有陸路往返，不該有沿途站
+  const islandVia = tpls.filter(Boolean).filter((t) => t.island && t.viaCount > 0).map((t) => t.key);
+  check('離島範本沒有沿途站', islandVia.length === 0, islandVia.join('、'));
+
+  // 產生的 HTML 片段不得含未跳脫的角括號（站名來自資料，需經 escapeHtml）
+  const svgAll = tpls.filter(Boolean).map((t) => T.routeSvg(t, t.key)).join('');
+  check('routeSvg 只輸出數字與固定色碼', !/[\u4e00-\u9fff]/.test(svgAll),
+    '路線 SVG 不應包含中文（站名要由呼叫端 escape 後輸出）');
+})();
+
+// ══════════════════════════════════════════════════════════════
+section('8. 探索首頁：假社群資料已移除');
+(() => {
+  const H = fs.readFileSync(path.join(APP, 'ai-travel-explore-final.html'), 'utf8');
+  check('沒有寫死的社群行程', !/COMMUNITY_TRIPS\s*=\s*\[\s*\{/.test(ESRC),
+    '假行程資料應已由 explore-templates 取代');
+  // 只抓「物件屬性」不抓註解文字：解釋為何移除的註解要留著，
+  // 否則下一個人不知道那些假作者是刻意拿掉的（跟 scheduleWarning 同一個教訓）。
+  check('沒有假作者', !/authorTrips\s*:|ava\s*:\s*'|author\s*:\s*'/.test(ESRC));
+  check('沒有按讚／評分狀態', !/likedTrips|ratedTrips|copiedTrips/.test(ESRC));
+  check('分頁不再寫死日本／韓國／歐洲', !/filterCat\(this,'(日本|韓國|歐洲|台北)'\)/.test(H));
+  // 同理：抓「渲染出來的值」而不是註解裡提到的舊數字
+  check('hero 數據不再寫死', !/hstat-num[^>]*>\s*(2,481|18,340|4\.8)\s*</.test(H));
+  check('範本模組有被載入', /explore-templates\.js/.test(H));
+  // 時序：初始化必須等 defer 腳本（poi-data.js）執行完
+  check('範本初始化等 defer 腳本就緒', /whenDeferredScriptsReady\(\s*\(\)\s*=>\s*\{[\s\S]{0,200}?initOfficialTemplates\(\)/.test(ESRC),
+    '直接在 IIFE 裡初始化會拿到還沒載入的 WAI_POI_DATA（實測 0 個範本）');
+})();
+
+
+// ══════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════');
 console.log('通過 ' + pass + '，失敗 ' + fail);
 if (failures.length) {

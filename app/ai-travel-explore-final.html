@@ -23,12 +23,13 @@
 <script src="friends.js?v=20260722-friends3"></script>
 <script src="notifications.js?v=20260722-friends2"></script>
 <script src="wheel-picker.js"></script>
-<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260804-layout1">
+<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260922-home2">
 <link rel="stylesheet" href="./design-tokens.css?v=20260727-fix3">
 <script src="./icons.js?v=20260727-fix3"></script>
 <script src="./ui-feedback.js?v=20260727-fix3"></script>
 <script src="./cost-tracking.js?v=20260728-e2e2"></script>
 <script src="./business-hours.js?v=20260903-e2efix3"></script>
+<script src="./explore-templates.js?v=20260922-home2" defer></script>
 </head>
 <body>
 
@@ -43,21 +44,20 @@
       <div class="pm-title" id="pmTitle"></div>
       <div class="pm-tags" id="pmTags"></div>
       <div class="pm-stats" id="pmStats"></div>
+      <!-- 原本是假作者（Marco旅遊／Ken／Jenny）＋星等評分列。
+           官方精選範本沒有作者，也不該讓使用者對「範本」評分——改成組成說明。 -->
       <div class="pm-author-row">
-        <div class="pm-author-ava" id="pmAva"></div>
+        <div class="pm-author-ava" id="pmAva">✦</div>
         <div class="pm-author-info">
-          <div class="pm-author-name" id="pmAuthor"></div>
+          <div class="pm-author-name" id="pmAuthor">官方精選範本</div>
           <div class="pm-author-sub" id="pmAuthorSub"></div>
         </div>
-        <div class="pm-stars-row" id="pmStars"></div>
       </div>
     </div>
     <div class="pm-body" id="pmBody"></div>
+    <!-- 原本有「喜歡」按鈕（假讚數）。範本沒有社群互動，只留「用這份開始」。 -->
     <div class="pm-footer">
-      <button class="pm-like-btn" id="pmLikeBtn" onclick="togglePreviewLike()" aria-label="喜歡這個行程">
-        <span id="pmLikeIcon">🤍</span><span id="pmLikeCount">0</span>
-      </button>
-      <button class="pm-copy-btn" id="pmCopyBtn" onclick="copyTrip()">📋 複製這份行程</button>
+      <button class="pm-copy-btn" id="pmCopyBtn" onclick="copyTrip()">✨ 用這份開始規劃</button>
     </div>
   </div>
 </div>
@@ -341,67 +341,58 @@
 <div id="exploreView">
   <div class="hero-strip">
     <div class="hero-strip-text">
-      <h1>探索社群行程，一鍵複製出發</h1>
-      <p>瀏覽真實旅人分享的完整行程，預覽景點安排後直接複製，再用 AI 個人化調整。</p>
+      <h1>台東怎麼玩，挑一份範本就開始</h1>
+      <p>挑一份台東各鄉鎮的精選範本直接開始，或用 AI 依你的節奏重新規劃。</p>
       <div class="hero-btns">
         <button class="hero-btn-primary" onclick="openWizard()">＋ 建立微旅行</button>
-        <button class="hero-btn-secondary" onclick="document.querySelector('.trips-grid').scrollIntoView({behavior:'smooth'})">探索熱門行程 ↓</button>
+        <button class="hero-btn-secondary" onclick="document.querySelector('.trips-grid').scrollIntoView({behavior:'smooth'})">看看精選範本 ↓</button>
       </div>
     </div>
+    <!-- 數據由 renderHeroStats() 依 poi-data.js 實算填入；原本是寫死的 2,481/18,340/4.8 -->
     <div class="hero-stats">
-      <div class="hstat"><div class="hstat-num">2,481</div><div class="hstat-label">行程分享</div></div>
-      <div class="hstat"><div class="hstat-num">18,340</div><div class="hstat-label">次複製</div></div>
-      <div class="hstat"><div class="hstat-num" id="totalRating">4.8</div><div class="hstat-label">平均評分</div></div>
+      <div class="hstat"><div class="hstat-num" id="hstatSpots">--</div><div class="hstat-label">可規劃景點</div></div>
+      <div class="hstat"><div class="hstat-num" id="hstatDistricts">--</div><div class="hstat-label">鄉鎮市</div></div>
+      <div class="hstat"><div class="hstat-num" id="totalRating">--</div><div class="hstat-label">平均評分</div></div>
     </div>
   </div>
-  <div class="filter-bar">
-    <button class="filter-tab active" onclick="filterCat(this,'all')">全部</button>
-    <div class="filter-sep"></div>
-    <button class="filter-tab" onclick="filterCat(this,'台東')">🌊 台東</button>
-    <button class="filter-tab" onclick="filterCat(this,'台北')">🏙 台北</button>
-    <button class="filter-tab" onclick="filterCat(this,'花蓮')">🏔 花蓮</button>
-    <button class="filter-tab" onclick="filterCat(this,'日本')">🇯🇵 日本</button>
-    <button class="filter-tab" onclick="filterCat(this,'韓國')">🇰🇷 韓國</button>
-    <button class="filter-tab" onclick="filterCat(this,'歐洲')">✈️ 歐洲</button>
-    <div class="sort-wrap">
-      <span class="sort-label">排序</span>
-      <select class="sort-select" onchange="handleSort(this.value)">
-        <option value="hot">🔥 最熱門</option>
-        <option value="new">✨ 最新上傳</option>
-        <option value="rating">⭐ 評分最高</option>
-        <option value="copy">📋 複製最多</option>
-      </select>
-    </div>
-  </div>
+  <!-- 分頁由 renderDistrictTabs() 依 poi-data.js 的 district 產生（台東縣各鄉鎮市，
+       依地理分成海線/市區/縱谷/南迴/離島）。原本寫死台北/日本/韓國/歐洲，
+       但那些目的地的本地景點資料是 0，點進去生不出行程。 -->
+  <div class="filter-bar" id="districtTabs"></div>
   <div class="explore-layout">
     <div class="trips-section">
+      <div class="sec-head">
+        <h2 class="sec-title">✦ 官方精選範本</h2>
+        <span class="sec-note" id="secNote"></span>
+      </div>
       <div class="trips-grid" id="tripsGrid"></div>
+
+      <div class="sec-head sec-head-mt">
+        <h2 class="sec-title">📋 我的行程</h2>
+        <span class="sec-note" id="myTripsNote"></span>
+      </div>
+      <div id="homeMyTrips"></div>
     </div>
     <aside class="explore-sidebar">
+      <!-- 由 renderDestSidebar() 依 poi-data.js 實算填入。原本是寫死的
+           「台東 348 份行程 ❤️4.2k」「日本 6.1k」——這個 app 沒有公開行程功能，
+           那些數字全是編的，而且日本/韓國/歐洲根本沒有本地景點資料。 -->
       <div class="sw">
-        <div class="sw-title">🔥 熱門打發時間地點</div>
-        <div class="trending-item" onclick="filterCatByName('台東')"><div class="tr-rank hot">1</div><div><div class="tr-name">台東</div><div class="tr-meta">348 份行程</div></div><div class="tr-likes">❤️ 4.2k</div></div>
-        <div class="trending-item" onclick="filterCatByName('花蓮')"><div class="tr-rank hot">2</div><div><div class="tr-name">花蓮</div><div class="tr-meta">276 份行程</div></div><div class="tr-likes">❤️ 3.8k</div></div>
-        <div class="trending-item" onclick="filterCatByName('日本')"><div class="tr-rank">3</div><div><div class="tr-name">日本（京都/大阪）</div><div class="tr-meta">512 份行程</div></div><div class="tr-likes">❤️ 6.1k</div></div>
-        <div class="trending-item" onclick="filterCatByName('韓國')"><div class="tr-rank">4</div><div><div class="tr-name">韓國首爾</div><div class="tr-meta">198 份行程</div></div><div class="tr-likes">❤️ 2.9k</div></div>
-        <div class="trending-item" onclick="filterCatByName('歐洲')"><div class="tr-rank">5</div><div><div class="tr-name">歐洲（義大利）</div><div class="tr-meta">163 份行程</div></div><div class="tr-likes">❤️ 2.4k</div></div>
+        <div class="sw-title">🗺 可規劃的目的地</div>
+        <div class="sw-note">景點越多，AI 能排出的組合越豐富。</div>
+        <div id="destSidebar"></div>
       </div>
       <div class="sw">
         <div class="sw-title">🏷 熱門標籤</div>
         <div class="tag-cloud">
-          <button class="tc-cloud" onclick="searchTag('親子')">👨‍👩‍👧 親子</button>
-          <button class="tc-cloud" onclick="searchTag('都市')">🏙️ 都市</button>
+          <button class="tc-cloud" onclick="searchTag('海岸')">🌊 海岸</button>
+          <button class="tc-cloud" onclick="searchTag('縱谷')">🏔 縱谷</button>
+          <button class="tc-cloud" onclick="searchTag('離島')">🏝 離島</button>
           <button class="tc-cloud" onclick="searchTag('美食')">🍱 美食</button>
           <button class="tc-cloud" onclick="searchTag('自然')">🌿 自然</button>
-          <button class="tc-cloud" onclick="searchTag('海岸')">🌊 海岸</button>
-          <button class="tc-cloud" onclick="searchTag('低預算')">💰 低預算</button>
-          <button class="tc-cloud" onclick="searchTag('蜜月')">💑 蜜月</button>
+          <button class="tc-cloud" onclick="searchTag('親子')">👨‍👩‍👧 親子</button>
           <button class="tc-cloud" onclick="searchTag('單人')">🎒 單人</button>
         </div>
-      </div>
-      <div class="sw">
-        <div class="sw-title">📋 我的微旅行</div>
-        <div id="sideMyTrips"></div>
       </div>
     </aside>
   </div>
@@ -463,7 +454,7 @@
   <button class="mbn-item" id="mbnFriends" onclick="showMainView('friends')"><span class="mbn-ico" aria-hidden="true"><svg class="wai-icon lg" aria-hidden="true"><use href="#wai-users"></use></svg></span>好友</button>
 </nav>
 
-<script src="./ai-travel-explore-final.js?v=20260921-savefix2"></script>
+<script src="./ai-travel-explore-final.js?v=20260922-home2"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
 <div id="genMiniBar" hidden onclick="reopenWizGen()">
   <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>
