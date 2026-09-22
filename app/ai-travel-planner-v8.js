@@ -1186,18 +1186,96 @@
   // ── GPS 驗證式打卡工具 ──
   // 抓一次目前定位。永不 reject（避免 unhandled rejection 紅字）：
   // 成功 resolve {ok:true, lat, lng, accuracy}；失敗 resolve {ok:false, reason}。
+  // ── 統一位置來源：正式 GPS／展示模擬 ──
+  // 展示模式只改變當前分頁的位置與進度，不寫入 Firebase、打卡或「去過」記錄。
+  const tripSimulation = {
+    enabled: false, paused: true, snapToRoute: true,
+    speedMultiplier: 5, speedMps: 12, joystick: { x: 0, y: 0 },
+    position: null, stageIndex: 0, stageProgress: 0,
+    virtualNow: null, timer: null, lastTickAt: null,
+    snapshot: null, panel: null, sandbox: true,
+    events: [], completedStopIds: new Set(), remindedStopIds: new Set(),
+    photoPromptStopIds: new Set(), routeFallbackCount: 0
+  };
+
+  function isTripSimulationAuthorized() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('demo') === '1' || params.get('simulation') === '1'
+        || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    } catch (_e) { return false; }
+  }
+
+  function getTripRuntimeNow() {
+    return tripSimulation.enabled && Number.isFinite(tripSimulation.virtualNow) ? tripSimulation.virtualNow : Date.now();
+  }
+
+  function normalizeRuntimePosition(value, source) {
+    if (!value) return null;
+    const lat = Number(value.lat != null ? value.lat : value.latitude);
+    const lng = Number(value.lng != null ? value.lng : value.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return {
+      lat, lng,
+      accuracy: Math.max(0, Number(value.accuracy) || (source === 'simulation' ? 3 : 0)),
+      source: source || 'real', simulated: source === 'simulation', capturedAt: getTripRuntimeNow()
+    };
+  }
+
+  function runtimeLocationIcon(position) {
+    return {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 8,
+      fillColor: position && position.simulated ? '#7C3AED' : '#4285F4',
+      fillOpacity: 1,
+      strokeColor: '#ffffff',
+      strokeWeight: 3
+    };
+  }
+
+  function updateUserLocationMarker(position) {
+    if (!map || !position || !window.google || !google.maps) return;
+    const p = { lat: position.lat, lng: position.lng };
+    const acc = Math.max(0, Number(position.accuracy) || 0);
+    lastUserLocation = { ...position };
+    if (!userLocMarker) {
+      userLocMarker = new google.maps.Marker({
+        map, position: p, zIndex: 1500, clickable: false,
+        title: position.simulated ? '展示模擬位置' : '你在這裡',
+        icon: runtimeLocationIcon(position)
+      });
+      userLocCircle = new google.maps.Circle({
+        map, center: p, radius: acc, clickable: false, zIndex: 1400,
+        fillColor: position.simulated ? '#7C3AED' : '#4285F4', fillOpacity: 0.12,
+        strokeColor: position.simulated ? '#7C3AED' : '#4285F4', strokeOpacity: 0.3, strokeWeight: 1
+      });
+    } else {
+      userLocMarker.setPosition(p);
+      userLocMarker.setTitle(position.simulated ? '展示模擬位置' : '你在這裡');
+      userLocMarker.setIcon(runtimeLocationIcon(position));
+      if (!userLocMarker.getMap()) userLocMarker.setMap(map);
+      userLocCircle.setCenter(p);
+      userLocCircle.setRadius(acc);
+      userLocCircle.setOptions({
+        fillColor: position.simulated ? '#7C3AED' : '#4285F4',
+        strokeColor: position.simulated ? '#7C3AED' : '#4285F4'
+      });
+      if (!userLocCircle.getMap()) userLocCircle.setMap(map);
+    }
+    updateActiveParkingDistance();
+    updateRouteProgressFromPosition(position);
+  }
+
   function getCurrentPositionOnce(timeoutMs = 8000) {
+    if (tripSimulation.enabled && tripSimulation.position) {
+      return Promise.resolve({ ok: true, ...tripSimulation.position, source: 'simulation', simulated: true });
+    }
     return new Promise((resolve) => {
       if (!navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== 'function') {
         return resolve({ ok: false, reason: 'unsupported' });
       }
       navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({
-          ok: true,
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          accuracy: Number(pos.coords.accuracy) || 0
-        }),
+        (pos) => resolve({ ok: true, ...normalizeRuntimePosition(pos.coords, 'real') }),
         (err) => {
           const reason = err && err.code === 1 ? 'denied'
             : err && err.code === 2 ? 'unavailable'
@@ -1231,31 +1309,12 @@
   let userLocWarned = false;
   function syncUserLocationWatch() {
     const supported = navigator.geolocation && typeof navigator.geolocation.watchPosition === 'function';
-    const shouldWatch = currentTripStatus === 'ongoing' && !!map && supported;
+    const shouldWatch = currentTripStatus === 'ongoing' && !!map && supported && !tripSimulation.enabled;
     if (shouldWatch && userLocWatchId === null) {
       userLocWatchId = navigator.geolocation.watchPosition(
         (pos) => {
           if (!map) return;
-          const p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-          const acc = Math.max(0, Number(pos.coords.accuracy) || 0);
-          lastUserLocation = { ...p, accuracy: acc };
-          if (!userLocMarker) {
-            userLocMarker = new google.maps.Marker({
-              map, position: p, zIndex: 1500, clickable: false, title: '你在這裡',
-              icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#4285F4', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3 }
-            });
-            userLocCircle = new google.maps.Circle({
-              map, center: p, radius: acc, clickable: false, zIndex: 1400,
-              fillColor: '#4285F4', fillOpacity: 0.12, strokeColor: '#4285F4', strokeOpacity: 0.3, strokeWeight: 1
-            });
-          } else {
-            userLocMarker.setPosition(p);
-            if (!userLocMarker.getMap()) userLocMarker.setMap(map);
-            userLocCircle.setCenter(p);
-            userLocCircle.setRadius(acc);
-            if (!userLocCircle.getMap()) userLocCircle.setMap(map);
-          }
-          updateActiveParkingDistance();
+          updateUserLocationMarker(normalizeRuntimePosition(pos.coords, 'real'));
         },
         (err) => {
           if (err && err.code === 1) { // PERMISSION_DENIED → 停止監聽，全程照舊手動
@@ -8562,8 +8621,16 @@
   // 給「開始行程」後續完成用的公開介面：自動將整趟行程的景點標為「去過了」
   window.markTripAsCompleted = function() {
     if (!replanStops || !replanStops.length) return feedbackToast('沒有可記錄的行程', 'orange');
+    if (tripSimulation.enabled) {
+      simulationStages().forEach((stage) => completeSimulationStop(replanStops[stage.destinationStopIndex]));
+      completeSimulationTrip();
+      return;
+    }
     
     currentTripStatus = 'completed';
+    routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 1; });
+    refreshRouteProgressRender();
+    persistRouteProgress(false);
     updateLocalTripField(currentItineraryId, 'status', 'completed');
 
     if (typeof logTripEvent === 'function') {
@@ -9843,6 +9910,9 @@
   }
 
   async function persistCurrentTripStops() {
+    // 展示模擬會暫時改寫 currentTripStatus / currentStopIndex；任何存檔若在此時放行，
+    // 都可能把模擬的 ongoing/completed 狀態寫進正式 localStorage 與 Firestore。
+    if (tripSimulation.enabled) return;
     if (collabReadOnly) return; // 唯讀成員／訪客的變更不寫回共用行程
 
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
@@ -10027,6 +10097,8 @@
   }
 
   function schedulePersistTrip() {
+    // 不建立延遲計時器，避免展示中排入的存檔在關閉模擬、恢復正式狀態後才落盤。
+    if (tripSimulation.enabled) return;
     tripUserDirty = true;
     clearTimeout(persistTripDebounceTimer);
     persistTripDebounceTimer = setTimeout(() => {
@@ -10046,6 +10118,7 @@
   }
 
   function setSegmentTransitMode(stopId, modeValue) {
+    if (collabReadOnly || currentTripStatus === 'ongoing') return;
     const stopIndex = replanStops.findIndex((item) => item.id === stopId);
     if (stopIndex === -1) return;
     const stop = replanStops[stopIndex];
@@ -10072,12 +10145,15 @@
     const sel = document.getElementById('tripPrimaryVehicleSelect');
     if (!wrap || !sel) return;
     const hasStops = Array.isArray(replanStops) && replanStops.length > 0;
-    wrap.style.display = hasStops ? '' : 'none';
+    const locked = currentTripStatus === 'ongoing' || tripSimulation.enabled;
+    wrap.style.display = hasStops && !locked ? '' : 'none';
+    sel.disabled = locked;
     sel.value = getPreferredVehicleMode();
   }
 
   // 一次切換全程主要交通工具：所有「車輛類」路段改用新工具，保留走路
   function setTripPrimaryVehicle(modeValue) {
+    if (collabReadOnly || currentTripStatus === 'ongoing' || tripSimulation.enabled) return;
     const valid = ['taxi', 'scooter', 'car'];
     const vehicle = valid.includes(String(modeValue || '').toLowerCase()) ? String(modeValue).toLowerCase() : 'car';
     currentTripPreferences = currentTripPreferences || {};
@@ -10262,12 +10338,16 @@
   }
 
   window.startTripProgress = function() {
+    if (tripSimulation.enabled) return feedbackToast('展示模擬進度只存在此分頁，不會開始正式行程', 'blue');
     if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法開始行程', 'orange');
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return feedbackToast('無效行程', 'orange');
     if (!window.confirm('要開始這趟行程嗎？開始後進入「進行中」逐站打卡模式；若需重新編輯可用「↩ 重設進度」退回規劃中。')) return;
     currentTripStatus = 'ongoing';
     currentStopIndex = 0;
     currentTripStartedAt = Date.now();
+    clearRouteProgress(false);
+    routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 0; });
+    refreshRouteProgressRender();
 
     updateLocalTripField(currentItineraryId, 'status', 'ongoing');
     updateLocalTripField(currentItineraryId, 'currentStopIndex', 0);
@@ -10295,6 +10375,10 @@
 
   window.checkInCurrentStop = async function(stopId, event) {
     if (event) event.stopPropagation();
+    if (tripSimulation.enabled) {
+      advanceSimulationStage();
+      return;
+    }
     if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法打卡', 'orange');
     if (checkInInFlight) return;
     const stopIdx = replanStops.findIndex(s => s.id === stopId);
@@ -10363,6 +10447,7 @@
       window.markTripAsCompleted();
     } else {
       currentStopIndex++;
+      refreshRouteProgressRender();
       updateLocalTripField(currentItineraryId, 'currentStopIndex', currentStopIndex);
       persistCurrentTripStops();
       renderItineraryDisplay();
@@ -10373,6 +10458,10 @@
 
   // 把行程退回「規劃中」：清掉打卡進度，讓誤按「開始行程」或已完成的行程可重新編輯
   window.resetTripProgress = function() {
+    if (tripSimulation.enabled) {
+      resetSimulation();
+      return feedbackToast('↺ 已重設展示模擬（正式記錄未變更）', 'blue');
+    }
     if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法重設行程', 'orange');
     if (currentTripStatus === 'planning') return;
     if (!window.confirm('要把行程重設回「規劃中」嗎？將清除所有打卡進度。')) return;
@@ -10380,6 +10469,9 @@
     currentTripStatus = 'planning';
     currentStopIndex = -1;
     currentTripStartedAt = null;
+    clearRouteProgress(false);
+    routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 0; });
+    refreshRouteProgressRender();
     (replanStops || []).forEach(s => { s.checkedInAt = null; });
 
     updateLocalTripField(currentItineraryId, 'status', 'planning');
@@ -10406,6 +10498,11 @@
     const startTripBtn = document.getElementById('replanStartTripBtn');
     const completeTripBtn = document.getElementById('replanCompleteTripBtn');
     const resetTripBtn = document.getElementById('replanResetTripBtn');
+    const simulationBtn = document.getElementById('tripSimulationEntryBtn');
+    const hasLoadedTrip = !!String(currentItineraryId || '')
+      && currentItineraryId !== 'TRIP-EMPTY'
+      && Array.isArray(replanStops)
+      && replanStops.some((stop) => stop && stop.name);
 
     if (plannedBlock) {
       plannedBlock.style.display = isReplanning ? 'none' : '';
@@ -10420,14 +10517,14 @@
 
     const showEditActions = !collabReadOnly && !isReplanning;
     // 規劃中或已完成都可重新規劃／調整順序；只有「進行中」鎖住編輯（專心執行）
-    const canEditOrder = showEditActions && currentTripStatus !== 'ongoing';
+    const canEditOrder = showEditActions && hasLoadedTrip && currentTripStatus !== 'ongoing';
     if (startBtn) startBtn.style.display = canEditOrder ? '' : 'none';
     if (editBtn) editBtn.style.display = canEditOrder ? '' : 'none';
     if (applyBtn) applyBtn.style.display = (isReplanning && !collabReadOnly) ? '' : 'none';
     if (cancelBtn) cancelBtn.style.display = isReplanning ? '' : 'none';
 
     if (startTripBtn) {
-      startTripBtn.style.display = (showEditActions && currentTripStatus === 'planning') ? '' : 'none';
+      startTripBtn.style.display = (showEditActions && hasLoadedTrip && currentTripStatus === 'planning') ? '' : 'none';
     }
     if (completeTripBtn) {
       completeTripBtn.style.display = (showEditActions && currentTripStatus === 'ongoing') ? '' : 'none';
@@ -10436,6 +10533,7 @@
       // 進行中或已完成時提供「退回規劃中」的出口
       resetTripBtn.style.display = (showEditActions && currentTripStatus !== 'planning') ? '' : 'none';
     }
+    if (simulationBtn) simulationBtn.style.display = (!isReplanning && hasLoadedTrip) ? '' : 'none';
   }
 
   function getSuggestedStayDurations(stop) {
@@ -14603,10 +14701,593 @@
   let routeViewportAnimationToken = 0;
   let toiletRenderToken = 0;
   let routeMidLabels = [];
+  let completedRouteRenderers = []; // 每段已走部分的灰色折線
 
   const mapPinLocations = {};
 
   const ROUTE_MODE_COLORS = { car: '#1D4ED8', scooter: '#EA580C', walk: '#F97316' };
+  const ROUTE_COMPLETED_COLOR = '#94A3B8';
+  const ROUTE_PROGRESS_STORAGE_VERSION = 1;
+
+  function routeProgressStorageKey(simulated = false) {
+    const tripId = String(currentItineraryId || 'no-trip').replace(/[^\w.-]/g, '_').slice(0, 120);
+    return `wai_route_progress_v${ROUTE_PROGRESS_STORAGE_VERSION}:${simulated ? 'demo:' : ''}${tripId}`;
+  }
+
+  function routeStageProgressId(stage) {
+    if (!stage) return '';
+    const sourceId = stage.origin && (stage.origin.stopId || stage.origin.id);
+    const destinationId = stage.destination && (stage.destination.stopId || stage.destination.id);
+    return `${sourceId || stage.sourceStopIndex || 0}>${destinationId || stage.destinationStopIndex || 0}`;
+  }
+
+  function readStoredRouteProgress(simulated = false) {
+    try {
+      const store = simulated ? window.sessionStorage : window.localStorage;
+      const parsed = JSON.parse(store.getItem(routeProgressStorageKey(simulated)) || '{}');
+      return parsed && parsed.version === ROUTE_PROGRESS_STORAGE_VERSION && parsed.stages ? parsed.stages : {};
+    } catch (_error) { return {}; }
+  }
+
+  function persistRouteProgress(simulated = false) {
+    try {
+      const stages = {};
+      routeStageCache.forEach((stage) => {
+        if (!stage) return;
+        const value = simulated && stage.index === tripSimulation.stageIndex
+          ? tripSimulation.stageProgress : (stage.progress != null ? stage.progress : stage.maxProgress);
+        if (Number(value) > 0) stages[routeStageProgressId(stage)] = Math.max(0, Math.min(1, Number(value)));
+      });
+      const store = simulated ? window.sessionStorage : window.localStorage;
+      store.setItem(routeProgressStorageKey(simulated), JSON.stringify({
+        version: ROUTE_PROGRESS_STORAGE_VERSION, updatedAt: Date.now(), stages
+      }));
+    } catch (_error) { /* 無痕模式或儲存空間不足時，進度仍可留在記憶體 */ }
+  }
+
+  function restoreRouteProgress(simulated = false) {
+    const stored = readStoredRouteProgress(simulated);
+    routeStageCache.forEach((stage) => {
+      if (!stage) return;
+      const value = Number(stored[routeStageProgressId(stage)]);
+      if (!Number.isFinite(value)) return;
+      stage.maxProgress = Math.max(Number(stage.maxProgress) || 0, Math.max(0, Math.min(1, value)));
+    });
+  }
+
+  function clearRouteProgress(simulated = false) {
+    try {
+      (simulated ? window.sessionStorage : window.localStorage).removeItem(routeProgressStorageKey(simulated));
+    } catch (_error) { /* ignore */ }
+  }
+
+  function routePointLiteral(point) {
+    if (!point) return null;
+    const lat = typeof point.lat === 'function' ? point.lat() : Number(point.lat);
+    const lng = typeof point.lng === 'function' ? point.lng() : Number(point.lng);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+
+  function prepareStagePath(stage, path) {
+    if (!stage) return;
+    const points = (path || []).map(routePointLiteral).filter(Boolean);
+    stage.path = points;
+    stage.pathCumulative = [0];
+    for (let i = 1; i < points.length; i++) {
+      stage.pathCumulative[i] = stage.pathCumulative[i - 1] + measureDistanceMeters(points[i - 1], points[i]);
+    }
+    stage.pathLengthMeters = stage.pathCumulative[stage.pathCumulative.length - 1] || 0;
+  }
+
+  function pointAlongStage(stage, progress) {
+    if (!stage || !stage.path || !stage.path.length) return null;
+    const p = Math.max(0, Math.min(1, Number(progress) || 0));
+    const target = p * (stage.pathLengthMeters || 0);
+    if (!target || stage.path.length === 1) return { ...stage.path[0] };
+    for (let i = 1; i < stage.path.length; i++) {
+      if (stage.pathCumulative[i] < target) continue;
+      const startDistance = stage.pathCumulative[i - 1];
+      const segmentDistance = Math.max(1, stage.pathCumulative[i] - startDistance);
+      const ratio = (target - startDistance) / segmentDistance;
+      return {
+        lat: stage.path[i - 1].lat + (stage.path[i].lat - stage.path[i - 1].lat) * ratio,
+        lng: stage.path[i - 1].lng + (stage.path[i].lng - stage.path[i - 1].lng) * ratio
+      };
+    }
+    return { ...stage.path[stage.path.length - 1] };
+  }
+
+  function nearestStageProgress(stage, position) {
+    if (!stage || !stage.path || stage.path.length < 2 || !position) return null;
+    let best = { distance: Number.POSITIVE_INFINITY, progress: 0 };
+    const latScale = 111320;
+    const lngScale = latScale * Math.cos(Number(position.lat) * Math.PI / 180);
+    for (let i = 1; i < stage.path.length; i++) {
+      const a = stage.path[i - 1];
+      const b = stage.path[i];
+      const ax = (a.lng - position.lng) * lngScale;
+      const ay = (a.lat - position.lat) * latScale;
+      const bx = (b.lng - position.lng) * lngScale;
+      const by = (b.lat - position.lat) * latScale;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const denom = dx * dx + dy * dy;
+      const t = denom ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / denom)) : 0;
+      const px = ax + dx * t;
+      const py = ay + dy * t;
+      const distance = Math.sqrt(px * px + py * py);
+      if (distance < best.distance) {
+        const along = stage.pathCumulative[i - 1] + (stage.pathCumulative[i] - stage.pathCumulative[i - 1]) * t;
+        best = { distance, progress: stage.pathLengthMeters ? along / stage.pathLengthMeters : 0 };
+      }
+    }
+    return best.distance <= 350 ? best.progress : null;
+  }
+
+  function splitStagePath(stage, progress) {
+    const points = stage && stage.path ? stage.path : [];
+    if (points.length < 2) return { completed: [], remaining: points.slice() };
+    const p = Math.max(0, Math.min(1, Number(progress) || 0));
+    if (p <= 0) return { completed: [], remaining: points.slice() };
+    if (p >= 1) return { completed: points.slice(), remaining: [] };
+    const cut = pointAlongStage(stage, p);
+    const target = p * stage.pathLengthMeters;
+    let index = 1;
+    while (index < stage.pathCumulative.length && stage.pathCumulative[index] < target) index++;
+    return {
+      completed: points.slice(0, index).concat(cut),
+      remaining: [cut].concat(points.slice(index))
+    };
+  }
+
+  function inferredStageProgress(stage) {
+    if (!stage) return 0;
+    if (tripSimulation.enabled) {
+      if (stage.index < tripSimulation.stageIndex) return 1;
+      if (stage.index === tripSimulation.stageIndex) return tripSimulation.stageProgress;
+      return 0;
+    }
+    if (currentTripStatus === 'completed') return 1;
+    if (currentTripStatus !== 'ongoing') return 0;
+    if (stage.destinationStopIndex < currentStopIndex) return 1;
+    if (stage.destinationStopIndex === currentStopIndex) return Math.max(0, Number(stage.maxProgress) || 0);
+    return 0;
+  }
+
+  function refreshRouteProgressRender() {
+    routeStageCache.forEach((stage, index) => {
+      if (!stage || !stage.path || stage.path.length < 2) return;
+      const progress = inferredStageProgress(stage);
+      const split = splitStagePath(stage, progress);
+      const renderer = directionsRenderers[index];
+      if (renderer && typeof renderer.setPath === 'function') renderer.setPath(split.remaining);
+      let completed = completedRouteRenderers[index];
+      if (!completed && window.google && google.maps && map) {
+        completed = new google.maps.Polyline({
+          map: stageVisible(index) ? map : null, path: [], strokeColor: ROUTE_COMPLETED_COLOR,
+          strokeWeight: 7, strokeOpacity: 0.95, geodesic: true, zIndex: 1002
+        });
+        completedRouteRenderers[index] = completed;
+      }
+      if (completed) {
+        completed.setPath(split.completed);
+        completed.setMap(split.completed.length && stageVisible(index) ? map : null);
+      }
+      stage.progress = progress;
+      stage.progressState = progress >= 1 ? 'completed' : progress > 0 ? 'active' : 'pending';
+    });
+  }
+
+  function updateRouteProgressFromPosition(position) {
+    if (!position || currentTripStatus !== 'ongoing') return;
+    const stage = tripSimulation.enabled
+      ? routeStageCache[tripSimulation.stageIndex]
+      : routeStageCache.find((item) => item && item.destinationStopIndex === currentStopIndex);
+    if (!stage) return;
+    const progress = nearestStageProgress(stage, position);
+    if (progress == null) return;
+    if (tripSimulation.enabled) tripSimulation.stageProgress = Math.max(tripSimulation.stageProgress, progress);
+    else stage.maxProgress = Math.max(Number(stage.maxProgress) || 0, progress);
+    refreshRouteProgressRender();
+    persistRouteProgress(tripSimulation.enabled);
+  }
+
+  function ensureSimulationStagePath(stage) {
+    if (!stage) return null;
+    if (stage.path && stage.path.length > 1) return stage;
+    const origin = routePointLiteral(stage.origin);
+    const destination = routePointLiteral(stage.destination);
+    if (!origin || !destination) return null;
+    prepareStagePath(stage, [origin, destination]);
+    stage.isFallbackPath = true;
+    return stage;
+  }
+
+  function simulationStages() {
+    return routeStageCache
+      .map(ensureSimulationStagePath)
+      .filter(Boolean)
+      .sort((a, b) => Number(a.destinationStopIndex) - Number(b.destinationStopIndex));
+  }
+
+  function simulationStageAt(index) {
+    const stages = simulationStages();
+    return stages.find((stage) => stage.index === index) || stages[index] || null;
+  }
+
+  function nextSimulationStage(stage) {
+    const stages = simulationStages();
+    const position = stages.indexOf(stage);
+    return position >= 0 ? (stages[position + 1] || null) : null;
+  }
+
+  function simulationClockMinutes() {
+    if (!Number.isFinite(tripSimulation.virtualNow)) return 0;
+    const date = new Date(tripSimulation.virtualNow);
+    const start = new Date(tripSimulation.snapshot && tripSimulation.snapshot.virtualDateBase || tripSimulation.virtualNow);
+    const dayDelta = Math.round((new Date(date.getFullYear(), date.getMonth(), date.getDate())
+      - new Date(start.getFullYear(), start.getMonth(), start.getDate())) / 86400000);
+    return dayDelta * 1440 + date.getHours() * 60 + date.getMinutes();
+  }
+
+  function virtualTimestampForScheduleMinute(scheduleMinute) {
+    const base = new Date();
+    base.setHours(0, 0, 0, 0);
+    return base.getTime() + Math.max(0, Number(scheduleMinute) || 0) * 60000;
+  }
+
+  function recordSimulationEvent(type, label, stop) {
+    const event = {
+      type, label: String(label || ''), stopId: String(stop && stop.id || ''),
+      at: Number(tripSimulation.virtualNow) || Date.now()
+    };
+    tripSimulation.events.push(event);
+    if (tripSimulation.events.length > 40) tripSimulation.events.shift();
+    updateSimulationPanel();
+    return event;
+  }
+
+  function processSimulationReminders() {
+    if (!tripSimulation.enabled || currentTripStatus !== 'ongoing') return;
+    const stage = simulationStageAt(tripSimulation.stageIndex);
+    const stop = stage && replanStops[stage.destinationStopIndex];
+    if (!stop || tripSimulation.remindedStopIds.has(String(stop.id))) return;
+    const schedule = buildReplanSchedule();
+    const arrival = schedule[stage.destinationStopIndex] && schedule[stage.destinationStopIndex].start;
+    if (!Number.isFinite(arrival) || simulationClockMinutes() < arrival - 10) return;
+    tripSimulation.remindedStopIds.add(String(stop.id));
+    recordSimulationEvent('reminder', `⏰ 即將抵達 ${stop.name}`, stop);
+    feedbackToast(`⏰ 展示提醒：即將抵達 ${stop.name}`, 'blue');
+  }
+
+  function completeSimulationStop(stop, { departed = false } = {}) {
+    if (!stop || tripSimulation.completedStopIds.has(String(stop.id))) return;
+    tripSimulation.completedStopIds.add(String(stop.id));
+    if (departed || stop.type === 'start') {
+      recordSimulationEvent('departure', `🚗 已從 ${stop.name} 出發`, stop);
+      return;
+    }
+    recordSimulationEvent('arrival', stop.type === 'end' ? `🏁 抵達 ${stop.name}` : `✅ 抵達並完成 ${stop.name} 打卡`, stop);
+    if (stop.type !== 'end') {
+      tripSimulation.photoPromptStopIds.add(String(stop.id));
+      recordSimulationEvent('photo-prompt', `📸 照片提示：替 ${stop.name} 留下回憶`, stop);
+      feedbackToast(`📸 展示照片提示：替 ${stop.name} 留下回憶（不會上傳）`, 'blue');
+    }
+  }
+
+  function completeSimulationTrip() {
+    if (currentTripStatus === 'completed' && tripSimulation.paused) return;
+    routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 1; });
+    tripSimulation.stageProgress = 1;
+    currentTripStatus = 'completed';
+    currentStopIndex = replanStops.length;
+    tripSimulation.paused = true;
+    recordSimulationEvent('completed', '🏁 行程完成，可開啟展示回顧', null);
+    persistRouteProgress(true);
+    refreshRouteProgressRender();
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+    feedbackToast('🏁 展示模擬已跑完整趟行程（正式資料完全未變更）', 'green');
+    updateSimulationPanel();
+  }
+
+  function setSimulationPosition(position) {
+    const normalized = normalizeRuntimePosition(position, 'simulation');
+    if (!normalized) return false;
+    tripSimulation.position = normalized;
+    updateUserLocationMarker(normalized);
+    updateSimulationPanel();
+    return true;
+  }
+
+  function advanceSimulationStage() {
+    const stage = simulationStageAt(tripSimulation.stageIndex);
+    if (!stage) {
+      completeSimulationTrip();
+      return;
+    }
+    stage.maxProgress = 1;
+    tripSimulation.stageProgress = 1;
+    refreshRouteProgressRender();
+    persistRouteProgress(true);
+    const arrivedStop = replanStops[stage.destinationStopIndex];
+    completeSimulationStop(arrivedStop);
+    const nextStage = nextSimulationStage(stage);
+    if (!nextStage) {
+      completeSimulationTrip();
+      return;
+    }
+    tripSimulation.stageIndex = nextStage.index;
+    tripSimulation.stageProgress = 0;
+    currentStopIndex = nextStage.destinationStopIndex;
+    setSimulationPosition(pointAlongStage(nextStage, 0));
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+  }
+
+  function simulationTick() {
+    if (!tripSimulation.enabled) return;
+    const now = performance.now();
+    const elapsed = tripSimulation.lastTickAt == null ? 0 : Math.min(0.25, (now - tripSimulation.lastTickAt) / 1000);
+    tripSimulation.lastTickAt = now;
+    if (tripSimulation.paused || elapsed <= 0) return;
+    tripSimulation.virtualNow += elapsed * 1000 * tripSimulation.speedMultiplier;
+    processSimulationReminders();
+    const stage = simulationStageAt(tripSimulation.stageIndex);
+    if (!stage) {
+      completeSimulationTrip();
+      return;
+    }
+    const distance = tripSimulation.speedMps * tripSimulation.speedMultiplier * elapsed;
+    if (tripSimulation.snapToRoute) {
+      const axis = tripSimulation.joystick;
+      const reverse = axis.y < -0.25 || axis.x < -0.75;
+      const delta = (stage.pathLengthMeters ? distance / stage.pathLengthMeters : 1) * (reverse ? -1 : 1);
+      tripSimulation.stageProgress = Math.max(0, Math.min(1, tripSimulation.stageProgress + delta));
+      setSimulationPosition(pointAlongStage(stage, tripSimulation.stageProgress));
+      if (tripSimulation.stageProgress >= 0.9999) advanceSimulationStage();
+    } else {
+      const axis = tripSimulation.joystick;
+      let x = Number(axis.x) || 0;
+      let y = Number(axis.y) || 0;
+      if (Math.abs(x) + Math.abs(y) < 0.05) {
+        const ahead = pointAlongStage(stage, Math.min(1, tripSimulation.stageProgress + 0.01));
+        const here = tripSimulation.position || pointAlongStage(stage, tripSimulation.stageProgress);
+        x = ahead.lng - here.lng;
+        y = ahead.lat - here.lat;
+      }
+      const magnitude = Math.sqrt(x * x + y * y) || 1;
+      const lat = tripSimulation.position.lat + (y / magnitude) * distance / 111320;
+      const lngScale = 111320 * Math.cos(tripSimulation.position.lat * Math.PI / 180);
+      const lng = tripSimulation.position.lng + (x / magnitude) * distance / Math.max(1000, lngScale);
+      const next = normalizeRuntimePosition({ lat, lng, accuracy: 3 }, 'simulation');
+      tripSimulation.position = next;
+      const projected = nearestStageProgress(stage, next);
+      if (projected != null) tripSimulation.stageProgress = Math.max(tripSimulation.stageProgress, projected);
+      updateUserLocationMarker(next);
+      updateSimulationPanel();
+      if (tripSimulation.stageProgress >= 0.9999) advanceSimulationStage();
+    }
+  }
+
+  function updateSimulationPanel() {
+    const panel = tripSimulation.panel;
+    if (!panel) return;
+    const stage = simulationStageAt(tripSimulation.stageIndex);
+    const status = panel.querySelector('[data-sim-status]');
+    const play = panel.querySelector('[data-sim-play]');
+    const snap = panel.querySelector('[data-sim-snap]');
+    if (status) {
+      const time = new Date(tripSimulation.virtualNow || Date.now()).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+      const stages = simulationStages();
+      const stageNumber = Math.max(1, stages.indexOf(stage) + 1);
+      status.textContent = currentTripStatus === 'completed'
+        ? `展示完成 · ${time}`
+        : `第 ${stageNumber} 段 · ${Math.round(tripSimulation.stageProgress * 100)}% · ${time}`;
+    }
+    if (play) play.textContent = tripSimulation.paused ? '▶ 播放' : '⏸ 暫停';
+    if (snap) snap.textContent = tripSimulation.snapToRoute ? '🧲 路線吸附' : '📍 自由移動';
+    if (stage && panel.querySelector('[data-sim-next]')) {
+      panel.querySelector('[data-sim-next]').title = `跳到${stage.destination.name || stage.destination.title || '下一站'}`;
+    }
+    const eventList = panel.querySelector('[data-sim-events]');
+    if (eventList) {
+      const recent = tripSimulation.events.slice(-4).reverse();
+      eventList.innerHTML = recent.length
+        ? recent.map((item) => `<li><time>${new Date(item.at).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })}</time> ${escapeHtml(item.label)}</li>`).join('')
+        : '<li>等待開始展示行程</li>';
+    }
+    const recap = panel.querySelector('[data-sim-recap]');
+    if (recap) recap.style.display = currentTripStatus === 'completed' ? '' : 'none';
+  }
+
+  function createSimulationPanel() {
+    if (tripSimulation.panel || !document.body) return;
+    const panel = document.createElement('section');
+    panel.id = 'tripSimulationPanel';
+    panel.setAttribute('aria-label', '行程展示模擬控制');
+    panel.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:3000;width:min(310px,calc(100vw - 24px));padding:14px;border-radius:16px;background:rgba(15,23,42,.94);color:#fff;box-shadow:0 18px 48px rgba(15,23,42,.35);font:600 13px/1.4 system-ui,sans-serif;';
+    panel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px;">
+        <strong style="white-space:nowrap;">🧪 展示模擬</strong><span data-sim-status style="font-size:12px;color:#C4B5FD;white-space:nowrap;"></span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,42px);justify-content:center;gap:5px;margin-bottom:10px;">
+        <span></span><button type="button" data-sim-move="0,1" aria-label="向前">▲</button><span></span>
+        <button type="button" data-sim-move="-1,0" aria-label="向左">◀</button><button type="button" data-sim-stop aria-label="停止移動">●</button><button type="button" data-sim-move="1,0" aria-label="向右">▶</button>
+        <span></span><button type="button" data-sim-move="0,-1" aria-label="向後">▼</button><span></span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        <button type="button" data-sim-play style="white-space:nowrap;">▶ 播放</button>
+        <button type="button" data-sim-snap style="white-space:nowrap;">🧲 路線吸附</button>
+        <button type="button" data-sim-next style="white-space:nowrap;">⏭ 下一站</button>
+        <button type="button" data-sim-reset style="white-space:nowrap;">↺ 重設</button>
+        <select data-sim-speed aria-label="模擬速度"><option value="1">1×</option><option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option></select>
+        <button type="button" data-sim-recap style="display:none;white-space:nowrap;">🎞 展示回顧</button>
+        <button type="button" data-sim-close style="white-space:nowrap;">關閉</button>
+      </div>
+      <ol data-sim-events aria-live="polite" style="margin:10px 0 0;padding:8px 8px 8px 26px;border-radius:10px;background:rgba(255,255,255,.08);font-size:12px;font-weight:500;max-height:104px;overflow:auto;"></ol>
+      <p style="margin:8px 0 0;color:#CBD5E1;font-size:11px;text-wrap:pretty;">Sandbox 展示：打卡、照片提示與完成事件只存在這個分頁，不會寫入正式紀錄。</p>`;
+    panel.querySelectorAll('button,select').forEach((el) => { el.style.minHeight = '36px'; el.style.borderRadius = '8px'; el.style.border = '0'; el.style.padding = '6px 9px'; el.style.cursor = 'pointer'; });
+    panel.querySelector('[data-sim-play]').addEventListener('click', () => { tripSimulation.paused = !tripSimulation.paused; updateSimulationPanel(); });
+    panel.querySelector('[data-sim-snap]').addEventListener('click', () => { tripSimulation.snapToRoute = !tripSimulation.snapToRoute; updateSimulationPanel(); });
+    panel.querySelector('[data-sim-next]').addEventListener('click', () => advanceSimulationStage());
+    panel.querySelector('[data-sim-reset]').addEventListener('click', () => window.TravelLinkSimulation.reset());
+    panel.querySelector('[data-sim-close]').addEventListener('click', () => window.TravelLinkSimulation.disable());
+    panel.querySelector('[data-sim-recap]').addEventListener('click', () => {
+      const arrivals = tripSimulation.events.filter((item) => item.type === 'arrival').length;
+      const photos = tripSimulation.photoPromptStopIds.size;
+      feedbackToast(`🎞 展示回顧：完成 ${arrivals} 個景點、觸發 ${photos} 次照片提示（未儲存）`, 'green');
+    });
+    panel.querySelector('[data-sim-speed]').addEventListener('change', (event) => { tripSimulation.speedMultiplier = Number(event.target.value) || 1; });
+    panel.querySelectorAll('[data-sim-move]').forEach((button) => {
+      const parts = button.dataset.simMove.split(',').map(Number);
+      const start = (event) => { event.preventDefault(); tripSimulation.joystick = { x: parts[0], y: parts[1] }; tripSimulation.paused = false; updateSimulationPanel(); };
+      button.addEventListener('pointerdown', start);
+      button.addEventListener('pointerup', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
+      button.addEventListener('pointercancel', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
+    });
+    panel.querySelector('[data-sim-stop]').addEventListener('click', () => { tripSimulation.joystick = { x: 0, y: 0 }; tripSimulation.paused = true; updateSimulationPanel(); });
+    document.body.appendChild(panel);
+    tripSimulation.panel = panel;
+    updateSimulationPanel();
+  }
+
+  function resetSimulation() {
+    if (!tripSimulation.enabled) return false;
+    const first = simulationStages()[0] || null;
+    if (!first) return false;
+    clearRouteProgress(true);
+    routeStageCache.forEach((stage) => { if (stage) { stage.maxProgress = 0; stage.progress = 0; } });
+    tripSimulation.events = [];
+    tripSimulation.completedStopIds = new Set();
+    tripSimulation.remindedStopIds = new Set();
+    tripSimulation.photoPromptStopIds = new Set();
+    tripSimulation.routeFallbackCount = simulationStages().filter((stage) => stage.isFallbackPath).length;
+    tripSimulation.stageIndex = first.index;
+    tripSimulation.stageProgress = 0;
+    tripSimulation.paused = true;
+    tripSimulation.virtualNow = tripSimulation.snapshot && tripSimulation.snapshot.virtualNow || Date.now();
+    currentTripStatus = 'ongoing';
+    currentStopIndex = first.destinationStopIndex;
+    completeSimulationStop(replanStops[first.sourceStopIndex], { departed: true });
+    if (tripSimulation.routeFallbackCount) {
+      recordSimulationEvent('fallback', `🧭 ${tripSimulation.routeFallbackCount} 段使用直線示意路線`, null);
+    }
+    setSimulationPosition(pointAlongStage(first, 0));
+    refreshRouteProgressRender();
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+    return true;
+  }
+
+  function enableSimulation(options = {}) {
+    if (!isTripSimulationAuthorized()) {
+      feedbackToast('展示模擬未啟用；請以 ?demo=1 開啟展示環境', 'orange');
+      return false;
+    }
+    if (tripSimulation.enabled) return true;
+    const first = simulationStages()[0] || null;
+    if (!first) {
+      feedbackToast('路線尚未載入，請稍後再開啟展示模擬', 'orange');
+      return false;
+    }
+    const schedule = buildReplanSchedule();
+    const defaultVirtualNow = virtualTimestampForScheduleMinute(schedule[0] && schedule[0].start);
+    tripSimulation.snapshot = {
+      status: currentTripStatus, stopIndex: currentStopIndex, startedAt: currentTripStartedAt,
+      lastUserLocation: lastUserLocation ? { ...lastUserLocation } : null,
+      virtualNow: Number(options.startTime) || defaultVirtualNow,
+      virtualDateBase: Number(options.startTime) || defaultVirtualNow
+    };
+    tripSimulation.enabled = true;
+    tripSimulation.virtualNow = tripSimulation.snapshot.virtualNow;
+    tripSimulation.speedMultiplier = Math.max(1, Number(options.speedMultiplier) || 5);
+    tripSimulation.snapToRoute = options.snapToRoute !== false;
+    stopUserLocationWatch();
+    createSimulationPanel();
+    resetSimulation();
+    tripSimulation.lastTickAt = performance.now();
+    tripSimulation.timer = window.setInterval(simulationTick, 100);
+    feedbackToast('🧪 已進入展示模擬；所有進度只存在此分頁', 'blue');
+    return true;
+  }
+
+  function disableSimulation() {
+    if (!tripSimulation.enabled) return false;
+    if (tripSimulation.timer) window.clearInterval(tripSimulation.timer);
+    tripSimulation.timer = null;
+    const snapshot = tripSimulation.snapshot;
+    tripSimulation.enabled = false;
+    tripSimulation.paused = true;
+    tripSimulation.joystick = { x: 0, y: 0 };
+    if (tripSimulation.panel) tripSimulation.panel.remove();
+    tripSimulation.panel = null;
+    if (snapshot) {
+      currentTripStatus = snapshot.status;
+      currentStopIndex = snapshot.stopIndex;
+      currentTripStartedAt = snapshot.startedAt;
+      lastUserLocation = snapshot.lastUserLocation;
+    }
+    tripSimulation.snapshot = null;
+    routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 0; });
+    restoreRouteProgress(false);
+    refreshRouteProgressRender();
+    renderItineraryDisplay();
+    updateItineraryStageUI();
+    if (lastUserLocation) updateUserLocationMarker(lastUserLocation);
+    else if (userLocMarker) { userLocMarker.setMap(null); if (userLocCircle) userLocCircle.setMap(null); }
+    syncUserLocationWatch();
+    feedbackToast('已離開展示模擬，正式行程記錄未變更', 'blue');
+    return true;
+  }
+
+  window.TravelLinkSimulation = Object.freeze({
+    enable: enableSimulation,
+    disable: disableSimulation,
+    play() { if (!tripSimulation.enabled) return false; tripSimulation.paused = false; updateSimulationPanel(); return true; },
+    pause() { if (!tripSimulation.enabled) return false; tripSimulation.paused = true; updateSimulationPanel(); return true; },
+    reset: resetSimulation,
+    jumpToNext() { if (!tripSimulation.enabled) return false; advanceSimulationStage(); return true; },
+    setSpeed(multiplier) { tripSimulation.speedMultiplier = Math.max(1, Math.min(50, Number(multiplier) || 1)); updateSimulationPanel(); return tripSimulation.speedMultiplier; },
+    setSnap(enabled) { tripSimulation.snapToRoute = enabled !== false; updateSimulationPanel(); return tripSimulation.snapToRoute; },
+    setJoystick(x, y) { tripSimulation.joystick = { x: Math.max(-1, Math.min(1, Number(x) || 0)), y: Math.max(-1, Math.min(1, Number(y) || 0)) }; return { ...tripSimulation.joystick }; },
+    setVirtualTime(value) { const time = value instanceof Date ? value.getTime() : Number(value); if (Number.isFinite(time)) tripSimulation.virtualNow = time; processSimulationReminders(); updateSimulationPanel(); return tripSimulation.virtualNow; },
+    status() { return { enabled: tripSimulation.enabled, simulated: tripSimulation.enabled, sandbox: true, paused: tripSimulation.paused, snapToRoute: tripSimulation.snapToRoute, speedMultiplier: tripSimulation.speedMultiplier, stageIndex: tripSimulation.stageIndex, stageProgress: tripSimulation.stageProgress, virtualNow: tripSimulation.virtualNow, position: tripSimulation.position ? { ...tripSimulation.position } : null, events: tripSimulation.events.map((item) => ({ ...item })) }; }
+  });
+
+  function ensureSimulationEntryButton() {
+    if (!isTripSimulationAuthorized()) return;
+    const actions = document.getElementById('itineraryHeroActions');
+    if (!actions || document.getElementById('tripSimulationEntryBtn')) return;
+    const button = document.createElement('button');
+    button.id = 'tripSimulationEntryBtn';
+    button.type = 'button';
+    button.className = 'replan-btn secondary';
+    button.textContent = '🧪 展示模擬';
+    button.title = '以虛擬 GPS、時間與搖桿跑完整趟行程';
+    button.style.display = (currentItineraryId && currentItineraryId !== 'TRIP-EMPTY' && (replanStops || []).some((stop) => stop && stop.name)) ? '' : 'none';
+    button.onclick = () => window.TravelLinkSimulation.enable();
+    const moreButton = document.getElementById('heroMoreBtn');
+    actions.insertBefore(button, moreButton || null);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureSimulationEntryButton);
+  else ensureSimulationEntryButton();
+
+  document.addEventListener('keydown', (event) => {
+    if (!tripSimulation.enabled || /INPUT|TEXTAREA|SELECT/.test(event.target && event.target.tagName)) return;
+    const vectors = { ArrowUp: [0, 1], w: [0, 1], W: [0, 1], ArrowDown: [0, -1], s: [0, -1], S: [0, -1], ArrowLeft: [-1, 0], a: [-1, 0], A: [-1, 0], ArrowRight: [1, 0], d: [1, 0], D: [1, 0] };
+    if (event.code === 'Space') { event.preventDefault(); tripSimulation.paused = !tripSimulation.paused; updateSimulationPanel(); return; }
+    const vector = vectors[event.key];
+    if (!vector) return;
+    event.preventDefault();
+    tripSimulation.joystick = { x: vector[0], y: vector[1] };
+    tripSimulation.paused = false;
+    updateSimulationPanel();
+  });
+  document.addEventListener('keyup', (event) => {
+    if (!tripSimulation.enabled || !['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','W','a','A','s','S','d','D'].includes(event.key)) return;
+    tripSimulation.joystick = { x: 0, y: 0 };
+  });
 
   function createEmojiPinIcon(emoji) {
     const svg = `
@@ -16204,6 +16885,14 @@
       }
     });
 
+    completedRouteRenderers.forEach((renderer, idx) => {
+      if (renderer) {
+        const stage = routeStageCache[idx];
+        const hasCompletedPath = stage && inferredStageProgress(stage) > 0;
+        renderer.setMap(hasCompletedPath && (activeRouteStage === null || idx === activeRouteStage) ? map : null);
+      }
+    });
+
     routeMidLabels.forEach((label, idx) => {
       if (label) {
         label.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null);
@@ -16305,13 +16994,21 @@
   }
 
   function applyRouteAlternative(stageIndex, altIdx) {
+    if (tripSimulation.enabled) {
+      feedbackToast('展示模擬中不會變更正式路線；請先關閉展示模式', 'blue');
+      return;
+    }
     const stage = routeStageCache.find((item) => item && item.index === stageIndex);
     if (!stage || !Array.isArray(stage.alts)) return;
     const alt = stage.alts.find((a) => a.index === Number(altIdx));
     if (!alt) return;
     // 1) 地圖：這段折線改走選定路線；中段目的地標籤同步移到新折線中點（否則會留在舊線上）
     const renderer = directionsRenderers[stageIndex];
-    if (renderer && typeof renderer.setPath === 'function' && alt.path) renderer.setPath(alt.path);
+    if (alt.path) {
+      prepareStagePath(stage, alt.path);
+      if (renderer && typeof renderer.setPath === 'function') renderer.setPath(alt.path);
+      refreshRouteProgressRender();
+    }
     const midLabel = routeMidLabels[stageIndex];
     if (midLabel && typeof midLabel.setPosition === 'function' && alt.path && alt.path.length) {
       midLabel.setPosition(alt.path[Math.floor(alt.path.length / 2)]);
@@ -16454,6 +17151,8 @@
 
   async function initMap({ recalculateTransport = false } = {}) {
     if (map) return;
+    // Maps 採 loading=async；namespace 可能先存在，但 Map constructor 尚未就緒。
+    if (!window.google || !google.maps || typeof google.maps.Map !== 'function') return;
     await rebuildMapPinLocationsFromStops();
     const initialCenter = getMapFocusCenter();
     const mapOptions = {
@@ -16502,6 +17201,8 @@
       routeStageCache = [];
       directionsRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
       directionsRenderers = [];
+      completedRouteRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
+      completedRouteRenderers = [];
       routeMidLabels.forEach((m) => { if (m) m.setMap(null); });
       routeMidLabels = [];
       activeRouteStage = null;
@@ -16534,10 +17235,19 @@
       arrivalMin: null,
       timeRange: ''
     }));
+    // Directions 尚未回來或 API 失敗時，仍保留「起點到終點」直線示意路徑。
+    // 這讓灰色進度與展示模擬不會因某一段沒有 overview_path 就卡死。
+    routeStageCache.forEach((stage) => {
+      prepareStagePath(stage, [stage.origin, stage.destination]);
+      stage.isFallbackPath = true;
+    });
+    restoreRouteProgress(false);
     syncRouteStageScheduleTimes(schedule);
 
     directionsRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
     directionsRenderers = [];
+    completedRouteRenderers.forEach((renderer) => { if (renderer) renderer.setMap(null); });
+    completedRouteRenderers = [];
     routeMidLabels.forEach((m) => { if (m) m.setMap(null); });
     routeMidLabels = [];
     activeRouteStage = null;
@@ -16664,6 +17374,9 @@
               ]
             });
             directionsRenderers[i] = renderer;
+            prepareStagePath(routeStageCache[i], response.routes[bestRouteIndex].overview_path);
+            routeStageCache[i].isFallbackPath = false;
+            refreshRouteProgressRender();
 
             // 在路線中間加入方向標籤，讓使用者清楚知道往哪個景點移動
             const overviewPath = response.routes[bestRouteIndex].overview_path;
@@ -16819,7 +17532,38 @@
             if (isReplanning) renderReplanBoard();
             renderMobileRouteSheet();
           } else {
-            console.error('Directions request failed due to ' + status);
+            // Directions API 不可用時仍以直線示意，避免整段消失、灰線無法更新或展示卡死。
+            console.warn('[route] Directions unavailable; using fallback path:', status);
+            if (renderToken !== routeRenderToken) return;
+            const stage = routeStageCache[i];
+            if (stage) {
+              ensureSimulationStagePath(stage);
+              stage.isFallbackPath = true;
+              stage.distance = '直線示意';
+              const fallbackMinutes = Number(schedule[origin.stopIndex] && schedule[origin.stopIndex].transit) || getDefaultTransitMinutes(stageMode);
+              stage.duration = `約 ${Math.max(1, Math.round(fallbackMinutes))} 分鐘`;
+              if (window.google && google.maps && map && stage.path && stage.path.length > 1) {
+                const fallbackRenderer = new google.maps.Polyline({
+                  map: stageVisible(i) ? map : null,
+                  path: stage.path,
+                  strokeColor: ROUTE_MODE_COLORS[stageMode] || '#EA580C',
+                  strokeWeight: 5,
+                  strokeOpacity: 0.65,
+                  geodesic: true,
+                  zIndex: 999,
+                  icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 2 }, offset: '0', repeat: '14px' }]
+                });
+                directionsRenderers[i] = fallbackRenderer;
+              }
+              if (panel) {
+                const fallbackCard = document.createElement('div');
+                fallbackCard.style.cssText = 'margin-bottom:12px;border:1px dashed #94a3b8;border-radius:12px;padding:12px;';
+                fallbackCard.innerHTML = `<strong>${escapeHtml(stageMeta.icon)} ${escapeHtml(origin.name || '上一站')} → ${escapeHtml(destination.name || '下一站')}</strong><div style="margin-top:5px;color:#64748b;text-wrap:pretty;">路線服務暫時無回應，顯示直線示意；仍可完整操作展示模擬。</div>`;
+                panel.appendChild(fallbackCard);
+              }
+              refreshRouteProgressRender();
+              renderMobileRouteSheet();
+            }
           }
         }
       );
@@ -17630,7 +18374,7 @@
     initFirebaseIfConfigured();
     setupAuthListener();
     await initFromUrl();
-    if (window.google && window.google.maps) {
+    if (window.google && window.google.maps && typeof window.google.maps.Map === 'function') {
       if (!map) {
         await initMap();
       } else {
@@ -17659,7 +18403,7 @@
     updateMobileDriverPanelLayout();
   });
   window.addEventListener('load', () => {
-    if (window.google && window.google.maps && !map) {
+    if (window.google && window.google.maps && typeof window.google.maps.Map === 'function' && !map) {
       initMap();
     }
   });

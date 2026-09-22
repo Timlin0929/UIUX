@@ -6938,6 +6938,12 @@ button.notif-item { cursor: pointer; }
   white-space: nowrap;
 }
 
+#tripSimulationPanel button,
+#tripSimulationPanel select {
+  min-height: 44px !important;
+  white-space: nowrap;
+}
+
 .photo-sort-review-overlay {
   position: fixed;
   inset: 0;
