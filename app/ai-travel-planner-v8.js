@@ -4476,6 +4476,206 @@
     return { url, path, ts };
   }
 
+  // 照片離線佇列接在既有 Storage + memories 流程上。IndexedDB 只保存待上傳檔案；
+  // 真正同步完成後仍由 visitedSpots / micro_trips/{tripId}/memories/{uid} 作為畫面資料來源。
+  let tripPhotoManagerSetupPromise = null;
+  let tripPhotoManagerEventUnsubscribe = null;
+  let tripPhotoSyncConfigured = false;
+  let tripPhotoGalleryMountKey = '';
+
+  function currentPhotoOwner() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    return user ? {
+      uid: user.uid || '',
+      name: user.displayName || (user.email ? user.email.split('@')[0] : '') || '旅伴',
+      email: user.email || '',
+      role: collabRole || (currentTripIsCollab ? 'member' : 'owner')
+    } : { uid: '', name: '', email: '', role: 'viewer' };
+  }
+
+  function ensureTripPhotoSyncConfigured() {
+    const sync = window.TripPhotoSync;
+    if (!sync || !firebaseDb || !firebaseAuth) return null;
+    if (!tripPhotoSyncConfigured) {
+      sync.configure({
+        db: firebaseDb,
+        storage: firebaseStorage,
+        auth: firebaseAuth,
+        includeLegacy: true,
+        authorize: (action, context) => {
+          const actor = context && context.actor || currentPhotoOwner();
+          const role = String(actor.role || collabRole || '').toLowerCase();
+          return ['overwrite', 'remove'].includes(action) && (role === 'owner' || role === 'editor');
+        },
+        logger: (level, message, detail) => {
+          if (level === 'error') console.warn('[trip-photo-sync]', message, detail || '');
+        }
+      });
+      tripPhotoSyncConfigured = true;
+    }
+    return sync;
+  }
+
+  function findPhotoStop(photo) {
+    const stopId = String(photo && photo.stopId || '');
+    return (replanStops || []).find((stop, index) => {
+      if (!stop) return false;
+      return String(stop.id || '') === stopId
+        || String(stop.collabStopId || '') === stopId
+        || String(memoryStableStopId(stop, index)) === stopId;
+    }) || null;
+  }
+
+  function sortStoredTripPhotos(photos) {
+    const list = Array.isArray(photos) ? photos.slice() : [];
+    if (window.TripPhotoManager && typeof window.TripPhotoManager.stableSort === 'function') {
+      return window.TripPhotoManager.stableSort(list);
+    }
+    return list.sort((a, b) => Number(a && (a.capturedAt || a.ts)) - Number(b && (b.capturedAt || b.ts)));
+  }
+
+  async function publishQueuedTripPhoto(photo) {
+    const remote = photo && photo.remote || {};
+    const stop = findPhotoStop(photo);
+    const stopName = String(photo && photo.stopName || (stop && stop.name) || '');
+    const tripId = String(photo && photo.tripId || '');
+    if (!tripId) throw new Error('照片缺少行程資訊，請重新選擇行程。');
+    if (!remote.url) throw new Error('照片已上傳，但尚未取得下載網址。');
+    const sync = ensureTripPhotoSyncConfigured();
+    if (!sync) throw new Error('多人照片同步尚未初始化。');
+    await sync.publish(tripId, { ...photo, stopName, remote }, { actor: currentPhotoOwner() });
+
+    // 舊旅記卡仍以 visitedSpots 呈現；若使用者尚未打卡，就只寫正式 photos，
+    // 不再讓 Storage 已上傳的照片因缺少造訪紀錄而永久失敗。
+    const record = findVisitedPlaceRecord(stopName, tripId);
+    if (!record) return;
+    const stored = {
+      id: String(photo.id || ''),
+      photoId: String(photo.id || ''),
+      url: String(remote.url),
+      path: String(remote.path || ''),
+      ts: Number(remote.ts) || Number(photo.capturedAt) || Date.now(),
+      capturedAt: Number(photo.capturedAt) || Number(remote.ts) || Date.now(),
+      uploadedAt: Number(photo.uploadedAt) || Date.now(),
+      stopId: String(photo.stopId || ''),
+      ownerUid: String(photo.ownerUid || ''),
+      owner: photo.owner && photo.owner.name ? String(photo.owner.name) : ''
+    };
+    const changed = updateVisitedPlaceByName(stopName, (place) => {
+      const photos = Array.isArray(place.photos) ? place.photos : [];
+      const exists = photos.some((item) => item && (
+        (stored.photoId && item.photoId === stored.photoId)
+        || (stored.path && item.path === stored.path)
+        || item.url === stored.url
+      ));
+      if (!exists) photos.push(stored);
+      place.photos = sortStoredTripPhotos(photos);
+    }, tripId);
+    if (document.getElementById('travellog-list')) renderTravelLog();
+  }
+
+  function ensureTripPhotoManager() {
+    if (tripPhotoManagerSetupPromise) return tripPhotoManagerSetupPromise;
+    tripPhotoManagerSetupPromise = (async () => {
+      const manager = window.TripPhotoManager;
+      if (!manager) throw new Error('照片離線佇列尚未載入。');
+      const sync = ensureTripPhotoSyncConfigured();
+      const remoteAdapters = sync ? sync.createManagerAdapters({ getActor: currentPhotoOwner, includeLegacy: true }) : {};
+      manager.configure({
+        upload: async (blob, photo) => {
+          if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) throw new Error('請先登入後再同步照片。');
+          const compressed = await compressImageToJpeg(blob);
+          return uploadTripPhoto(compressed, photo && photo.tripId || '');
+        },
+        publish: publishQueuedTripPhoto,
+        subscribe: remoteAdapters.subscribe,
+        removeRemote: remoteAdapters.removeRemote,
+        logger: (level, message, detail) => {
+          if (level === 'error') console.warn('[trip-photo-manager]', message, detail || '');
+        }
+      });
+      if (!tripPhotoManagerEventUnsubscribe) {
+        tripPhotoManagerEventUnsubscribe = manager.subscribe((event) => {
+          if (event.type === 'synced' && document.getElementById('travellog-list')) renderTravelLog();
+          if (event.type === 'sync-error') {
+            feedbackToast('照片已保存在此裝置，連線恢復後可重試同步', 'orange');
+          }
+        });
+      }
+      await manager.init();
+      const tripId = String(currentItineraryId || '');
+      if (tripId && tripId !== 'TRIP-EMPTY' && remoteAdapters.subscribe) {
+        try { manager.subscribeTrip(tripId); }
+        catch (error) { console.warn('[trip-photo-manager] 即時同步暫時無法啟動：', error && error.message); }
+      }
+      return manager;
+    })().catch((error) => {
+      tripPhotoManagerSetupPromise = null;
+      throw error;
+    });
+    return tripPhotoManagerSetupPromise;
+  }
+
+  async function renderTripPhotoGallery() {
+    const container = document.getElementById('tripPhotoGallery');
+    const tripId = String(currentItineraryId || '');
+    const hasLoadedTrip = Array.isArray(replanStops) && replanStops.some((stop) => stop && stop.name);
+    if (!container || !window.TripPhotoGallery) return;
+    if (!tripId || tripId === 'TRIP-EMPTY' || !hasLoadedTrip) {
+      tripPhotoGalleryMountKey = '';
+      window.TripPhotoGallery.destroy();
+      container.innerHTML = '<div class="tpg-empty">載入行程後即可整理共同行程照片。</div>';
+      return;
+    }
+    try {
+      const manager = await ensureTripPhotoManager();
+      const sync = ensureTripPhotoSyncConfigured();
+      if (!sync) throw new Error('照片同步尚未初始化。');
+      const actor = currentPhotoOwner();
+      const mountKey = `${tripId}:${actor.uid}:${actor.role}`;
+      let lastRemoteSignature = '';
+      const mergeLocalAndRemote = async (remotePhotos = null) => {
+        const remote = remotePhotos || await sync.list(tripId);
+        const signature = remote.map((photo) => `${photo.id}:${photo.updatedAt || photo.uploadedAt || ''}`).sort().join('|');
+        if (signature !== lastRemoteSignature) {
+          lastRemoteSignature = signature;
+          await manager.ingestRemote(remote, { tripId });
+        }
+        const local = await manager.list({ tripId });
+        return { photos: sync.mergePhotos(remote, local) };
+      };
+      if (tripPhotoGalleryMountKey === mountKey) {
+        await window.TripPhotoGallery.refresh();
+        return;
+      }
+      tripPhotoGalleryMountKey = mountKey;
+      try { manager.subscribeTrip(tripId); } catch (_error) {}
+      await window.TripPhotoGallery.mount(container, {
+        tripId,
+        title: '共同行程相簿',
+        stops: replanStops,
+        actor,
+        manager,
+        adapter: {
+          listPhotos: () => mergeLocalAndRemote(),
+          subscribe: (_tripId, onPhotos, onError) => sync.subscribe(tripId, async (remote) => {
+            try { onPhotos(await mergeLocalAndRemote(remote)); } catch (error) { if (onError) onError(error); }
+          }, onError),
+          updateClassification: (id, patch, currentActor) => manager.updateClassification(id, patch, currentActor),
+          retry: (query) => manager.retryPending(query),
+          remove: (id, currentActor) => manager.remove(id, currentActor),
+          can: (action, photo, currentActor) => manager.can(action, photo, currentActor)
+        },
+        onMessage: (message) => {
+          if (message && message.kind === 'error') feedbackToast(message.text, 'orange');
+        }
+      });
+    } catch (error) {
+      console.warn('[trip-photo-gallery] 載入失敗：', error);
+      container.innerHTML = '<div class="tpg-empty">共同行程相簿暫時無法載入，可稍後重新整理。</div>';
+    }
+  }
+
   // 拍照/選圖入口（旅記卡「📷」與打卡後 snackbar 共用）。
   // input 不加 capture：iOS 加了會強制只開相機；不加則 iOS/Android 都出「拍照／相簿」選單。
   function visitedPlaceNameKey(name) {
@@ -4502,32 +4702,200 @@
       input.addEventListener('change', handleTripPhotoInputChange);
     }
     input.dataset.targetName = name || '';
+    input.dataset.photoMode = 'stop';
     input.dataset.targetTripId = tripId == null ? '' : String(tripId);
     input.dataset.targetTripScoped = tripId == null ? '0' : '1';
     input.value = '';
     input.click();
   }
 
+  function buildPhotoClassificationStops() {
+    const schedule = buildReplanSchedule();
+    const baseText = currentTripDepartureDate
+      || (currentTripPreferences && (currentTripPreferences.departureDate || currentTripPreferences.startDate))
+      || new Date().toISOString().slice(0, 10);
+    const base = new Date(`${baseText}T12:00:00`);
+    return (schedule || []).map((stop, index) => {
+      const startMinutes = Number(stop.start) || 0;
+      const dayOffset = Math.max(0, Number(stop.dayIndex || 1) - 1, Math.floor(startMinutes / 1440));
+      const day = new Date(base.getTime());
+      day.setDate(day.getDate() + dayOffset);
+      const dayKey = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+      const clockMinutes = ((startMinutes % 1440) + 1440) % 1440;
+      const coords = getStopLatLng(stop);
+      return {
+        id: String(stop.collabStopId || stop.id || `stop-${index}`),
+        stopId: String(stop.collabStopId || stop.id || `stop-${index}`),
+        name: stop.name || `第 ${index + 1} 站`,
+        dayKey,
+        startAt: `${dayKey}T${minutesToClock(clockMinutes)}:00`,
+        stayMinutes: Number(stop.stayMin || stop.computedStayMin) || 60,
+        ...(coords || {})
+      };
+    });
+  }
+
+  function closePhotoSortReview() {
+    const overlay = document.getElementById('photoSortReview');
+    if (overlay) overlay.remove();
+  }
+
+  function openPhotoSortReview(manager, records) {
+    closePhotoSortReview();
+    const pending = (records || []).filter((photo) => photo && (!photo.stopId || photo.status === manager.STATUS.LOCAL_ONLY));
+    if (!pending.length) return false;
+    const stops = buildPhotoClassificationStops().filter((stop) => stop && stop.stopId);
+    const overlay = document.createElement('div');
+    overlay.id = 'photoSortReview';
+    overlay.className = 'photo-sort-review-overlay';
+    overlay.innerHTML = `
+      <section class="photo-sort-review-panel" role="dialog" aria-modal="true" aria-labelledby="photoSortReviewTitle">
+        <div class="photo-sort-review-head">
+          <div><h2 id="photoSortReviewTitle">確認照片所在景點</h2><p>缺少拍攝位置或時間時，請選擇正確景點後再同步。</p></div>
+          <button type="button" class="photo-sort-review-close" aria-label="關閉照片整理">✕</button>
+        </div>
+        <div class="photo-sort-review-list"></div>
+        <div class="photo-sort-review-actions">
+          <button type="button" class="photo-sort-review-later">稍後整理</button>
+          <button type="button" class="photo-sort-review-save">儲存分類並上傳</button>
+        </div>
+      </section>`;
+    const list = overlay.querySelector('.photo-sort-review-list');
+    pending.forEach((photo) => {
+      const row = document.createElement('label');
+      row.className = 'photo-sort-review-row';
+      const name = document.createElement('span');
+      name.textContent = photo.filename || '未命名照片';
+      const select = document.createElement('select');
+      select.dataset.photoId = photo.id;
+      select.setAttribute('aria-label', `${photo.filename || '照片'}的景點`);
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '請選擇景點';
+      select.appendChild(placeholder);
+      stops.forEach((stop) => {
+        const option = document.createElement('option');
+        option.value = stop.stopId;
+        option.textContent = `${stop.dayKey} · ${stop.name}`;
+        option.selected = String(photo.stopId || '') === stop.stopId;
+        select.appendChild(option);
+      });
+      row.append(name, select);
+      list.appendChild(row);
+    });
+    const close = () => closePhotoSortReview();
+    overlay.querySelector('.photo-sort-review-close').onclick = close;
+    overlay.querySelector('.photo-sort-review-later').onclick = close;
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+    overlay.querySelector('.photo-sort-review-save').onclick = async () => {
+      const selections = Array.from(list.querySelectorAll('select'));
+      if (selections.some((select) => !select.value)) return feedbackToast('請先替每張照片選擇景點', 'orange');
+      const actor = { ...currentPhotoOwner(), role: collabRole || 'owner' };
+      for (const select of selections) {
+        const stop = stops.find((item) => item.stopId === select.value);
+        await manager.updateClassification(select.dataset.photoId, {
+          tripId: currentItineraryId,
+          dayKey: stop && stop.dayKey,
+          stopId: select.value
+        }, actor);
+      }
+      close();
+      await manager.retryPending({ force: true, tripId: currentItineraryId });
+      feedbackToast(`✅ 已分類並同步 ${selections.length} 張照片`, 'green');
+    };
+    document.body.appendChild(overlay);
+    const firstSelect = overlay.querySelector('select');
+    if (firstSelect) firstSelect.focus();
+    return true;
+  }
+
+  window.addTripPhotosForSorting = async function() {
+    if (collabReadOnly) return feedbackToast('唯讀成員無法上傳共同行程照片', 'orange');
+    if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) return feedbackToast('登入後即可整理照片', 'orange');
+    if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return feedbackToast('請先載入一趟行程', 'orange');
+    try {
+      const manager = await ensureTripPhotoManager();
+      const pending = await manager.list({ tripId: currentItineraryId, status: manager.STATUS.LOCAL_ONLY });
+      if (pending.length && openPhotoSortReview(manager, pending)) return;
+      const input = document.getElementById('tripPhotoInput');
+      if (!input) return;
+      if (!input.dataset.bound) {
+        input.dataset.bound = '1';
+        input.addEventListener('change', handleTripPhotoInputChange);
+      }
+      input.dataset.photoMode = 'auto';
+      input.dataset.targetName = '';
+      input.dataset.targetTripId = String(currentItineraryId);
+      input.dataset.targetTripScoped = '1';
+      input.value = '';
+      input.click();
+    } catch (error) {
+      console.warn('[trip-photo-manager] 無法開啟批次整理：', error);
+      feedbackToast('目前無法開啟照片整理，請稍後重試', 'orange');
+    }
+  };
+
   async function handleTripPhotoInputChange(evt) {
     const input = evt.target;
+    const autoClassify = input.dataset.photoMode === 'auto';
     const name = input.dataset.targetName || '';
     const tripId = input.dataset.targetTripScoped === '1' ? input.dataset.targetTripId : null;
     const files = Array.from(input.files || []);
-    if (!name || !files.length) return;
-    const rec = findVisitedPlaceRecord(name, tripId);
-    if (!rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
-    feedbackToast('📤 照片上傳中…', 'blue');
-    const results = [];
-    for (const f of files) {
-      try {
-        const blob = await compressImageToJpeg(f);
-        results.push(await uploadTripPhoto(blob, rec.tripId || ''));
-      } catch (e) { console.warn('照片上傳失敗：', e); }
+    if (!files.length || (!autoClassify && !name)) return;
+    const rec = autoClassify ? null : findVisitedPlaceRecord(name, tripId);
+    if (!autoClassify && !rec) return feedbackToast('找不到這個景點的造訪紀錄', 'orange');
+    feedbackToast('📤 正在整理照片並加入上傳佇列…', 'blue');
+    try {
+      const manager = await ensureTripPhotoManager();
+      const stop = autoClassify ? null : (replanStops || []).find((item) => item && visitedPlaceNameKey(item.name) === visitedPlaceNameKey(name));
+      const targetTripId = String((rec && rec.tripId) || tripId || currentItineraryId || '');
+      const queued = await manager.enqueue(files, {
+        tripId: targetTripId,
+        stopId: stop ? String(stop.collabStopId || stop.id || '') : '',
+        stopName: name,
+        stops: autoClassify ? buildPhotoClassificationStops() : undefined,
+        localOnly: autoClassify,
+        owner: currentPhotoOwner(),
+        role: collabRole || (currentTripIsCollab ? 'member' : 'owner')
+      });
+      if (!queued.queued.length) return feedbackToast('照片無法讀取，請確認格式後重試', 'orange');
+      const duplicateCount = queued.queued.filter((photo) => Array.isArray(photo.duplicateHints) && photo.duplicateHints.length).length;
+      if (autoClassify) {
+        const actor = { ...currentPhotoOwner(), role: collabRole || 'owner' };
+        const review = [];
+        for (const photo of queued.queued) {
+          if (!photo.stopId || !photo.classification || photo.classification.confidence === 'low') {
+            review.push(photo);
+            continue;
+          }
+          await manager.updateClassification(photo.id, {
+            tripId: targetTripId,
+            dayKey: photo.dayKey,
+            stopId: photo.stopId
+          }, actor);
+        }
+        await manager.retryPending({ force: true, tripId: targetTripId });
+        if (review.length) {
+          openPhotoSortReview(manager, review);
+          feedbackToast(`${queued.queued.length - review.length} 張已自動分類，${review.length} 張需要確認${duplicateCount ? `；${duplicateCount} 張可能重複` : ''}`, 'blue');
+        } else {
+          feedbackToast(`✅ 已依拍攝時間與位置整理 ${queued.queued.length} 張照片${duplicateCount ? `；${duplicateCount} 張可能重複` : ''}`, duplicateCount ? 'orange' : 'green');
+        }
+        return;
+      }
+      if (navigator.onLine === false) {
+        feedbackToast(`已將 ${queued.queued.length} 張照片保存在此裝置，恢復網路後自動續傳`, 'blue');
+      } else {
+        await manager.retryPending({ force: true, tripId: targetTripId });
+        const failedCount = queued.failed.length;
+        feedbackToast(failedCount
+          ? `已加入 ${queued.queued.length} 張照片，另有 ${failedCount} 張無法讀取`
+          : `✅ 已依拍攝時間整理 ${queued.queued.length} 張照片${duplicateCount ? `；${duplicateCount} 張可能重複` : ''}`, (failedCount || duplicateCount) ? 'orange' : 'green');
+      }
+    } catch (error) {
+      console.warn('照片加入佇列失敗：', error);
+      feedbackToast('照片暫時無法保存，請確認瀏覽器儲存空間後重試', 'orange');
     }
-    if (!results.length) return feedbackToast('照片上傳失敗，這張格式可能不支援', 'orange');
-    updateVisitedPlaceByName(name, (p) => { (p.photos = p.photos || []).push(...results); }, tripId);
-    if (document.getElementById('travellog-list')) renderTravelLog();
-    feedbackToast(`✅ 已加入 ${results.length} 張照片`, 'green');
   }
 
   // 打卡成功後的拍照提示：登入時給可點的 snackbar（拍照按鈕），未登入退回純文字 toast
@@ -4569,6 +4937,9 @@
     const photo = target;
     if (photo && photo.path && firebaseStorage) {
       firebaseStorage.ref(photo.path).delete().catch(() => {}); // object-not-found 等一律靜默
+    }
+    if (photo && photo.photoId && window.TripPhotoManager) {
+      window.TripPhotoManager.remove(photo.photoId, { ...currentPhotoOwner(), role: collabRole || 'owner' }).catch(() => {});
     }
     // 只移除「找到的那一張」（用 path 精準比對）：ts 理論上可能撞號，filter by ts 會誤刪多張
     updateVisitedPlaceByName(name, (p) => {
@@ -8520,6 +8891,7 @@
   function renderTravelLog() {
     reconcileCheckinsIntoVisited();
     const activeTripId = String(currentItineraryId || '');
+    renderTripPhotoGallery().catch(() => {});
     const places = (!activeTripId || activeTripId === 'TRIP-EMPTY')
       ? []
       : getVisitedPlaces().filter((place) => String(place.tripId || '') === activeTripId);
@@ -8596,7 +8968,7 @@
           ${group.spots.map((spot) => {
             const nameJs = jsAttrStr(spot.name);
             const tripIdJs = jsAttrStr(spot.tripId || '');
-            const photos = Array.isArray(spot.photos) ? spot.photos.filter((photo) => photo && photo.url) : [];
+            const photos = sortStoredTripPhotos(Array.isArray(spot.photos) ? spot.photos.filter((photo) => photo && photo.url) : []);
             const hasNote = !!String(spot.note || '').trim();
             const status = [photos.length ? `${photos.length} 張照片` : '', hasNote ? '有備註' : ''].filter(Boolean).join(' · ') || '無素材';
             const spotKey = `${group.key}::${spot.name || ''}`;
@@ -17228,6 +17600,10 @@
         renderUserMenuWithData(name, emoji, user.email);
         startPlannerNotifSubscription(user.email);
         refreshGuestJoinRequestStatus();
+        // 登入狀態確定後才啟動離線照片續傳，避免尚未取得 Firebase 使用者時消耗重試次數。
+        ensureTripPhotoManager()
+          .then((manager) => manager.retryPending({ force: true }))
+          .catch((error) => console.warn('[trip-photo-manager] 待上傳照片暫時無法續傳：', error && error.message));
       } else {
         localStorage.removeItem('wai_user');
         renderUserMenuWithData('', '', '');

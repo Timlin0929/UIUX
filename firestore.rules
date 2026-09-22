@@ -461,6 +461,42 @@ service cloud.firestore {
         allow write: if isTripMemberOrOwner(tripId) && memberId == request.auth.uid;
       }
 
+      // 多人照片正式資料：每張照片一份文件，才能即時合併、單張重試與精準刪除。
+      // ownerUid / tripId 建立後不可竄改；一般成員只能管理自己的照片，
+      // 行程 owner/editor 可協助整理景點分類與刪除不適當內容。
+      match /photos/{photoId} {
+        function validPhotoShape(data) {
+          return data.keys().hasOnly([
+              'photoId', 'tripId', 'stopId', 'stopName', 'dayKey', 'capturedAt',
+              'manualOrder', 'ownerUid', 'ownerName', 'url', 'storagePath', 'status',
+              'capturedTimezone', 'mimeType', 'hash', 'createdAt', 'uploadedAt', 'updatedAt'
+            ])
+            && data.keys().hasAll([
+              'photoId', 'tripId', 'stopId', 'stopName', 'dayKey', 'capturedAt',
+              'manualOrder', 'ownerUid', 'ownerName', 'url', 'storagePath', 'status'
+            ])
+            && data.photoId == photoId
+            && data.tripId == tripId
+            && data.ownerUid is string
+            && data.url is string
+            && data.url.size() > 0;
+        }
+
+        allow read: if isTripMemberOrOwner(tripId);
+        allow create: if isTripMemberOrOwner(tripId)
+          && request.resource.data.ownerUid == request.auth.uid
+          && validPhotoShape(request.resource.data);
+        allow update: if isTripMemberOrOwner(tripId)
+          && (resource.data.ownerUid == request.auth.uid
+            || isEditor(get(/databases/$(database)/documents/micro_trips/$(tripId)).data))
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.tripId == resource.data.tripId
+          && validPhotoShape(request.resource.data);
+        allow delete: if isTripMemberOrOwner(tripId)
+          && (resource.data.ownerUid == request.auth.uid
+            || isEditor(get(/databases/$(database)/documents/micro_trips/$(tripId)).data));
+      }
+
       // 旅程回顧短片：每位成員各一份 metadata（videoUrl 指向 Storage）。
       //   App 與網頁共用此路徑，換裝置／組員／App 端都讀得到；只能寫自己那份。
       match /recaps/{memberId} {

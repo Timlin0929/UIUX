@@ -6869,3 +6869,201 @@ button.notif-item { cursor: pointer; }
   font-weight: 600;
   white-space: nowrap;          /* 短標籤不拆行（見 .claude/skills/cjk-line-wrap） */
 }
+/* 共同行程相簿：外層只負責與旅記頁的版面銜接，內容樣式由 trip-photo-gallery.css 管理。 */
+.travellog-shared-gallery {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: var(--shadow-sm);
+}
+
+.travellog-shared-gallery-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.travellog-shared-gallery-head p {
+  margin: 5px 0 14px;
+  color: var(--ink2);
+  font-size: 13px;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+@media (max-width: 600px) {
+  .voice-guide-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .voice-guide-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .voice-btn {
+    min-width: 0;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+
+  body.prototype-mode .prototype-id-chip {
+    display: none;
+  }
+
+  .travellog-shared-gallery {
+    margin-inline: -4px;
+    padding: 14px 10px;
+    border-radius: 16px;
+  }
+}
+
+/* 照片批次整理與待確認分類 */
+.travellog-sort-photo-btn {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--accent-light);
+  color: var(--accent-dark);
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.photo-sort-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3600;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.photo-sort-review-panel {
+  width: min(560px, 100%);
+  max-height: min(82dvh, 720px);
+  overflow: auto;
+  padding: 20px;
+  border-radius: 20px;
+  background: var(--surface, #fff);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.photo-sort-review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.photo-sort-review-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.photo-sort-review-head p {
+  margin: 6px 0 0;
+  color: var(--ink2);
+  text-wrap: pretty;
+}
+
+.photo-sort-review-close,
+.photo-sort-review-actions button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.photo-sort-review-close {
+  flex: 0 0 44px;
+  width: 44px;
+  padding: 0;
+  background: var(--surface2, #f3f4f6);
+}
+
+.photo-sort-review-list {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+}
+
+.photo-sort-review-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.9fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.photo-sort-review-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-sort-review-row select {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+  padding: 0 10px;
+}
+
+.photo-sort-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.photo-sort-review-actions button {
+  padding: 0 16px;
+}
+
+.photo-sort-review-later {
+  background: var(--surface2, #f3f4f6);
+  color: var(--ink2);
+}
+
+.photo-sort-review-save {
+  background: var(--accent);
+  color: #fff;
+}
+
+@media (max-width: 520px) {
+  .photo-sort-review-overlay {
+    align-items: end;
+    padding: 0;
+  }
+
+  .photo-sort-review-panel {
+    width: 100%;
+    max-height: 88dvh;
+    padding: 18px 14px calc(18px + env(safe-area-inset-bottom));
+    border-radius: 22px 22px 0 0;
+  }
+
+  .photo-sort-review-row {
+    grid-template-columns: 1fr;
+  }
+
+  .photo-sort-review-actions {
+    display: grid;
+    grid-template-columns: 1fr 1.35fr;
+  }
+}
