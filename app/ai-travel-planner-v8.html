@@ -365,7 +365,7 @@
     <button id="directionsPanelHandle" type="button" onclick="toggleDirectionsPanel()" hidden>階段 ◂</button>
 
     <div class="mobile-route-sheet" id="mobileRouteSheet">
-      <button class="mobile-route-toggle" type="button" onclick="toggleMobileRouteSheet()">
+      <button class="mobile-route-toggle" type="button" onclick="toggleMobileRouteSheet()" aria-controls="mobileRouteList" aria-label="展開或收合階段路徑" aria-expanded="false">
         <div class="mobile-route-copy">
           <div class="mobile-route-title">階段路徑</div>
           <div class="mobile-route-sub" id="mobileRouteSummary">載入路線中</div>
@@ -583,7 +583,7 @@
   <button class="find-car-more" type="button" onclick="openActiveParkingDetails()" aria-label="查看停車位置詳細資料">⌄</button>
 </aside>
 
-<div class="mobile-view-switch" id="mobileViewSwitch">
+<div class="mobile-view-switch" id="mobileViewSwitch" role="navigation" aria-label="手機主要畫面">
   <!-- UIUX#5：原標籤「功能頁」語意不明（使用者不知道裡面是什麼），改為內容本身「行程」 -->
   <button class="mobile-switch-btn active" id="mobileSwitchFunctions" onclick="setMobileMode('functions')">行程</button>
   <button class="mobile-switch-btn" id="mobileSwitchSpot" onclick="switchView('current-spot')">現在景點</button>

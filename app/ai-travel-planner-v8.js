@@ -14693,7 +14693,8 @@
   let currentRouteBounds = null;
   let currentRouteFocusBounds = null;
   let routeStageCache = [];
-  let mobileRouteSheetExpanded = false;
+  // 手機路線面板三段式：collapsed（只顯示下一段）、peek（前三段）、expanded（全部）。
+  let mobileRouteSheetState = 'collapsed';
   // D6：使用者為某段選定的替代路線 index（本次瀏覽階段黏著；重畫路線時優先沿用）。key = 階段 index。
   const preferredRouteByStage = {};
   let routeRenderToken = 0;
@@ -16934,7 +16935,7 @@
 
     activeRouteStage = activeRouteStage === stageIndex ? null : stageIndex;
     activeItineraryStopId = null; // 清除行程階段選擇
-    mobileRouteSheetExpanded = true;
+    mobileRouteSheetState = 'peek';
     updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
     renderToiletMarkersForActiveRouteStage();
     renderItineraryDisplay();
@@ -17068,40 +17069,59 @@
   function toggleMobileRouteSheet(forceExpanded = null) {
     if (!isMobileLayout()) return;
     if (typeof forceExpanded === 'boolean') {
-      mobileRouteSheetExpanded = forceExpanded;
+      mobileRouteSheetState = forceExpanded ? 'expanded' : 'collapsed';
     } else {
-      mobileRouteSheetExpanded = !mobileRouteSheetExpanded;
+      mobileRouteSheetState = mobileRouteSheetState === 'collapsed'
+        ? 'peek'
+        : (mobileRouteSheetState === 'peek' ? 'expanded' : 'collapsed');
     }
+    const toggle = document.querySelector('#mobileRouteSheet .mobile-route-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', mobileRouteSheetState === 'collapsed' ? 'false' : 'true');
     renderMobileRouteSheet();
+  }
+
+  function getMobileRouteStageStatus(stage) {
+    const progress = inferredStageProgress(stage);
+    if (progress >= 1) return { key: 'completed', label: '已走完' };
+    if (progress > 0 || activeRouteStage === stage.index) return { key: 'active', label: '進行中' };
+    return { key: 'pending', label: '未開始' };
   }
 
   function renderMobileRouteSheet() {
     const sheet = document.getElementById('mobileRouteSheet');
+    const toggle = document.querySelector('#mobileRouteSheet .mobile-route-toggle');
     const summary = document.getElementById('mobileRouteSummary');
     const list = document.getElementById('mobileRouteList');
     const icon = document.getElementById('mobileRouteToggleIcon');
     if (!sheet || !summary || !list || !icon) return;
+    if (toggle) toggle.setAttribute('aria-expanded', mobileRouteSheetState === 'collapsed' ? 'false' : 'true');
 
     const mobileVisible = isMobileLayout() && document.body.classList.contains('mobile-mode-map');
     sheet.style.display = mobileVisible ? 'flex' : 'none';
 
     if (!mobileVisible) {
-      sheet.classList.remove('expanded');
+      sheet.classList.remove('peek', 'expanded');
       return;
     }
 
-    sheet.classList.toggle('expanded', mobileRouteSheetExpanded);
-    icon.textContent = mobileRouteSheetExpanded ? '▾' : '▴';
+    sheet.classList.toggle('peek', mobileRouteSheetState === 'peek');
+    sheet.classList.toggle('expanded', mobileRouteSheetState === 'expanded');
+    sheet.dataset.state = mobileRouteSheetState;
+    icon.textContent = mobileRouteSheetState === 'collapsed' ? '▴' : (mobileRouteSheetState === 'peek' ? '▴' : '▾');
 
     const stages = routeStageCache.filter(Boolean);
     const activeStage = stages.find((stage) => stage.index === activeRouteStage);
+    const nextStage = activeStage || stages.find((stage) => inferredStageProgress(stage) < 1) || stages[stages.length - 1];
+    const visibleStages = mobileRouteSheetState === 'collapsed' && nextStage ? [nextStage] : stages;
     summary.textContent = activeStage
       ? `目前聚焦第 ${activeStage.index + 1} 段 · ${activeStage.origin.name || activeStage.origin.title} → ${activeStage.destination.name || activeStage.destination.title}`
-      : `${stages.length} 段路徑 · 點開可收合查看`;
+      : `${stages.length} 段路徑 · ${mobileRouteSheetState === 'collapsed' ? '點開看前三段' : (mobileRouteSheetState === 'peek' ? '再點看完整路線' : '再點收合')}`;
 
-    list.innerHTML = stages.length ? stages.map((stage) => `
+    list.innerHTML = visibleStages.length ? visibleStages.map((stage) => {
+      const status = getMobileRouteStageStatus(stage);
+      return `
       <div class="mobile-route-item-wrap">
-      <button class="mobile-route-item ${activeRouteStage === stage.index ? 'active' : ''}" type="button" onclick="selectRouteStage(${stage.index})">
+      <button class="mobile-route-item ${activeRouteStage === stage.index ? 'active' : ''} status-${status.key}" type="button" onclick="selectRouteStage(${stage.index})">
         <div class="mobile-route-item-main">
           <div class="mobile-route-item-head">
             <div class="mobile-route-item-time">${escapeHtml(getRouteStageTimeText(stage) || '時間計算中')}</div>
@@ -17109,11 +17129,11 @@
           </div>
           <div class="mobile-route-item-meta">${escapeHtml(getTransitModeMeta(stage.mode).icon)} ${escapeHtml(getTransitModeMeta(stage.mode).label)} · ${escapeHtml((!stage.distance || isDistanceAbnormallySmall(stage.distance)) ? '距離計算中' : stage.distance)} · ${escapeHtml(getRouteStageTimeText(stage) || '路線時間計算中')}</div>
         </div>
-        <div class="mobile-route-item-badge">${activeRouteStage === stage.index ? '聚焦中' : '點看'}</div>
+        <div class="mobile-route-item-badge">${status.label}</div>
       </button>
       ${stage.altEligible && stage.alts ? `<button type="button" class="route-alt-btn mobile" onclick="openRouteAlternatives(${stage.index})">🔀 替代路線 (${stage.alts.length})</button>` : ''}
       </div>
-    `).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
+    `; }).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
   }
 
   function refreshMobileMapLayout() {
