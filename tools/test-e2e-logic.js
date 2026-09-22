@@ -21,7 +21,7 @@ const SRC = fs.readFileSync(path.join(APP, 'ai-travel-explore-final.js'), 'utf8'
 
 // ── 從原始檔抽出具名函式（大括號配對，忽略字串/註解中的括號）──────────────
 function extractFunction(src, name) {
-  const re = new RegExp('(?:^|\\n)\\s*function\\s+' + name + '\\s*\\(', 'g');
+  const re = new RegExp('(?:^|\\n)\\s*(?:async\\s+)?function\\s+' + name + '\\s*\\(', 'g');
   const m = re.exec(src);
   if (!m) throw new Error('找不到函式：' + name);
   const start = src.indexOf('function', m.index);
@@ -772,6 +772,38 @@ section('12. 範本卡：景點清單摺疊');
   // 底部多出一塊空白，使用者看起來像「同一列的也跟著展開了」。
   check('卡片格線不拉伸（align-items:start）', /\.trips-grid\{[\s\S]{0,300}?align-items:\s*start/.test(C),
     '否則展開一張卡會把同列其他卡一起拉長');
+})();
+
+// ══════════════════════════════════════════════════════════════
+section('13. 展示 Sandbox 與桌機單站抽屜回歸');
+(() => {
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const H = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.html'), 'utf8');
+  const persist = extractFunction(P, 'persistCurrentTripStops');
+  const schedulePersist = extractFunction(P, 'schedulePersistTrip');
+  const syncVehicle = extractFunction(P, 'syncTripPrimaryVehicleSelect');
+  const setVehicle = extractFunction(P, 'setTripPrimaryVehicle');
+  const routeAlternative = extractFunction(P, 'applyRouteAlternative');
+  const openStop = extractFunction(P, 'openItineraryStop');
+
+  check('正式存檔出口會拒絕展示模擬',
+    /if\s*\(tripSimulation\.enabled\)\s*return/.test(persist));
+  check('展示模擬不會排入延遲存檔',
+    /if\s*\(tripSimulation\.enabled\)\s*return/.test(schedulePersist));
+  check('展示／進行中會隱藏並停用主要交通工具',
+    /currentTripStatus\s*===\s*'ongoing'\s*\|\|\s*tripSimulation\.enabled/.test(syncVehicle)
+    && /sel\.disabled\s*=\s*locked/.test(syncVehicle));
+  check('主要交通工具 setter 有展示守衛',
+    /tripSimulation\.enabled\)\s*return/.test(setVehicle));
+  check('替代路線有展示守衛',
+    /if\s*\(tripSimulation\.enabled\)/.test(routeAlternative));
+
+  const mainClose = H.indexOf('</main>');
+  const drawer = H.indexOf('id="stopEditorBackdrop"');
+  check('單站抽屜已移到 main 外、body 根層', mainClose >= 0 && drawer > mainClose,
+    '抽屜若仍在 .left-panel，z-index 會被 stacking context 鎖住');
+  check('桌機開抽屜前會關閉重複的地圖浮窗',
+    /useDesktopEditor[\s\S]{0,120}?closePinInfo\(\)[\s\S]{0,80}?openStopEditor/.test(openStop));
 })();
 
 
