@@ -41,8 +41,14 @@ Thumbs.db
 /uiux-recommendations.md
 /docs/UIUX修改建議.md
 
-# 測試截圖／報告（本機驗證用，不進版控）
-/test-artifacts/
+# 測試截圖（大、會一直長，不進版控）；但文字驗證報告要留下來——
+# COLLAB.md 與 docs/ISSUE-INVENTORY-*.md 會連到它們，
+# 全部排除的話那些連結在 GitHub 上是 404，「已驗收」也就失去證據。
+# 注意寫法：必須排除「目錄內容」(/test-artifacts/*) 而不是目錄本身
+# (/test-artifacts/)。git 不會進入被忽略的目錄，寫成後者的話下面那條
+# 反向規則永遠不會被套用。
+/test-artifacts/*
+!/test-artifacts/*.md
 
 # Python 編譯快取（跑 skill 腳本時產生）
 __pycache__/
