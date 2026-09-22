@@ -760,8 +760,9 @@ async function buildImportedScenicPoint(spot, sourceLabel) {
   const data = {
     id: docId,
     name: spot.name,
-    desc: spot.description || '',
-    notice: '',
+    // desc / notice 不在這裡寫死空字串——寫入是 merge:true，空字串會蓋掉既有內容。
+    // 台東觀光網這支 opendata 沒有敘述欄位，照寫就等於清空 164 筆既有敘述（實測）。
+    // 有值才寫，見下方。
     region,
     city: spot.city || '\u53f0\u6771\u7e23',
     county: spot.city || '\u53f0\u6771\u7e23',
@@ -779,13 +780,22 @@ async function buildImportedScenicPoint(spot, sourceLabel) {
     official_opendata_id: spot.id || null,
     official_opendata_name: spot.name,
     official_opendata_match: 'import',
-    nearbyToiletLocations: nearbyToiletLocations,
-    toiletCoordinatesVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     last_crawled: admin.firestore.FieldValue.serverTimestamp(),
     needsCrawl: false
   };
 
+  // ★ 只在「真的查到」時才寫廁所欄位。
+  //   原本無條件寫 nearbyToiletLocations: []，而寫入是 merge:true——
+  //   只要 Places 查詢失敗（例如金鑰是瀏覽器限定的、伺服器端回 403），
+  //   fetchNearbyToilets 回 []，就會把既有的廁所資料整個蓋掉。
+  //   實測：一次匯入清掉了 38 筆中的 32 筆。查不到就別動這個欄位。
+  if (nearbyToiletLocations.length) {
+    data.nearbyToiletLocations = nearbyToiletLocations;
+    data.toiletCoordinatesVerifiedAt = admin.firestore.FieldValue.serverTimestamp();
+  }
+
+  if (spot.description) data.desc = spot.description;
   if (spot.openTime) data.openTime = spot.openTime;
   if (spot.phone) data.phone = spot.phone;
   if (spot.website) data.website = spot.website;
@@ -1443,9 +1453,44 @@ async function exportLocal(db) {
     console.log(`No documents in ${POI_COLLECTION}; nothing to export.`);
     return;
   }
-  const buckets = {};
-  const seenPerKey = {};
-  let total = 0;
+  // 同一個景點在 collection 裡可能有多份文件（不同時期的匯入用了不同的 docId 規則，
+  // 實測有 84 組同名）。原本是「先到先贏」，而 Firestore 預設依 docId 排序，
+  // 等於隨機挑一份——實測讓 20 筆掉了 rating、3 筆掉了 fee，因為贏的是沒被
+  // verify:places / enrich:fees 加值過的那一份。改成先收集、再挑資料最完整的。
+  function completeness(poi) {
+    let s = 0;
+    if (poi.placeVerified) s += 8;
+    if (Number.isFinite(poi.rating) && poi.rating > 0) s += 4;
+    if (Number.isFinite(poi.fee)) s += 3;
+    if (poi.district) s += 2;
+    if (poi.businessHours) s += 2;
+    if (poi.nearbyToiletLocations && poi.nearbyToiletLocations.length) s += 1;
+    s += Math.min(3, Math.floor(String(poi.desc || '').length / 40));
+    return s;
+  }
+
+  // 逐欄位合併，而不是「挑一份贏家」。挑整份的話，贏的那份只要某個欄位較差就會
+  // 平白掉資料（實測仍有 7 筆：加路蘭遊憩區掉營業時間、富岡漁港掉廁所…）。
+  // 同名的幾份文件描述的是同一個景點，取聯集才對。
+  const EMPTY = (v) => v === undefined || v === null || v === ''
+    || (Array.isArray(v) && !v.length);
+  function mergePoi(base, extra) {
+    const better = completeness(extra) > completeness(base) ? extra : base;
+    const worse = better === extra ? base : extra;
+    const out = Object.assign({}, worse, better);
+    // better 缺的欄位由 worse 補；數值欄位取有值的那個
+    Object.keys(worse).forEach((k) => { if (EMPTY(out[k]) && !EMPTY(worse[k])) out[k] = worse[k]; });
+    Object.keys(better).forEach((k) => { if (EMPTY(out[k]) && !EMPTY(better[k])) out[k] = better[k]; });
+    // 「未知」不是有效的營業時間，別讓它擋掉真正的值
+    if (String(out.businessHours || '').trim() === '未知') {
+      const alt = [better, worse].map((p) => String(p.businessHours || '').trim())
+        .find((h) => h && h !== '未知');
+      out.businessHours = alt || '';
+    }
+    return out;
+  }
+
+  const candidates = {};          // destKey → Map(正規化名稱 → 合併後的 poi)
   for (const doc of snap.docs) {
     const data = doc.data();
     if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
@@ -1454,13 +1499,18 @@ async function exportLocal(db) {
     if (!poi) continue;
     const destKey = deriveDestKey(data);
     if (!destKey) continue;
-    if (!buckets[destKey]) { buckets[destKey] = []; seenPerKey[destKey] = new Set(); }
+    if (!candidates[destKey]) candidates[destKey] = new Map();
     const dedupeKey = normalizeText(poi.name);
-    if (seenPerKey[destKey].has(dedupeKey)) continue;
-    seenPerKey[destKey].add(dedupeKey);
-    buckets[destKey].push(poi);
-    total += 1;
+    const prev = candidates[destKey].get(dedupeKey);
+    candidates[destKey].set(dedupeKey, prev ? mergePoi(prev, poi) : poi);
   }
+
+  const buckets = {};
+  let total = 0;
+  Object.keys(candidates).forEach((k) => {
+    buckets[k] = [...candidates[k].values()];
+    total += buckets[k].length;
+  });
 
   const summary = Object.keys(buckets).map((k) => `${k}:${buckets[k].length}`).join(', ');
   console.log(`Export-local prepared ${total} POIs across keys → ${summary || '(none)'}`);

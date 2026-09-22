@@ -356,18 +356,37 @@ check('Open 24 hours → open', H.parseDayStatus('Open 24 hours', '2026-09-02').
   Object.keys(d).filter((k) => Array.isArray(d[k])).forEach((k) => { pois = pois.concat(d[k]); });
   const wh = pois.filter((p) => p && p.businessHours);
   let unknown = 0, total = 0;
+  const unknownPatterns = new Map();
   wh.forEach((p) => {
     for (let i = 0; i < 7; i++) {
       const dt = new Date(base + 'T00:00:00'); dt.setDate(dt.getDate() + i);
       total++;
-      if (H.parseDayStatus(p.businessHours, isoLocal(dt)).status === 'unknown') unknown++;
+      if (H.parseDayStatus(p.businessHours, isoLocal(dt)).status === 'unknown') {
+        unknown++;
+        const key = String(p.businessHours).replace(/\s+/g, ' ').trim();
+        unknownPatterns.set(key, (unknownPatterns.get(key) || 0) + 1);
+      }
     }
   });
-  // 剩下的 unknown 應只有「未知／預約制／依部落為主」這類自由描述——本來就無法判日別，
-  // 顯示 ℹ️ 概覽是正確行為。門檻設 5%：超過代表又有可解析的樣態被漏掉。
-  const rate = total ? (unknown / total) : 0;
-  check('真實景點資料 unknown 比例 <5%（' + unknown + '/' + total + '）', rate < 0.05,
-    (rate * 100).toFixed(1) + '% 判為 unknown → 畫面會退化成 ℹ️ 概覽');
+  // 原本用「unknown 比例 < 5%」當門檻，但那個數字會隨資料量浮動——匯入台東觀光網
+  // 的 265 筆之後就變成 8.9%，測試變紅卻不代表解析器漏掉任何樣態（那 210 筆全是
+  // 「開放時間依部落為主」這類自由描述）。比例本身不是我們真正關心的東西。
+  //
+  // 改成看「unknown 的寫法是不是都屬於已知無法解析的類型」：
+  // 只要出現沒見過的樣態就變紅，那才是「有可解析的格式被漏掉」的訊號。
+  const KNOWN_UNPARSEABLE = [
+    /依部落為主/,            // 開放時間／實際收費及營運時間依部落為主
+    /預約/,                  // 事先電話預約、需線上預約
+    /暫停開放/,              // 目前暫停開放，另行公告
+    /無對外開放/,            // 僅供外部參觀
+    /^未知$/,
+    /末班機/                 // 每日 7:00~末班機起飛（沒有固定時刻）
+  ];
+  const novel = [...unknownPatterns.keys()].filter((k) => !KNOWN_UNPARSEABLE.some((re) => re.test(k)));
+  check('unknown 的營業時間寫法都屬於已知無法解析的類型（' + unknown + '/' + total
+      + '，' + unknownPatterns.size + ' 種寫法）',
+    novel.length === 0,
+    novel.length ? ('出現沒見過的樣態，可能是解析器漏掉：' + novel.slice(0, 3).join(' ／ ')) : '');
 })();
 
 // 標籤必須錨定段首：說明文字不可被當成日別標籤（Codex 四輪：段首規則原為死碼）
