@@ -1,6 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+// 全站唯一的營業時間／入場條件解析（前端兩頁也載同一支）。
+// export:local 需要它判斷 exterior_only 來調整停留時長。
+const WAI_HOURS_MOD = (() => {
+  try { return require(path.join(__dirname, '..', 'app', 'business-hours.js')); }
+  catch (e) { console.warn('載入 business-hours.js 失敗：', e.message); return null; }
+})();
 const zlib = require('zlib');
 const axios = require('axios');
 const admin = require('firebase-admin');
@@ -1569,6 +1575,7 @@ async function exportLocal(db) {
   let droppedBareRegion = 0;
   const droppedOutOfBounds = [];
   let clampedDuration = 0;
+  let shortenedExterior = 0;
   for (const doc of snap.docs) {
     const data = doc.data();
     if (CRAWL_REGION && !docMatchesRegion(data, CRAWL_REGION)) continue;
@@ -1592,6 +1599,15 @@ async function exportLocal(db) {
     if (!(poi.duration > 0 && poi.duration <= 180)) {
       clampedDuration += 1;
       poi.duration = Math.max(20, Math.min(180, Number(poi.duration) || 45));
+    }
+    // 只能在外面看的景點（宜灣卡片教堂「僅供外部參觀，無對外開放」），
+    // estimateDuration 仍會照類別給 35–60 分。看外觀拍張照不需要那麼久，
+    // 排進行程會白白佔掉時間，壓縮到真正能進去的站。
+    if (WAI_HOURS_MOD && typeof WAI_HOURS_MOD.classifyAccess === 'function'
+        && WAI_HOURS_MOD.classifyAccess(poi).level === 'exterior_only'
+        && poi.duration > 20) {
+      shortenedExterior += 1;
+      poi.duration = 20;
     }
     const destKey = deriveDestKey(data);
     if (!destKey) continue;
@@ -1627,6 +1643,7 @@ async function exportLocal(db) {
   if (droppedOutOfBounds.length) console.log('排除座標超出台東縣 ' + droppedOutOfBounds.length
     + ' 筆：' + droppedOutOfBounds.slice(0, 5).join('、'));
   if (clampedDuration) console.log('修正離譜的停留時長 ' + clampedDuration + ' 筆');
+  if (shortenedExterior) console.log('僅可外部參觀 → 停留縮短為 20 分 ' + shortenedExterior + ' 筆');
 
   const summary = Object.keys(buckets).map((k) => `${k}:${buckets[k].length}`).join(', ');
   console.log(`Export-local prepared ${total} POIs across keys → ${summary || '(none)'}`);
@@ -1696,6 +1713,44 @@ const LODGING_NAME_RE = /飯店|酒店|旅店|旅館|民宿|行館|度假村|度
 
 // 對單一目的地（以形心 center 為中心）用 Places (New) searchNearby 抓餐廳候選。
 // 改用 searchNearby（此金鑰伺服器端 searchText 會回空、searchNearby 正常）並取回 priceLevel/priceRange 價格。
+// Places 結果 → restaurant-data.js 的餐廳物件。
+// 抽出來共用：searchNearby（自動抓）與 searchText（指名補充）必須產生完全一樣的
+// 欄位規格，否則補進來的店會缺 costPerPerson，預算估算就少算它們。
+function placeToRestaurant(p, nameOverride, hoursOverride) {
+  const name = nameOverride != null ? nameOverride : ((p.displayName && p.displayName.text) || '');
+  const hours = hoursOverride != null ? hoursOverride
+    : ((p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
+      ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '');
+  const poi = {
+    name,
+    lat: p.location.latitude,
+    lng: p.location.longitude,
+    businessHours: hours,
+    address: p.formattedAddress || ''
+  };
+  if (typeof p.rating === 'number') poi.rating = p.rating;
+  // 價格：priceLevel(0..4) + priceRange 的 NT$ 區間 → 人均估值 costPerPerson + 顯示用 costNote
+  const pl = PRICE_LEVEL_NUM[p.priceLevel];
+  if (pl !== undefined) poi.priceLevel = pl;
+  const pr = p.priceRange || null;
+  const lo = pr && pr.startPrice ? Number(pr.startPrice.units) : NaN;
+  const hi = pr && pr.endPrice ? Number(pr.endPrice.units) : NaN;
+  if (Number.isFinite(lo) || Number.isFinite(hi)) {
+    if (Number.isFinite(lo)) poi.costMin = lo;
+    if (Number.isFinite(hi)) poi.costMax = hi;
+    const mid = (Number.isFinite(lo) && Number.isFinite(hi)) ? Math.round((lo + hi) / 2) : (Number.isFinite(hi) ? hi : lo);
+    if (Number.isFinite(mid)) poi.costPerPerson = mid;
+    poi.costNote = (Number.isFinite(lo) && Number.isFinite(hi))
+      ? (lo <= 1 ? `$${hi} 內` : `$${lo}–${hi}`)
+      : (Number.isFinite(hi) ? `約 $${hi}` : `約 $${lo}`);
+  } else if (pl !== undefined) { // 無 priceRange → 用 priceLevel 估
+    const est = PRICE_LEVEL_ESTIMATE[pl];
+    poi.costPerPerson = est;
+    poi.costNote = pl === 0 ? '免費' : `約 $${est}（${PRICE_LEVEL_SYMBOL[pl]}）`;
+  }
+  return poi;
+}
+
 async function fetchRestaurantsNear(region, center) {
   if (!GOOGLE_KEY) return [];
   if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) return [];
@@ -1732,28 +1787,7 @@ async function fetchRestaurantsNear(region, center) {
       seen.add(dedupe);
       const hours = (p.regularOpeningHours && Array.isArray(p.regularOpeningHours.weekdayDescriptions))
         ? p.regularOpeningHours.weekdayDescriptions.join('\n') : '';
-      const poi = { name, lat: p.location.latitude, lng: p.location.longitude, businessHours: hours, address: p.formattedAddress || '' };
-      if (typeof p.rating === 'number') poi.rating = p.rating;
-      // 價格：priceLevel(0..4) + priceRange 的 NT$ 區間 → 人均估值 costPerPerson + 顯示用 costNote
-      const pl = PRICE_LEVEL_NUM[p.priceLevel];
-      if (pl !== undefined) poi.priceLevel = pl;
-      const pr = p.priceRange || null;
-      const lo = pr && pr.startPrice ? Number(pr.startPrice.units) : NaN;
-      const hi = pr && pr.endPrice ? Number(pr.endPrice.units) : NaN;
-      if (Number.isFinite(lo) || Number.isFinite(hi)) {
-        if (Number.isFinite(lo)) poi.costMin = lo;
-        if (Number.isFinite(hi)) poi.costMax = hi;
-        const mid = (Number.isFinite(lo) && Number.isFinite(hi)) ? Math.round((lo + hi) / 2) : (Number.isFinite(hi) ? hi : lo);
-        if (Number.isFinite(mid)) poi.costPerPerson = mid;
-        poi.costNote = (Number.isFinite(lo) && Number.isFinite(hi))
-          ? (lo <= 1 ? `$${hi} 內` : `$${lo}–${hi}`)
-          : (Number.isFinite(hi) ? `約 $${hi}` : `約 $${lo}`);
-      } else if (pl !== undefined) { // 無 priceRange → 用 priceLevel 估
-        const est = PRICE_LEVEL_ESTIMATE[pl];
-        poi.costPerPerson = est;
-        poi.costNote = pl === 0 ? '免費' : `約 $${est}（${PRICE_LEVEL_SYMBOL[pl]}）`;
-      }
-      out.push(poi);
+      out.push(placeToRestaurant(p, name, hours));
       if (out.length >= FOOD_PER_DEST) break;
     }
   } catch (e) {
@@ -1767,6 +1801,89 @@ async function fetchRestaurantsNear(region, center) {
 }
 
 // 產生獨立的餐廳快取 restaurant-data.js：依 scenic_points 分桶算形心，逐桶抓餐廳。
+// ── 指名補充的餐廳（crawler/food-include.json，手動維護）───────────────
+//
+// 為什麼需要：fetchRestaurantsNear 對每個目的地只打一次 searchNearby、只拿 20 筆
+// （這是 Places 單次請求的上限），由 Google 依知名度排序。台東市區有數百家餐廳，
+// 20 筆是很小的切片，很多在地名店排不進去（實測秘食-私廚 ★4.7、津芳冰城、
+// 墾墨咖啡都沒被選上）。這裡讓使用者指名補上，成本是每家 1 次 searchText。
+function loadFoodIncludeList() {
+  try {
+    const file = path.join(__dirname, 'food-include.json');
+    if (!fs.existsSync(file)) return {};
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const out = {};
+    Object.keys(raw).forEach((k) => {
+      if (k.startsWith('_') || !Array.isArray(raw[k])) return;   // _readme 之類的說明欄位
+      out[k] = raw[k].filter((x) => typeof x === 'string' && x.trim());
+    });
+    return out;
+  } catch (e) {
+    console.warn('讀取 food-include.json 失敗，指名補充略過：', e.message);
+    return {};
+  }
+}
+
+// 以名稱＋目的地座標找單一店家。
+// ★ locationBias 不可省略：實測沒加的話，「SP夏帕義大利麵 台東正氣店」會回
+//   「谷津音響」，「秘食 私廚」「津芳冰城」「墾墨咖啡」直接查無結果。
+async function fetchRestaurantByName(query, center) {
+  if (!GOOGLE_KEY || !query || !center) return null;
+  try {
+    noteApiCall();
+    const r = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      {
+        textQuery: query,
+        languageCode: 'zh-TW',
+        maxResultCount: 1,
+        locationBias: { circle: { center: { latitude: center.lat, longitude: center.lng }, radius: 20000 } }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': GOOGLE_KEY,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.regularOpeningHours,places.rating,places.formattedAddress,places.id,places.businessStatus,places.primaryType,places.priceLevel,places.priceRange'
+        },
+        timeout: 15000
+      }
+    );
+    const p2 = (r.data && Array.isArray(r.data.places)) ? r.data.places[0] : null;
+    if (!p2 || !p2.location) return null;
+    if (p2.businessStatus === 'CLOSED_PERMANENTLY') return null;
+    return placeToRestaurant(p2);
+  } catch (e) {
+    const code = e.response && e.response.status;
+    console.warn(`  指名補充「${query}」失敗${code ? '（HTTP ' + code + '）' : ''}：${e.message}`);
+    return null;
+  }
+}
+
+// 把已收錄的名單補齊，回傳新增的筆數
+async function applyFoodIncludes(destKey, center, restaurants, includeMap) {
+  const wanted = includeMap[destKey] || [];
+  if (!wanted.length) return 0;
+  const have = new Set(restaurants.map((r) => normalizeText(String(r.name).replace(/臺/g, '台'))));
+  let added = 0;
+  for (const q of wanted) {
+    if (callBudgetExhausted()) { console.log('  已達 API 預算，其餘指名補充略過。'); break; }
+    // 粗略比對：名單寫的是關鍵字，只要已有的店名包含其中任一段就當作已收錄
+    const qk = normalizeText(String(q).replace(/臺/g, '台'));
+    const already = [...have].some((h) => h.includes(qk.slice(0, 4)) || qk.includes(h.slice(0, 4)));
+    if (already) continue;
+    const hit = await fetchRestaurantByName(q, center);
+    if (!hit) { console.log(`  ✗ 指名補充查無：${q}`); continue; }
+    const hk = normalizeText(String(hit.name).replace(/臺/g, '台'));
+    if (have.has(hk)) continue;
+    have.add(hk);
+    restaurants.push(hit);
+    added += 1;
+    console.log(`  ＋ 指名補充：${q} → ${hit.name}${hit.costPerPerson ? '（約 $' + hit.costPerPerson + '）' : ''}`);
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return added;
+}
+
 async function crawlFood(db) {
   if (!GOOGLE_KEY) { console.error('需要 GOOGLE_MAPS_API_KEY 才能爬餐廳。'); return; }
   console.log('Crawl-food mode: reading collection', POI_COLLECTION);
@@ -1798,6 +1915,9 @@ async function crawlFood(db) {
     const existing = loadExistingGlobalFile(RESTAURANT_DATA_PATH, 'WAI_RESTAURANT_DATA');
     Object.keys(existing).forEach((k) => { if (k !== '__generatedAt') buckets[k] = existing[k]; });
   }
+  const foodIncludes = loadFoodIncludeList();
+  const includeTotal = Object.keys(foodIncludes).reduce((n, k) => n + foodIncludes[k].length, 0);
+  if (includeTotal) console.log(`指名補充名單：${includeTotal} 家（food-include.json）`);
   let processedTargets = 0, slicedTargets = 0;
   for (let i = 0; i < targets.length; i++) {
     const key = targets[i];
@@ -1805,9 +1925,10 @@ async function crawlFood(db) {
     if (callBudgetExhausted()) { console.log(`已達 API 預算（${MAX_CALLS} 次），提前停止 crawl-food（其餘目的地保留既有資料）。`); break; }
     const center = { lat: agg[key].sumLat / agg[key].count, lng: agg[key].sumLng / agg[key].count };
     const restaurants = await fetchRestaurantsNear(key, center);
+    const added = await applyFoodIncludes(key, center, restaurants, foodIncludes);
     buckets[key] = restaurants;
     processedTargets += 1;
-    console.log(`🍽 ${key}：${restaurants.length} 間餐廳`);
+    console.log(`🍽 ${key}：${restaurants.length} 間餐廳${added ? `（含指名補充 ${added} 間）` : ''}`);
   }
   if (partial) console.log(`Crawl-food 部分更新：本次更新 ${processedTargets} 個目的地，略過 ${slicedTargets} 個（切片），API 呼叫 ${apiCallsUsed} 次。`);
 

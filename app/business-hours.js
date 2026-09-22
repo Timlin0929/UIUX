@@ -166,5 +166,58 @@
     return { status: 'open', label: seg, open: win.open, close: win.close };
   }
 
-  return { parseDayStatus: parseDayStatus, splitSegments: splitSegments, daysInSegment: daysInSegment };
+  // ── 入場條件（暫停開放／僅外部參觀／需預約） ───────────────────────
+  //
+  // 放在這裡而不是各頁自己寫：getLocalPoiList 在 explore 與 planner 各有一份實作，
+  // 只改一邊就會不一致（business-hours.js 兩頁都已載入）。
+  //
+  // ★ 只讀 businessHours 與 feeNote，絕不讀 desc。
+  //   蘭嶼燈塔的 businessHours 是「24 小時營業」，是蘭嶼知名景點，但 desc 寫著
+  //   「燈塔園區不對外開放」——那講的是園區本體，同句還寫「沿途風景仍是一大看點」。
+  //   掃 desc 會把一個 24 小時開放的熱門景點誤判成禁止進入。
+  //   「新東糖廠文化園區」「關山米國學校」的 desc 也都含「預約」二字，同理。
+  //
+  // ★ feeNote 一定要讀：訊號有一半在那裡（台東糖廠、東河橋遊憩區、
+  //   鸞山森林文化博物館），而在此之前沒有任何程式碼在看這個欄位。
+
+  // 「暫不開放預約」講的是預約不開放，不是園區暫停營運——
+  // 台東糖廠的 feeNote 寫「國定假日暫不開放預約」，少了這個 lookahead
+  // 會把它整個排除在行程之外。
+  var SUSPENDED_RE = /(?:暫停|停止|暫不)開放(?!預約)|休園|閉園|整修中/;
+  var EXTERIOR_RE = /無對外開放|不對外開放|僅供外部參觀/;
+  var RESERVATION_RE = /預約/;
+
+  /**
+   * 判斷景點的入場條件。
+   * @param {object} poi 至少要有 businessHours／feeNote 其中之一
+   * @returns {{level:'open'|'suspended'|'exterior_only'|'reservation', label:string, avoid:boolean}}
+   *   avoid=true 代表不該排進行程；其餘只是提醒。
+   */
+  function classifyAccess(poi) {
+    var p = poi || {};
+    // 刻意只取這兩個欄位
+    var text = [p.businessHours, p.feeNote]
+      .map(function (v) { return String(v == null ? '' : v); })
+      .join(' \n ');
+    if (!text.trim()) return { level: 'open', label: '', avoid: false };
+
+    // 判定順序：suspended > exterior_only > reservation
+    if (SUSPENDED_RE.test(text)) {
+      return { level: 'suspended', label: '暫停開放', avoid: true };
+    }
+    if (EXTERIOR_RE.test(text)) {
+      return { level: 'exterior_only', label: '僅可外部參觀', avoid: false };
+    }
+    if (RESERVATION_RE.test(text)) {
+      return { level: 'reservation', label: '需事先預約', avoid: false };
+    }
+    return { level: 'open', label: '', avoid: false };
+  }
+
+  return {
+    parseDayStatus: parseDayStatus,
+    splitSegments: splitSegments,
+    daysInSegment: daysInSegment,
+    classifyAccess: classifyAccess
+  };
 }));

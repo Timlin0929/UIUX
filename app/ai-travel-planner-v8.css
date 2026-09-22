@@ -6861,3 +6861,11 @@ button.notif-item { cursor: pointer; }
 .recap-idea-tagtext { flex:1 1 160px; min-width:0; font-size:12.5px; color:var(--ink2); line-height:1.5; word-break:break-word; }
 .recap-idea-copy { flex:0 0 auto; padding:6px 12px; font-size:12.5px; }
 .recap-idea-hint { margin:0; font-size:12px; color:var(--ink3,var(--ink2)); }
+
+/* 入場條件提醒（需預約／僅可外部參觀／暫停開放）——與 .stop-hours-row 同一組視覺層級 */
+.stop-access-row {
+  font-size: 11px;
+  margin-top: 2px;
+  font-weight: 600;
+  white-space: nowrap;          /* 短標籤不拆行（見 .claude/skills/cjk-line-wrap） */
+}

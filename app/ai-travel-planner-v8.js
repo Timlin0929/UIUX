@@ -10302,6 +10302,7 @@
                 <div class="spot-tags">${endpointTagHtml}${actionButtonsHtml}${tag.text ? `<span class="tag" ${tagStyle}>${tag.text}</span>` : ''}</div>
                 ${parkingInlineHtml}
                 ${!isEndpointStop && stop.businessHours ? `<div class="stop-hours-row">${typeof formatDayBusinessHours === 'function' ? formatDayBusinessHours(stop.businessHours, getStopServiceDate(stop)) : ''}</div>` : ''}
+                ${!isEndpointStop ? formatAccessNote(stop) : ''}
                 ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
                   <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
@@ -13405,6 +13406,11 @@
         //   與 restaurant-data.js 已收錄的餐廳；不濾掉會被當成「景點候選」餵給 AI。
         //   舊資料沒有 kind 欄位時視為景點，維持相容。
         if (poi && poi.kind && poi.kind !== 'scenic') continue;
+      // 暫停開放的景點不進候選。prompt 寫明「只能從此清單挑選」，
+        // 濾掉之後 AI 就看不到，不會排進行程。
+        // classifyAccess 只讀 businessHours/feeNote——絕不能讀 desc（見 business-hours.js）。
+        if (typeof WAI_HOURS !== 'undefined' && WAI_HOURS && typeof WAI_HOURS.classifyAccess === 'function'
+            && WAI_HOURS.classifyAccess(poi).avoid) continue;
         const id = poi && poi.name ? String(poi.name).trim() : '';
         if (id && seen.has(id)) continue;
         if (id) seen.add(id);
@@ -16483,6 +16489,27 @@
   // 顯示「該日」的營業時間。解析委派給全站唯一來源 business-hours.js，與 explore 端同口徑。
   // 注意：unknown 時只顯示第一段當概覽，且**不可**用 🕐（會把寫著「休息」的行誤示為營業）——
   // 改用中性的 ℹ️，並保留原字讓使用者自己判讀。回傳值會進 innerHTML，故一律 escapeHtml。
+  // 入場條件提醒（需預約／僅可外部參觀）。與營業時間共用 business-hours.js，
+  // 那裡只讀 businessHours 與 feeNote——絕不讀 desc（蘭嶼燈塔的 desc 寫著
+  // 「燈塔園區不對外開放」，但它是 24 小時開放的熱門景點）。
+  //
+  // 暫停開放的站在生成階段就會被替換掉，正常不會走到這裡；萬一有（例如舊行程
+  // 重新載入、或資料後來才變成暫停），這裡也要標出來，不能讓使用者白跑一趟。
+  const ACCESS_NOTE_STYLE = {
+    suspended: { icon: '⛔', color: 'var(--red)' },
+    exterior_only: { icon: '\u{1F440}', color: 'var(--ink2)' },
+    reservation: { icon: '\u{1F4DE}', color: 'var(--accent2-dark)' }
+  };
+  function formatAccessNote(stop) {
+    const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+    if (!H || typeof H.classifyAccess !== 'function' || !stop) return '';
+    const a = H.classifyAccess(stop);
+    const st = ACCESS_NOTE_STYLE[a.level];
+    if (!st) return '';
+    return '<div class="stop-access-row" style="color:' + st.color + '">'
+      + st.icon + ' ' + escapeHtml(a.label) + '</div>';
+  }
+
   function formatDayBusinessHours(businessHoursStr, departureDate) {
     if (!businessHoursStr) return '';
     const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;

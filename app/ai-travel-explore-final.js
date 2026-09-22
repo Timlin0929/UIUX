@@ -304,6 +304,11 @@ function getLocalPoiList(destination, data = (typeof window !== 'undefined' && w
       //   與 restaurant-data.js 已收錄的餐廳；不濾掉會被當成「景點候選」餵給 AI。
       //   舊資料沒有 kind 欄位時視為景點，維持相容。
       if (poi && poi.kind && poi.kind !== 'scenic') continue;
+      // 暫停開放的景點不進候選。prompt 寫明「只能從此清單挑選」，
+      // 濾掉之後 AI 就看不到，不會排進行程。
+      // classifyAccess 只讀 businessHours/feeNote——絕不能讀 desc（見 business-hours.js）。
+      if (typeof WAI_HOURS !== 'undefined' && WAI_HOURS && typeof WAI_HOURS.classifyAccess === 'function'
+          && WAI_HOURS.classifyAccess(poi).avoid) continue;
       const id = poi && poi.name ? String(poi.name).trim() : '';
       if (id && seen.has(id)) continue;
       if (id) seen.add(id);
@@ -3514,6 +3519,57 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     if (win && win.closed) closedCount++;
   });
   if (closedCount) console.info('[公休檢查] 本趟有', closedCount, '站在所屬日公休（保留站點，由 planner 顯示提示）');
+
+  // ── 暫停開放的景點：末端再擋一次 ─────────────────────────────
+  // getLocalPoiList 已經把它們濾掉了，AI 照理看不到；但 AI 有可能自己掰出清單外的
+  // 名稱，或 Places 驗證階段補回來的站帶著「目前暫停開放」的營業時間。
+  //
+  // ★ 這裡「替換」而不是「刪除」。末端刪站會推翻前面的缺日防護與時間排程，
+  //   實測會造成「某一天變成空白」與「後續站點留下時間空檔」——那正是先前修掉的 bug。
+  //   找不到替代時就保留原站，由 planner 的行程卡顯示提示，讓使用者自己決定。
+  const H = (typeof WAI_HOURS !== 'undefined' && WAI_HOURS) ? WAI_HOURS : null;
+  if (H && typeof H.classifyAccess === 'function') {
+    const destKey = (wizardData && (wizardData.dest || wizardData.destination)) || '';
+    // 候選已排除 suspended 與非景點（getLocalPoiList 內建過濾）
+    const pool = destKey ? getLocalPoiList(destKey) : [];
+    const used = new Set(finalStops.map((s) => String((s && s.name) || '').trim()));
+    let swapped = 0, kept = 0;
+    finalStops.forEach((s, i) => {
+      if (!s || s.type === 'start' || s.type === 'end') return;
+      if (!H.classifyAccess(s).avoid) return;
+      // 找地理上最近、還沒用過的替代景點
+      let best = null, bestD = Infinity;
+      const sLat = Number(s.lat), sLng = Number(s.lng);
+      pool.forEach((c) => {
+        const nm = String(c.name || '').trim();
+        if (!nm || used.has(nm)) return;
+        if (!Number.isFinite(c.lat) || !Number.isFinite(c.lng)) return;
+        const d = (Number.isFinite(sLat) && Number.isFinite(sLng))
+          ? Math.hypot(c.lat - sLat, (c.lng - sLng) * Math.cos(c.lat * Math.PI / 180))
+          : 0;
+        if (d < bestD) { bestD = d; best = c; }
+      });
+      if (!best) { kept++; return; }
+      used.delete(String(s.name || '').trim());
+      used.add(String(best.name).trim());
+      // 只換「景點本身」的欄位，保留排程結果（time／order／dayIndex）
+      finalStops[i] = Object.assign({}, s, {
+        name: best.name,
+        desc: best.desc || s.desc || '',
+        lat: best.lat, lng: best.lng,
+        scenicCoordinates: { lat: best.lat, lng: best.lng },
+        businessHours: best.businessHours || '',
+        duration: best.duration || s.duration,
+        fee: best.fee, feeNote: best.feeNote,
+        placeVerified: best.placeVerified === true
+      });
+      swapped++;
+      console.info('[暫停開放] 以「' + best.name + '」替換「' + s.name + '」');
+    });
+    if (swapped || kept) {
+      console.info('[暫停開放] 替換', swapped, '站；找不到替代而保留', kept, '站（由 planner 顯示提示）');
+    }
+  }
   return finalStops;
 }
 

@@ -671,6 +671,85 @@ section('10. 前端依 kind 取用');
     (flat.find((x) => x.kind && x.kind !== 'scenic') || {}).name);
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('11. 入場條件 classifyAccess（暫停開放／僅外部參觀／需預約）');
+(() => {
+  const A = (o) => H.classifyAccess(o);
+
+  // 基本分類
+  check('暫停開放 → suspended 且 avoid',
+    A({ businessHours: '目前暫停開放。開放時間將另行公告' }).level === 'suspended'
+    && A({ businessHours: '目前暫停開放。' }).avoid === true);
+  check('僅供外部參觀 → exterior_only 但不 avoid',
+    A({ businessHours: '僅供外部參觀，無對外開放' }).level === 'exterior_only'
+    && A({ businessHours: '僅供外部參觀，無對外開放' }).avoid === false);
+  check('需預約 → reservation 但不 avoid',
+    A({ businessHours: '需線上預約並由環境解說員帶領進入' }).level === 'reservation'
+    && A({ businessHours: '需線上預約' }).avoid === false);
+  check('一般營業時間 → open',
+    A({ businessHours: '星期一: 09:00 – 17:00' }).level === 'open');
+  check('沒有任何資訊 → open', A({}).level === 'open');
+
+  // 判定順序：suspended > exterior_only > reservation
+  check('同時命中時以 suspended 優先',
+    A({ businessHours: '暫停開放', feeNote: '僅供外部參觀，需預約' }).level === 'suspended');
+  check('exterior_only 優先於 reservation',
+    A({ businessHours: '僅供外部參觀，無對外開放', feeNote: '請提前預約' }).level === 'exterior_only');
+
+  // ★ 陷阱一：絕對不能讀 desc
+  check('desc 裡的「不對外開放」不得影響判定',
+    A({ businessHours: '星期一: 24 小時營業', desc: '燈塔園區不對外開放，但沿途風景仍是一大看點' }).level === 'open',
+    '蘭嶼燈塔是 24 小時開放的熱門景點，掃 desc 會把它誤判成禁止進入');
+  check('desc 裡的「預約」不得影響判定',
+    A({ businessHours: '星期一: 09:00 – 17:00', desc: '可預約導覽' }).level === 'open');
+
+  // ★ 陷阱二：feeNote 一定要讀
+  check('feeNote 的「預約制」要被讀到',
+    A({ feeNote: '採完全預約制，請務必事先預約' }).level === 'reservation',
+    '訊號有一半在 feeNote，先前沒有任何程式碼在看這個欄位');
+
+  // ★ 陷阱三：「暫不開放預約」是預約不開放，不是園區暫停
+  check('「暫不開放預約」不得判成 suspended',
+    A({ feeNote: '導覽解說10人成團，且採預約制 週一~周五 08:30-16:00(國定假日暫不開放預約)' }).level === 'reservation',
+    '台東糖廠會被整個排除在行程之外');
+
+  // 真實資料
+  const c = { window: {} };
+  vm.createContext(c);
+  vm.runInContext(fs.readFileSync(path.join(APP, 'poi-data.js'), 'utf8'), c);
+  const all = Object.keys(c.window.WAI_POI_DATA || {}).filter((k) => Array.isArray(c.window.WAI_POI_DATA[k]))
+    .reduce((a, k) => a.concat(c.window.WAI_POI_DATA[k]), []);
+  const byLevel = {};
+  all.forEach((x) => { const l = A(x).level; byLevel[l] = (byLevel[l] || 0) + 1; });
+  check('真實資料：avoid 的比例極低（< 2%）', (byLevel.suspended || 0) / all.length < 0.02,
+    JSON.stringify(byLevel));
+
+  const named = (n) => all.find((x) => String(x.name).includes(n));
+  const lighthouse = named('蘭嶼燈塔');
+  check('真實資料：蘭嶼燈塔未被誤擋', !lighthouse || A(lighthouse).level === 'open',
+    lighthouse ? A(lighthouse).level : '(資料中沒有)');
+  const sugar = named('台東糖廠');
+  check('真實資料：台東糖廠判為 reservation 而非 suspended',
+    !sugar || A(sugar).level === 'reservation', sugar ? A(sugar).level : '(資料中沒有)');
+
+  // 僅可外部參觀 → 停留時間要短
+  const ext = all.filter((x) => A(x).level === 'exterior_only');
+  check('exterior_only 的停留時長 ≤ 20 分', ext.every((x) => x.duration <= 20),
+    ext.map((x) => x.name + ':' + x.duration).join('、'));
+
+  // 消費端接線
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const filterRe = /WAI_HOURS\.classifyAccess\(poi\)\.avoid\) continue/;
+  check('explore getLocalPoiList 濾掉 avoid', filterRe.test(ESRC));
+  check('planner getLocalPoiList 濾掉 avoid', filterRe.test(P));
+  check('explore 生成末端以「替換」處理暫停開放',
+    /\[暫停開放\][\s\S]{0,200}?替換/.test(ESRC) && /finalStops\[i\] = Object\.assign/.test(ESRC),
+    '末端刪站會造成空白天與時間空檔——必須是替換');
+  check('planner 行程卡顯示入場提醒', /formatAccessNote\(stop\)/.test(P));
+  check('入場提醒經 escapeHtml', /escapeHtml\(a\.label\)/.test(P));
+})();
+
+
 
 
 // ══════════════════════════════════════════════════════════════
