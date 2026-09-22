@@ -4837,6 +4837,12 @@ function renderGrid() {
       ? '<span class="tpl-fact">★ <b>' + t.rating.toFixed(1) + '</b>'
         + '<span class="tpl-rated-n">' + t.ratedCount + '/' + t.stops.length + '</span></span>'
       : '';
+    // 站點清單預設收合：一張卡列 5 站會把「停留時長／評分／預覽」推到很下面，
+    // 首頁一次放 6 張就變得很長。標題列右上角的箭頭負責展開。
+    const stopsId = 'tplstops-' + String(t.key).split('').map(function (ch) {
+      return ch.charCodeAt(0).toString(36);
+    }).join('');
+    const isOpen = expandedTplKeys.has(t.key);
     return '<article class="tpl-card">'
       + '<div class="tpl-cover">'
       + WAI_TEMPLATES.routeSvg(t, t.key)
@@ -4848,8 +4854,18 @@ function renderGrid() {
       + '<span class="tpl-region">' + escapeHtml(t.emoji + ' ' + t.key) + '</span>'
       + '<span class="tpl-route">' + routeText + '</span></div></div>'
       + '<div class="tpl-body">'
+      + '<div class="tpl-title-row">'
       + '<h3 class="tpl-title">' + escapeHtml(t.title) + '</h3>'
-      + '<div class="tpl-stops">' + stopsHtml + '</div>'
+      + '<button type="button" class="tpl-toggle" aria-expanded="' + (isOpen ? 'true' : 'false') + '"'
+      + ' aria-controls="' + stopsId + '"'
+      + ' data-tpl-key="' + escapeHtml(t.key) + '"'
+      + ' aria-label="' + (isOpen ? '收合' : '展開') + escapeHtml(t.key) + '的景點清單"'
+      + ' onclick="toggleTplStops(this)">'
+      + '<svg class="tpl-chev" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">'
+      + '<path d="M4 6.5L8 10.5L12 6.5" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round"/></svg></button>'
+      + '</div>'
+      + '<div class="tpl-stops" id="' + stopsId + '"' + (isOpen ? '' : ' hidden') + '>' + stopsHtml + '</div>'
       + '<p class="tpl-mix">' + mixHtml + farHtml + '</p>'
       + '<div class="tpl-facts">'
       + '<span class="tpl-fact">⏱ 停留 <b>' + WAI_TEMPLATES.fmtDuration(t.stayMin) + '</b></span>'
@@ -4859,19 +4875,47 @@ function renderGrid() {
   }).join('');
 }
 
+// 哪幾張卡是展開的。
+// 必須記在模組層級：renderGrid 會因為 auth 狀態變化、切換地區分頁等原因重跑，
+// 整個 innerHTML 重建。不記的話使用者展開後只要有任何重繪就被收回去——
+// 實測 Firebase onAuthStateChanged 在載入後幾百毫秒才回，剛好把剛展開的卡收掉。
+const expandedTplKeys = new Set();
+
+// 展開／收合單張卡的景點清單。
+// 箭頭用 CSS rotate：收合時轉 90° 指向左邊，展開時回正指向下方。
+window.toggleTplStops = function (btn) {
+  if (!btn) return;
+  const panel = document.getElementById(btn.getAttribute('aria-controls'));
+  if (!panel) return;
+  const willOpen = panel.hasAttribute('hidden');
+  if (willOpen) panel.removeAttribute('hidden');
+  else panel.setAttribute('hidden', '');
+  btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  const key = (btn.dataset && btn.dataset.tplKey) || '';
+  if (key) { if (willOpen) expandedTplKeys.add(key); else expandedTplKeys.delete(key); }
+  btn.setAttribute('aria-label', (willOpen ? '收合' : '展開') + key + '的景點清單');
+};
+
 // ── 行政區分頁（依地理分組） ──
+// 全部分頁排成「一橫排」，地理分組改用行內的組別標籤當分隔。
+// 原本一組一列（共 5 列）太佔版面，把行程卡整個推到摺線下面。
+// 橫排放不下時可左右捲動；分組資訊仍保留，只是從「列」變成「分隔標籤」。
 function renderDistrictTabs() {
   const host = document.getElementById('districtTabs');
   if (!host || typeof WAI_TEMPLATES === 'undefined') return;
   const count = (k) => (DISTRICT_BUCKETS[k] || []).length;
-  const rows = WAI_TEMPLATES.GROUPS.map((g) => {
-    const tabs = g.keys.filter(count).map((k) =>
-      '<button class="dtab' + (k === activeCat ? ' on' : '') + (count(k) < 10 ? ' thin' : '') + '"'
-      + ' data-k="' + escapeHtml(k) + '">' + escapeHtml(k) + '<b>' + count(k) + '</b></button>').join('');
-    return tabs ? '<div class="tabrow"><span class="grouplab">' + g.label + '</span>' + tabs + '</div>' : '';
-  }).join('');
-  host.innerHTML = '<div class="tabrow"><span class="grouplab">　</span>'
-    + '<button class="dtab' + (activeCat === 'all' ? ' on' : '') + '" data-k="all">全部</button></div>' + rows;
+  const parts = ['<button class="dtab' + (activeCat === 'all' ? ' on' : '') + '" data-k="all">全部</button>'];
+  WAI_TEMPLATES.GROUPS.forEach((g) => {
+    const keys = g.keys.filter(count);
+    if (!keys.length) return;
+    parts.push('<span class="grouplab">' + escapeHtml(g.label) + '</span>');
+    keys.forEach((k) => {
+      parts.push('<button class="dtab' + (k === activeCat ? ' on' : '')
+        + (count(k) < 10 ? ' thin' : '') + '" data-k="' + escapeHtml(k) + '">'
+        + escapeHtml(k) + '<b>' + count(k) + '</b></button>');
+    });
+  });
+  host.innerHTML = '<div class="tabrow">' + parts.join('') + '</div>';
 }
 
 function onDistrictTabClick(e) {

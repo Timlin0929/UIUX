@@ -749,6 +749,28 @@ section('11. 入場條件 classifyAccess（暫停開放／僅外部參觀／需�
   check('入場提醒經 escapeHtml', /escapeHtml\(a\.label\)/.test(P));
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('12. 範本卡：景點清單摺疊');
+(() => {
+  const C = fs.readFileSync(path.join(APP, 'ai-travel-explore-final.css'), 'utf8');
+  check('站點清單預設收合', /class="tpl-stops" id=[\s\S]{0,80}?isOpen \? '' : ' hidden'/.test(ESRC),
+    '預設應為收合，一張卡 5 站會把按鈕推到很下面');
+  check('摺疊鈕有 aria-expanded', /aria-expanded="' \+ \(isOpen \? 'true' : 'false'\)/.test(ESRC));
+  check('摺疊鈕有 aria-controls 指向清單', /aria-controls="' \+ stopsId/.test(ESRC));
+  check('箭頭用 inline SVG 而非字元', /<svg class="tpl-chev"/.test(ESRC),
+    '▾ 字元在 13px 下看不出方向，且各平台字型差異大');
+  check('收合時箭頭轉 90 度', /\.tpl-chev\{[^}]*rotate\(90deg\)/.test(C));
+  check('展開時箭頭回正', /\.tpl-toggle\[aria-expanded="true"\] \.tpl-chev\{[^}]*rotate\(0deg\)/.test(C));
+  // ★ 重繪會清掉展開狀態——renderGrid 因 auth 狀態變化重跑時整個 innerHTML 重建
+  check('展開狀態記在模組層級，重繪後保留',
+    /const expandedTplKeys = new Set\(\)/.test(ESRC)
+    && /const isOpen = expandedTplKeys\.has\(t\.key\)/.test(ESRC),
+    'renderGrid 重跑會把剛展開的卡收回去');
+  check('切換時同步更新狀態集合',
+    /expandedTplKeys\.add\(key\)[\s\S]{0,40}?expandedTplKeys\.delete\(key\)/.test(ESRC));
+})();
+
+
 
 
 
