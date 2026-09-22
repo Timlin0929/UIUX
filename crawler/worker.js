@@ -960,10 +960,37 @@ async function processImport(db) {
   }
   console.log('來源', sourceLabel, '→ 符合', CRAWL_REGION, '的景點', spots.length, '筆');
 
+  // ★ 沿用既有 docId，避免同一個景點被匯入兩次。
+  //   docId = normalizeDocKey(名稱 + region)，而 region = town || city || CRAWL_REGION。
+  //   舊的全國來源有些景點 PostalAddress.Town 是空的（於是退回「臺東縣」），
+  //   台東觀光網則 100% 有鄉鎮——同一個景點會算出兩個不同的 docId，變成重複文件
+  //   （實測 265 筆中有 168 筆名稱對得上現有資料）。先用正規化名稱建索引，命中就沿用舊 id。
+  const existingByName = new Map();
+  try {
+    const snap = await db.collection(POI_COLLECTION).get();
+    snap.docs.forEach((doc) => {
+      const n = normalizeDocKey(String((doc.data() || {}).name || '').replace(/臺/g, '台'));
+      if (n && !existingByName.has(n)) existingByName.set(n, doc.id);
+    });
+    console.log('既有景點索引', existingByName.size, '筆（用於沿用 docId、避免重複匯入）');
+  } catch (e) {
+    console.warn('讀取既有景點失敗，無法防重複：', e.message);
+  }
+
   let imported = 0;
   let skipped = 0;
+  let reused = 0;
   for (const spot of spots) {
     const result = await buildImportedScenicPoint(spot, sourceLabel);
+    if (result && result.docId) {
+      const nameKey = normalizeDocKey(String(spot.name || '').replace(/臺/g, '台'));
+      const existingId = nameKey ? existingByName.get(nameKey) : null;
+      if (existingId && existingId !== result.docId) {
+        result.data.id = existingId;
+        result.docId = existingId;
+        reused += 1;
+      }
+    }
     if (!result || !result.docId) {
       console.log('Skipping spot without valid document id', spot.name);
       skipped += 1;
@@ -980,7 +1007,7 @@ async function processImport(db) {
     imported += 1;
   }
 
-  console.log('Import summary', { region: CRAWL_REGION, source: sourceLabel, imported, skipped, dryRun: DRY });
+  console.log('Import summary', { region: CRAWL_REGION, source: sourceLabel, imported, skipped, reusedExistingId: reused, dryRun: DRY });
 }
 
 // 由景點的行政區資訊推導前端 explore wizard 使用的「目的地鍵」（dest token）
@@ -1070,6 +1097,12 @@ function toLocalPoi(data) {
     address: data.formatted_address || data.address || '',
     businessHours: data.placeOpeningHours || data.openTime || data.businessHours || ''
   };
+  // 行政區（去掉鄉/鎮/市，如「長濱」「太麻里」）。前端探索頁用它做鄉鎮分頁——
+  // poi-data.js 本身是照目的地鍵（台東/綠島/蘭嶼）分桶的，桶內看不出鄉鎮。
+  // 先取 region（import 時就是 town），再退回從地址解析；都沒有就不寫這個欄位，
+  // 前端據此把該景點歸到「其他」，不臆測。
+  const district = taitungTownOf(data.region) || taitungTownOf(data.formatted_address || data.address);
+  if (district) poi.district = district.replace(/[鄉鎮市]$/, '');
   if (Number.isFinite(Number(data.placesRating)) && Number(data.placesRating) > 0) poi.rating = Number(data.placesRating);
   if (data.placeVerified === true) poi.placeVerified = true; // 供前端 verify 短路：命中即可跳過 Places 呼叫
   // 門票費用（enrich-fees 寫入的真實票價；含 0=免費）。對不到的景點無此欄位＝未知。
