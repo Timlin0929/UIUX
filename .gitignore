@@ -29,7 +29,7 @@ node_modules/
 Thumbs.db
 
 # 開發計畫文件（個人排程，不進版控）
-/TravelLink_AI_*.md
+/docs/planning/TravelLink_AI_*.md
 
 # /codex-verify 產出的審查報告（本機參考用）
 /codex-review.md
@@ -38,7 +38,7 @@ Thumbs.db
 /.agents/
 /.codex/
 # UI/UX 修改建議（個人清單，本機參考用）
-/uiux-recommendations.md
+/docs/design/uiux-recommendations.md
 /docs/UIUX修改建議.md
 
 # 測試截圖（大、會一直長，不進版控）；但文字驗證報告要留下來——
@@ -58,9 +58,8 @@ __pycache__/
 /app/security-audit.html
 
 # 回顧短片 App 交接文件（僅內部傳閱，不進版控）
-TRAVEL_STORY_RECAP_APP_HANDOFF.md
-RECAP_VIDEO_TEMPLATE_HANDOFF.md
-457aebc3781c4d5d96a2544eada951e7.mov
+/docs/travel-story/TRAVEL_STORY_RECAP_APP_HANDOFF.md
+/docs/travel-story/RECAP_VIDEO_TEMPLATE_HANDOFF.md
 
 # 探索首頁改版 DEMO（設計對照用，不進版控）
 prototypes/explore-home-redesign.html
