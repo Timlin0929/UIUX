@@ -10,13 +10,13 @@
 
 ## 設計與 UI/UX
 
-- [UI/UX 修改建議](UIUX修改建議.md)：目前介面問題與改善方向（本機文件，不進版控）。
-- [早期 UI/UX 建議](design/uiux-recommendations.md)：初期檢視與設計備忘（本機文件，不進版控）。
+- UI/UX 修改建議 `docs/UIUX修改建議.md`：目前介面問題與改善方向。**本機文件，未進版控**（clone 不會有這個檔案）。
+- 早期 UI/UX 建議 `docs/design/uiux-recommendations.md`：初期檢視與設計備忘。**本機文件，未進版控**。
 
 ## 實作計畫
 
-- [網頁端 Week 2 起詳細排程](planning/TravelLink_AI_網頁端排程_Week2起詳細展開.md)（本機文件，不進版控）
-- [雙端同步開發排程](planning/TravelLink_AI_雙端同步開發排程.md)（本機文件，不進版控）
+- 網頁端 Week 2 起詳細排程 `docs/planning/TravelLink_AI_網頁端排程_Week2起詳細展開.md`——**本機文件，未進版控**
+- 雙端同步開發排程 `docs/planning/TravelLink_AI_雙端同步開發排程.md`——**本機文件，未進版控**
 - [停車回報群眾外包實作計畫](停車回報群眾外包-實作計畫.md)
 - [API 成本統計實作計畫](API成本統計-實作計畫.md)
 
@@ -27,9 +27,9 @@
 - [AI 短劇歷史附錄](travel-story/TRAVEL_STORY_AI_DRAMA_APPENDIX.md)
 - [回顧短片跨端契約](travel-story/TRAVEL_STORY_RECAP_CROSSEND_CONTRACT.md)
 - [回顧媒體 Schema](travel-story/TRAVEL_STORY_RECAP_MEDIA_SCHEMA.md)
-- [App 端交接](travel-story/TRAVEL_STORY_RECAP_APP_HANDOFF.md)（本機文件，不進版控）
+- App 端交接 `docs/travel-story/TRAVEL_STORY_RECAP_APP_HANDOFF.md`——**本機文件，未進版控**（僅內部傳閱）
 - [Path B 任務拆解](travel-story/TRAVEL_STORY_RECAP_TASKS_PATH_B.md)
-- [回顧短片樣板交接](travel-story/RECAP_VIDEO_TEMPLATE_HANDOFF.md)（本機文件，不進版控）
+- 回顧短片樣板交接 `docs/travel-story/RECAP_VIDEO_TEMPLATE_HANDOFF.md`——**本機文件，未進版控**（僅內部傳閱）
 
 ## 稽核與問題追蹤
 
