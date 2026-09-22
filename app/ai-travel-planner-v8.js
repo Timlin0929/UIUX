@@ -7746,7 +7746,9 @@
 
   function reorderReplanStops(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) return;
-    if (collabReadOnly) return; // 唯讀成員／訪客不可調整順序
+    // 以下幾個 return 原本都是「靜默失敗」：使用者拖了、卡片彈回原位、畫面沒有任何說明，
+    // 分不出是自己拖錯還是程式壞掉。每個擋下來的原因都要講出來。
+    if (collabReadOnly) { feedbackToast('訪客或唯讀成員無法調整順序', 'orange'); return; }
     const sourceIndex = replanStops.findIndex((item) => item.id === sourceId);
     const targetIndex = replanStops.findIndex((item) => item.id === targetId);
     if (sourceIndex < 0 || targetIndex < 0) return;
@@ -7760,11 +7762,15 @@
     replanStops.splice(targetIndex, 0, moved);
     refreshRouteDirections();
     schedulePersistTrip();
+    // 順序一變，後續各站的時間會整串重算——這不只是「卡片換位置」而已，
+    // 必須講出來，否則使用者不會發現時間已經不同了。
+    feedbackToast('已調整順序，後續時間已重算', 'blue');
   }
 
   // 原生拖曳在部分觸控／輔助操作環境不會產生 drop；提供相同資料路徑的明確移動按鈕。
   window.moveReplanStop = function(stopId, direction) {
-    if (collabReadOnly) return;
+    // 這裡不再自己擋 collabReadOnly：擋掉就跳過 reorderReplanStops 的說明 toast，
+    // 唯讀成員按了按鈕一樣得不到任何解釋。交給下游統一處理。
     const sourceIndex = replanStops.findIndex((item) => item.id === stopId);
     const targetIndex = sourceIndex + Number(direction);
     if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= replanStops.length) return;
@@ -10433,6 +10439,9 @@
     updateItineraryStageUI();
     // 套用新規劃後補各站「附近廁所」文字
     prefetchAllStopToiletData();
+    // 套用後畫面會切回行程頁，使用者看不到「剛才那一步成功了」；沒有回饋時
+    // 實測會反覆再按一次。這裡給一次性的明確結果。
+    feedbackToast('✅ 已套用新規劃，行程時間已重算', 'green');
   }
 
   function cancelReplan() {

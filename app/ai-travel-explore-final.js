@@ -2388,24 +2388,16 @@ function applyTripPlanningRules(stops, wizardData = {}) {
     const normalized = normalizeGeneratedStop(stop, index, minutesToTimeString(defaultStart));
     let currentMinutes = defaultStart;
 
-    // 營業時間調整：若需等候且等候時長在上限內，推遲開始
+    // 營業時間調整：若需等候且等候時長在上限內，推遲開始。
+    // 其餘情況（當天公休、等太久、已過打烊）只是「不調整時間」，不再寫 scheduleWarning ——
+    // 那個旗標沒有任何消費端（不在 serializeStopForPersistence 白名單裡，到不了 planner），
+    // 而 planner 的行程卡與重排畫面本來就用同一份 business-hours.js 即時重算並顯示
+    // （formatDayBusinessHours 的 🔴、getBusinessHoursWarning 的 ⚠️）。
+    // 留著等於又養出第二份營業時間狀態，正是這條修復線要消滅的東西。
     const businessWindow = extractDayHoursWindow(normalized.businessHours, stopServiceDate(normalized, wizardData));
-    if (businessWindow) {
-      if (businessWindow.closed) {
-        normalized.scheduleWarning = 'outside_business_hours';
-      } else {
-        if (currentMinutes < businessWindow.open) {
-          const waitTime = businessWindow.open - currentMinutes;
-          if (waitTime <= maxGapMinutes) {
-            currentMinutes = businessWindow.open;
-          } else {
-            normalized.scheduleWarning = 'outside_business_hours';
-          }
-        }
-        if (currentMinutes > businessWindow.close) {
-          normalized.scheduleWarning = 'outside_business_hours';
-        }
-      }
+    if (businessWindow && !businessWindow.closed && currentMinutes < businessWindow.open) {
+      const waitTime = businessWindow.open - currentMinutes;
+      if (waitTime <= maxGapMinutes) currentMinutes = businessWindow.open;
     }
 
     normalized.time = minutesToTimeString(currentMinutes);
@@ -3499,7 +3491,11 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   // ★ 這裡刻意「只標記、不刪站」：本函式已跑完缺日防護、applyTripPlanningRules（時間已寫進
   //   stop.time）與 fitGeneratedStopsToTimeLimit。在最末端刪站會推翻這三道保證——實測會造成
   //   「某一天變成空白」與「後續站點時間留下空檔」。標記讓使用者自己決定要不要換，風險最低。
-  let closedMarked = 0;
+  //
+  // 這裡不寫任何旗標，只統計後記一筆 log：stop.businessHours 本身會被存進 Firestore，
+  // planner 載入後用同一份 business-hours.js 即時判斷並在行程卡標 🔴、在重排畫面標 ⚠️。
+  // 再存一份 scheduleWarning 只會變成對不上的第二份真相（且它根本沒進序列化白名單）。
+  let closedCount = 0;
   finalStops.forEach((s) => {
     if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return;
     if (typeof isLodgingStop === 'function' && isLodgingStop(s)) return;
@@ -5908,7 +5904,13 @@ function updatePreviewNodeTime(index, value) {
   if (!wizData.customNodeTimes || typeof wizData.customNodeTimes !== 'object') {
     wizData.customNodeTimes = {};
   }
-  wizData.customNodeTimes[key] = normalizeClockInput(value, '09:00');
+  const normalized = normalizeClockInput(value, '09:00');
+  wizData.customNodeTimes[key] = normalized;
+  // ★ 第一個節點的時間「就是」出發時間。customNodeTimes 只活在精靈的暫存狀態裡，
+  //   存檔時（newTrip.wizardData）沒有帶走，於是使用者在預覽改成 14:00、生成出來
+  //   仍從 startTime 的 09:00 開始——這是實測回報的「預覽與保存後時間不同」。
+  //   同步寫回 startTime 後，摘要列、結束時間、送去生成的 prompt 與存檔會一起跟上。
+  if (index === 0) wizData.startTime = normalized;
   renderFlowPreview();
 }
 
@@ -6008,7 +6010,11 @@ function renderFlowPreview() {
       </div>
       <p class="wizard-node-desc">${spot.desc}</p>
     </div>
-  `).join('');
+  `).join('') + `
+    <p class="wizard-node-desc" style="margin-top:10px;opacity:.75;">
+      ⓘ 第一格＝出發時間，會照著走；下面幾格是節奏示意，實際站點與時間由 AI 依營業時間與車程重新安排。
+    </p>
+  `;
 
   const endTime = calcTripEndTime(startTime, days);
   const interestSummary = interests.length ? interests.join('、') : '多元探索';

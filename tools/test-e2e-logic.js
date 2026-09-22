@@ -159,15 +159,15 @@ check('缺 departureDate → 空字串', ctx.stopServiceDate({ dayIndex: 2 }, {}
 section('3. 生成末端公休過濾：空白天 / 時間空檔 / 刪過頭');
 
 // 注意：這是 app 末端公休處理的鏡像。它與 app 本尊分歧時測試會失去意義，
-// 因此下方 section 6 有一致性守門（比對 app 原始碼仍是「標記」而非「刪站」）。
-function markClosed(finalStops, wizardData) {
-  finalStops.forEach((s) => {
-    if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return;
-    if (ctx.isLodgingStop(s)) return;
+// 因此下方 section 6 有一致性守門（比對 app 原始碼仍不刪站、也不另存旗標）。
+// app 末端只「辨識並記 log」，公休狀態不落地成欄位——planner 用 businessHours 即時重算。
+function closedStopNames(finalStops, wizardData) {
+  return finalStops.filter((s) => {
+    if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return false;
+    if (ctx.isLodgingStop(s)) return false;
     const win = ctx.extractDayHoursWindow(s.businessHours, ctx.stopServiceDate(s, wizardData));
-    if (win && win.closed) { s.scheduleWarning = 'closed_today'; s.closedOnDate = ctx.stopServiceDate(s, wizardData); }
-  });
-  return finalStops;
+    return !!(win && win.closed);
+  }).map((s) => s.name);
 }
 const CLOSED_WED = '星期一: 09:00 – 17:00\n星期二: 09:00 – 17:00\n星期三: 休息\n星期四: 09:00 – 17:00\n星期五: 09:00 – 17:00\n星期六: 09:00 – 17:00\n星期日: 09:00 – 17:00';
 
@@ -179,13 +179,15 @@ const twoDay = [
   { type: 'end', name: '返回', dayIndex: 2, time: '17:00' }
 ];
 const wd = { departureDate: '2026-09-01' };
-const after = markClosed(twoDay, wd);
-const midAfter = after.filter((s) => s.type !== 'start' && s.type !== 'end');
+const twoDayClosed = closedStopNames(twoDay, wd);
+const midAfter = twoDay.filter((s) => s.type !== 'start' && s.type !== 'end');
 const day2After = midAfter.filter((s) => s.dayIndex === 2);
-check('第 2 天不會變成空白天（改標記後站數不變）', day2After.length > 0,
+check('第 2 天不會變成空白天（不刪站，站數不變）', day2After.length > 0,
   '第 2 天剩 ' + day2After.length + ' 站');
-check('當天公休的站有被標記', after.find((s) => s.name === 'B景點').scheduleWarning === 'closed_today');
-check('非公休日的站不標記', !after.find((s) => s.name === 'A景點').scheduleWarning);
+check('當天公休的站有被辨識出來', twoDayClosed.includes('B景點'));
+check('非公休日的站不列入', !twoDayClosed.includes('A景點'));
+check('公休檢查不會在站點上留下欄位', twoDay.every((s) => !('scheduleWarning' in s) && !('closedOnDate' in s)),
+  '公休狀態不應落地成欄位；planner 以 businessHours 即時重算');
 
 // 時間軸不被破壞（不刪站就不會有空檔）
 const gapCase = [
@@ -194,13 +196,13 @@ const gapCase = [
   { name: '後面站', dayIndex: 1, time: '13:00' },
   { type: 'end', name: '返回', dayIndex: 1, time: '17:00' }
 ];
-const gapAfter = markClosed(gapCase, { departureDate: '2026-09-02' }); // 星期三
-check('站數不變、時間軸完整', gapAfter.length === 4 && gapAfter.find((s) => s.name === '後面站').time === '13:00');
-check('公休站被標記而非移除', !!gapAfter.find((s) => s.name === '公休站' && s.scheduleWarning === 'closed_today'));
+const gapClosed = closedStopNames(gapCase, { departureDate: '2026-09-02' }); // 星期三
+check('站數不變、時間軸完整', gapCase.length === 4 && gapCase.find((s) => s.name === '後面站').time === '13:00');
+check('公休站仍留在行程裡（不刪站）', !!gapCase.find((s) => s.name === '公休站') && gapClosed.includes('公休站'));
 
-// 保護條件（不標記）
-check('start/end 不標記', !markClosed([{ type: 'start', businessHours: CLOSED_WED }], { departureDate: '2026-09-02' })[0].scheduleWarning);
-check('住宿站不標記', !markClosed([{ name: '綠島海景民宿', businessHours: CLOSED_WED }], { departureDate: '2026-09-02' })[0].scheduleWarning);
+// 保護條件（不列入公休檢查）
+check('start/end 不列入', closedStopNames([{ type: 'start', businessHours: CLOSED_WED }], { departureDate: '2026-09-02' }).length === 0);
+check('住宿站不列入', closedStopNames([{ name: '綠島海景民宿', businessHours: CLOSED_WED }], { departureDate: '2026-09-02' }).length === 0);
 // 非「週一起 7 行」但 ≥5 段 → 以固定索引取行會對錯日子（雙向皆錯）
 // 這筆只有「星期日」公休；2026-08-31 是星期一（應營業）、2026-09-06 是星期日（應公休）
 const SUNDAY_FIRST = '星期日: 休息\n星期一: 09:00 – 17:00\n星期二: 09:00 – 17:00\n星期三: 09:00 – 17:00\n星期四: 09:00 – 17:00\n星期五: 09:00 – 17:00\n星期六: 09:00 – 17:00';
@@ -426,8 +428,28 @@ check('planner formatDayBusinessHours 委派共用解析器', /formatDayBusiness
 check('planner getBusinessHoursWarning 委派共用解析器', /getBusinessHoursWarning[\s\S]{0,600}?WAI_HOURS/.test(PSRC2));
 check('已無殘留的 lines[apiIndex] 固定索引解析', !/const apiIndex[\s\S]{0,200}?lines\[apiIndex\]/.test(PSRC2));
 
-// 末端處理必須是「標記」不是「刪站」（避免 app 改回刪站而測試仍綠）
-check('app 末端仍為標記而非刪站', /scheduleWarning = 'closed_today'/.test(ESRC) && !/dropClosed/.test(ESRC));
+// 末端處理必須「不刪站」，且公休狀態不得再落地成第二份欄位
+check('app 末端不刪站', !/dropClosed/.test(ESRC));
+// 只擋「賦值」不擋整個字：解釋它為何被移除的註解要留著，否則下一個人會再加回來。
+check('scheduleWarning／closedOnDate 不再被寫入', !/(scheduleWarning|closedOnDate)\s*[:=]/.test(ESRC),
+  '公休狀態只能有一份真相：stop.businessHours + business-hours.js 即時重算');
+check('planner 也沒有消費這兩個欄位', !/scheduleWarning|closedOnDate/.test(PSRC2));
+
+// 移除旗標的前提是「顯示端本來就即時重算」。這兩處若消失，使用者就再也看不到公休提示。
+check('planner 行程卡顯示當日營業狀態', /formatDayBusinessHours\(stop\.businessHours/.test(PSRC2),
+  '行程卡的 🔴 當天公休來自這裡');
+// 要抓「呼叫點」不是函式定義——`function getBusinessHoursWarning(stop)` 也長這樣，
+// 用寬鬆寫法會在呼叫點被刪掉後仍然綠燈（突變測試實測到的假綠）。
+check('planner 重排畫面顯示公休警告', /const w = getBusinessHoursWarning\(stop\);/.test(PSRC2),
+  '重排畫面的 ⚠️ 當天公休來自這裡');
+
+// ── P1 回饋修補（原始碼守門；UI 行為無法在 Node 沙箱執行）──
+check('預覽第一格時間同步回 startTime', /index === 0\) wizData\.startTime = normalized/.test(ESRC),
+  '否則預覽改 14:00、存檔仍是 09:00');
+check('applyReplan 有成功回饋', /function applyReplan\(\)[\s\S]{0,1200}?feedbackToast\(/.test(PSRC2));
+check('reorderReplanStops 對唯讀成員有說明', /collabReadOnly\) \{ feedbackToast\('訪客或唯讀成員無法調整順序'/.test(PSRC2));
+check('reorderReplanStops 對錨點站有說明', /isAnchor\(replanStops\[targetIndex\]\)\) \{[\s\S]{0,200}?feedbackToast\(/.test(PSRC2));
+check('moveReplanStop 不再自行靜默擋掉唯讀', !/moveReplanStop = function\(stopId, direction\) \{\s*\n\s*if \(collabReadOnly\) return;/.test(PSRC2));
 
 // 無 Firebase 時不得清空訪客鍵（改為合併顯示）
 check('無 Firebase 分支不呼叫不可逆搬移',
