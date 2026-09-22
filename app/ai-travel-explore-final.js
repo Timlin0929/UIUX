@@ -3500,14 +3500,20 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
     if (!s || s.type === 'start' || s.type === 'end' || !s.businessHours) return;
     if (typeof isLodgingStop === 'function' && isLodgingStop(s)) return;
     const win = extractDayHoursWindow(s.businessHours, stopServiceDate(s, wizardData));
-    if (win && win.closed) {
-      s.scheduleWarning = 'closed_today';
-      s.closedOnDate = stopServiceDate(s, wizardData);
-      closedMarked++;
-    }
+    if (win && win.closed) closedCount++;
   });
-  if (closedMarked) console.info('[公休標記] 依所屬日標記', closedMarked, '站當天公休');
+  if (closedCount) console.info('[公休檢查] 本趟有', closedCount, '站在所屬日公休（保留站點，由 planner 顯示提示）');
   return finalStops;
+}
+
+function sanitizeTripForFirestore(value) {
+  if (Array.isArray(value)) return Array.from(value, item => item === undefined ? null : sanitizeTripForFirestore(item));
+  if (value && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, sanitizeTripForFirestore(item)]));
+  }
+  return value; // 保留 Timestamp、GeoPoint、Date 與 FieldValue 等 SDK 型別。
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -3516,12 +3522,12 @@ async function saveMicroTripToFirebase(trip) {
     const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
     // 剝除暫存旗標 __saving，避免把 UI 狀態寫進 Firestore
     // 並拿掉 role：那是「本機這個人」的角色，owner 存檔會把 role:'owner' 漏進共用文件，害加入者讀到後誤判成可編輯。
-    const { role, ...cleanTrip } = serializeTripForStorage(trip);
+    const { role, ...cleanTrip } = sanitizeTripForFirestore(serializeTripForStorage(trip));
     // merge:true：共編行程的協作欄位（members / inviteCode / memberEmails…）由 collab.js 另外維護，
     // 這裡只更新行程內容，不可整份覆寫把它們清掉。
     await tripRef.set({
       ...cleanTrip,
-      stops: trip.stops || [],
+      stops: cleanTrip.stops || [],
       userEmail: currentUser && currentUser.email ? currentUser.email : 'unknown',
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -4944,6 +4950,28 @@ function mtOnSort(v) {
   renderMyTrips();
 }
 
+function isUnfinishedPersonalTrip(trip) {
+  return !!(trip && !trip.collab && trip.wizardData
+    && (!Array.isArray(trip.stops) || trip.stops.length === 0));
+}
+
+function resumePersonalTripGeneration(tripId) {
+  const trip = myTrips.find(t => t.id === tripId);
+  if (!isUnfinishedPersonalTrip(trip)) return;
+  if (isGeneratingTrip) {
+    reopenWizGen();
+    showToast('目前有行程正在生成，請等待完成後再試。', 'orange');
+    return;
+  }
+  // 使用原草稿與原始偏好，避免重試時另建一筆行程或套用其他行程的精靈設定。
+  wizData = { ...trip.wizardData, tripMode: trip.tripMode || 'solo' };
+  localStorage.setItem('wai_pending_gen', JSON.stringify({ tripId, wData: wizData }));
+  renderWizard();
+  reopenWizGen();
+  showWizGenProgress();
+  return _doGeneration(trip, { ...wizData });
+}
+
 function renderMyTrips() {
   const grid = document.getElementById('myTripsGrid');
   if (!grid) return;
@@ -4986,7 +5014,7 @@ function renderMyTrips() {
           <div class="mt-emoji">${t.emoji || '📍'}</div>
           <div class="mt-title">${t.title || '未命名行程'}</div>
         </div>
-        <div class="mt-status ${t.status}">${statusHtml(t.status)}</div>
+        <div class="mt-status ${t.status}">${isUnfinishedPersonalTrip(t) ? '⏳ 尚未產生景點' : statusHtml(t.status)}</div>
         <div class="mt-meta">
           <span class="mt-chip">🗓 ${mtDurationLabel(t.days)}</span>
           <span class="mt-chip">📍 ${t.region}</span>
@@ -4994,7 +5022,7 @@ function renderMyTrips() {
           <span class="mt-chip">🕑 ${t.createdAt}</span>
         </div>
         <div class="mt-actions">
-          ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
+          ${t.__saving ? `<button class="mt-action-btn primary" disabled onclick="showToast('行程儲存中，請稍候...', 'orange')">⏳ 儲存中...</button>` : isUnfinishedPersonalTrip(t) ? `<button class="mt-action-btn primary" style="white-space:nowrap;flex-shrink:0" onclick="resumePersonalTripGeneration('${t.id}')">繼續生成</button>` : (t.collab && !canRenameCollabTrip(t) ? `<button class="mt-action-btn replan" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">👁 檢視</button>` : `<button class="mt-action-btn ${t.collab ? 'replan' : 'primary'}" onclick="window.location='ai-travel-planner-v8.html?id=${t.id}'">✏️ 編輯</button>`) }
           ${t.collab ? `<button class="mt-action-btn primary" onclick="openCollabPanel('${t.id}')">👥 成員</button>` : ''}
           ${(!t.collab || ['owner', 'editor'].includes(t.role) || (t.ownerEmail && currentUser && currentUser.email && t.ownerEmail.toLowerCase() === currentUser.email.toLowerCase())) ? `<button class="mt-action-btn share" onclick="renameMyTrip('${t.id}')">📝 改名</button>` : ''}
           <button class="mt-action-btn share" onclick="shareTrip('${t.id}')">📤 分享</button>
@@ -6095,8 +6123,8 @@ function wizNext() {
 function wizPrev() { if(wizStep>0){wizStep--;renderWizard();} }
 
 function persistMicroTripInBackground(trip) {
-  if (!firebaseEnabled) return;
-  (async () => {
+  if (!firebaseEnabled) return Promise.resolve(false);
+  return (async () => {
     try {
       // 標記為正在保存，UI 上會禁用編輯鈕
       trip.__saving = true;
@@ -6126,12 +6154,14 @@ function persistMicroTripInBackground(trip) {
 
       // POI／營業時間是全站共用資料，只能由受控後端或 crawler 維護。
       // 行程內的 businessHours 已包含在 trip.stops，不再由瀏覽器寫入 poi_cache。
+      return firebaseSaved;
     } catch (error) {
       console.warn('Firebase background save failed:', error);
       showToast('Firebase 背景同步失敗，已存到本地', 'orange');
       // 錯誤時也立即啟用編輯按鍵
       trip.__saving = false;
       saveState(); renderSideMyTrips(); renderMyTrips();
+      return false;
     }
   })();
 }
@@ -6484,6 +6514,9 @@ async function _doGeneration(trip, wData) {
         }
       } catch (e) { console.warn('enforceBudgetCap failed:', e); }
     }
+    if (!Array.isArray(trip.stops) || trip.stops.length === 0) {
+      throw new Error('這次沒有產生景點，原本的規劃偏好已保留，請重試生成。');
+    }
     _genPerf.mark('step2 後處理');
     _genPerf.table('行程生成');
 
@@ -6495,7 +6528,7 @@ async function _doGeneration(trip, wData) {
     setWizGenStep(3);
     wizGenDone(trip.id);
 
-    if (firebaseEnabled) persistMicroTripInBackground(trip);
+    const cloudSaved = firebaseEnabled ? await persistMicroTripInBackground(trip) : false;
 
     // 成本統計收尾：綁定行程後標記完成。失敗不影響行程本身，
     // 頂多是這筆 run 停在 incomplete（顯示「統計未完成」而不是 0 元）。
@@ -6503,7 +6536,8 @@ async function _doGeneration(trip, wData) {
     // 後者的 .then() 回呼會回頭讀全域 activeRun，若使用者在 bind 重試期間
     // 已開始下一趟生成，收尾到的會是新的那個 run。
     if (window.WAI_COST && WAI_COST.currentRunId()) {
-      WAI_COST.completeRun(trip.id, true).catch(function () {});
+      if (cloudSaved) WAI_COST.completeRun(trip.id, true).catch(function () {});
+      else WAI_COST.finishRun(false).catch(function () {});
     }
 
   } catch (error) {
@@ -6595,9 +6629,7 @@ async function joinSharedTripByCode(rawCode, closeFn, confirmed = false) {
 // 把共用行程 doc 併入本機 myTrips（成員端只存精簡指標 + 內容快取）
 function upsertCollabTripLocal(trip, fallbackRole) {
   const myEmail = (currentUser && currentUser.email) || '';
-  const myKey = WAI_COLLAB.emailKey(myEmail);
-  const myMember = trip.members && trip.members[myKey];
-  const role = (myMember && myMember.role) || fallbackRole || 'viewer';
+  const role = WAI_COLLAB.resolveRole(trip, myEmail, firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.uid);
   const entry = {
     id: trip.id,
     title: trip.title || (trip.region ? `${trip.region} 共編行程` : '共編行程'),
@@ -6721,7 +6753,9 @@ function collabApplyMemberPrefs() {
   if (!collabState || !collabState.baseData) return;
   const members = { ...(collabState.baseData.members || {}) };
   Object.entries(collabState.memberPrefs || {}).forEach(([key, pref]) => {
-    members[key] = { ...(members[key] || {}), ...pref };
+    if (members[key] && WAI_COLLAB.sameEmail(members[key].email, pref.email)) {
+      members[key] = { ...members[key], prefs: pref.prefs, ready: pref.ready };
+    }
   });
   collabState.data = { ...collabState.baseData, members };
 }
@@ -6753,8 +6787,8 @@ window.addEventListener('pagehide', () => {
 });
 function collabMyRole() {
   if (!collabState || !collabState.data) return 'viewer';
-  const m = collabState.data.members && collabState.data.members[WAI_COLLAB.emailKey(collabState.myEmail)];
-  return (m && m.role) || 'viewer';
+  return WAI_COLLAB.resolveRole(collabState.data, collabState.myEmail,
+    firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.uid);
 }
 function collabSetSyncStatus(status, notice = '') {
   if (!collabState) return;
@@ -6795,9 +6829,9 @@ function renderCollabPanel() {
   const link = WAI_COLLAB.buildShareLink(d.id, d.shareToken);
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=144x144&data=${encodeURIComponent(link)}`;
   const profile = WAI_COLLAB.aggregateGroupProfile(members);
-  const myKey = WAI_COLLAB.emailKey(collabState.myEmail);
+  const myMember = WAI_COLLAB.memberForEmail(d, collabState.myEmail);
   if (!collabState.myPrefsDraft) {
-    collabState.myPrefsDraft = WAI_COLLAB.normalizePrefs((members[myKey] && members[myKey].prefs) || {});
+    collabState.myPrefsDraft = WAI_COLLAB.normalizePrefs((myMember && myMember.prefs) || {});
   }
   const myPrefs = collabState.myPrefsDraft;
   const hasStops = Array.isArray(d.stops) && d.stops.length;
@@ -6918,7 +6952,7 @@ function renderCollabPanel() {
 }
 
 function collabMemberRowHtml(m, ownerControls) {
-  const isMe = WAI_COLLAB.emailKey(m.email) === WAI_COLLAB.emailKey(collabState.myEmail);
+  const isMe = WAI_COLLAB.sameEmail(m.email, collabState.myEmail);
   const readyDot = m.ready ? '<span class="collab-ready on" title="已填偏好">●</span>' : '<span class="collab-ready" title="未填偏好">○</span>';
   let roleCell;
   if (ownerControls && m.role !== 'owner') {

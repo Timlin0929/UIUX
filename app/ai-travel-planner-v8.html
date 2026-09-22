@@ -538,7 +538,7 @@
     <label class="parking-report-label" for="parkingReportType">目前狀況</label>
     <!-- 兩組的收件人不同：上組是給之後來的人的停車狀況，下組是給系統的資料修正。
          預設留在未選取（value=""），避免誤按送出就記成「我停好了」。 -->
-    <select class="parking-report-select" id="parkingReportType">
+    <select class="parking-report-select" id="parkingReportType" onchange="updateParkingReportKindVisibility()">
       <option value="" disabled selected>請選擇…</option>
       <optgroup label="這一站有沒有地方停？">
         <option value="found">✅ 有，我停好了（下一步標記停車位置）</option>
@@ -551,6 +551,14 @@
         <option value="missing">🛠 這個停車場不存在</option>
       </optgroup>
     </select>
+    <div id="parkingReportKindField" hidden>
+      <label class="parking-report-label" for="parkingReportKind">停車位置類型</label>
+      <select class="parking-report-select" id="parkingReportKind">
+        <option value="unknown">不確定</option>
+        <option value="lot">停車場</option>
+        <option value="roadside">路邊停車格</option>
+      </select>
+    </div>
     <label class="parking-report-label" for="parkingReportNote">補充說明（選填）</label>
     <textarea class="parking-report-note" id="parkingReportNote" maxlength="240" rows="3" placeholder="例如：入口在景點南側、B2 已滿、只接受現金…"></textarea>
     <div class="parking-report-actions">
@@ -593,7 +601,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="./collab.js?v=20260726-fix3"></script>
 <script src="./notifications.js?v=20260722-friends2"></script>
-<script src="./ai-travel-planner-v8.js?v=20260903-e2efix3"></script>
+<script src="./ai-travel-planner-v8.js?v=20260922-replanfix1"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。

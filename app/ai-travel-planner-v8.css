@@ -4317,7 +4317,7 @@ button:focus-visible,.nav-pill:focus-visible,.tool-btn:focus-visible{outline:3px
   font: inherit;
   font-size: 14px;
 }
-.parking-report-select { min-height: 46px; padding: 0 12px; }
+.parking-report-select { min-height: 46px; padding: 0 12px; white-space: nowrap; }
 .parking-report-note { min-height: 88px; padding: 10px 12px; resize: vertical; line-height: 1.5; }
 .parking-report-select:focus, .parking-report-note:focus { outline: 3px solid rgba(46,125,109,.16); border-color: var(--accent); }
 .parking-report-actions { display: flex; gap: 10px; padding: 18px 20px 20px; }

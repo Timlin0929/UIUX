@@ -159,6 +159,7 @@
       try {
         renderItineraryDisplay();
         syncRouteStageScheduleTimes(buildReplanSchedule());
+        if (isReplanning) renderReplanBoard();
       } catch (e) { console.warn('[park walk refresh] 略過：', e); }
     }, 600);
   }
@@ -655,7 +656,7 @@
     if (!parking || parking.parkingSource !== 'community') return '';
     const n = Number(parking.reports) || 0;
     const who = n >= 2 ? `${n} 位旅伴曾停在這` : '1 位旅伴曾停在這';
-    const kind = parking.kind === 'roadside' ? '路邊停車格' : '';
+    const kind = ({ lot: '停車場', roadside: '路邊停車格', unknown: '類型不確定', temp: '臨時停車點' })[parking.kind] || '';
     return `${who}${kind ? `（${kind}）` : ''}，非官方停車場，請依現場標示為準。`;
   }
 
@@ -1292,6 +1293,7 @@
      'closed' 在舊資料裡代表「已關閉或不存在」，新版拆成 closed（今天沒開）與 missing（不存在）；
      舊值仍可解析，顯示走 closed 的措辭。 */
   const PARKING_REPORT_TYPES = new Set(['found', 'full', 'closed', 'none', 'wrong', 'missing']);
+  const PARKING_REPORT_KINDS = new Set(['lot', 'roadside', 'unknown', 'temp']);
 
   // 只有這四種會改變行程上的停車提示；wrong/missing 是資料修正，不該影響當下的行程顯示
   const PARKING_REPORT_WARN = {
@@ -1333,6 +1335,8 @@
           uid: String(report.uid || ''),
           displayName: String(report.displayName || '旅伴')
         };
+        // 舊資料沒有 kind 時保留缺值，不推測為停車場。
+        if (PARKING_REPORT_KINDS.has(report.kind)) out.kind = report.kind;
         // 座標為選填：只有「找到停車場」會帶，其餘狀況沒有可標的點。
         // 一律留 4 位小數（≈11m）——精度足以區分相鄰停車場，又不必保存到公尺級。
         if (Number.isFinite(Number(report.lat)) && Number.isFinite(Number(report.lng))) {
@@ -1585,7 +1589,7 @@
     if (pendingReport) {
       const stop = (replanStops || []).find((item) => item.id === savedStopId);
       if (stop) {
-        const shared = await commitParkingReport(stop, pendingReport.type, pendingReport.note, savedCoords);
+        const shared = await commitParkingReport(stop, pendingReport.type, pendingReport.note, savedCoords, pendingReport.kind);
         if (shared) return feedbackToast('🅿️ 停車位置已記錄，回報已送出', 'green');
         return feedbackToast('🅿️ 停車位置已記錄；社群回報沒送出，稍後可再試一次', 'orange');
       }
@@ -1615,6 +1619,9 @@
     if (context) context.textContent = `📍 ${stop.name} · 回報會用來改善這個地點的停車資訊`;
     if (note) note.value = '';
     if (type) type.value = '';   // 預設未選取：誤按送出不該被記成「我停好了」
+    const kind = document.getElementById('parkingReportKind');
+    if (kind) kind.value = 'unknown';
+    window.updateParkingReportKindVisibility();
     if (overlay) overlay.classList.add('open');
   };
 
@@ -1624,12 +1631,17 @@
     parkingReportStopId = '';
   };
 
+  window.updateParkingReportKindVisibility = function() {
+    const field = document.getElementById('parkingReportKindField');
+    if (field) field.hidden = document.getElementById('parkingReportType')?.value !== 'found';
+  };
+
   /**
    * 把一筆回報寫進 parkingReports 並落地。coords 為選填（只有「找到停車場」會帶）。
    * 抽出來是因為有兩條路徑會用到：直接送出（無座標的狀況），
    * 以及「找到停車場」標完位置後才回頭送出（見 saveParkingRecord）。
    */
-  async function commitParkingReport(stop, type, note, coords) {
+  async function commitParkingReport(stop, type, note, coords, kind) {
     const now = Date.now();
     let reporter = '';
     let uid = '';
@@ -1649,6 +1661,7 @@
       uid,
       displayName: reporter || '旅伴'
     };
+    if (type === 'found') report.kind = PARKING_REPORT_KINDS.has(kind) ? kind : 'unknown';
     if (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lng))) {
       report.lat = Number(coords.lat);
       report.lng = Number(coords.lng);
@@ -1667,7 +1680,7 @@
     // 送一份到共用集合供跨使用者聚合（計畫第四節）。
     // 失敗不影響行程本身已經存好的回報，但要回報給呼叫端——
     // 使用者以為「已提供給未來訪客」卻其實沒送出，是不能默默吞掉的落差。
-    return sendParkingReportToBackend(stop, type, note, coords).catch(() => false);
+    return sendParkingReportToBackend(stop, type, note, coords, report.kind).catch(() => false);
   }
 
   /**
@@ -1676,7 +1689,7 @@
    * ★ 不送目的地座標讓後端「相信」，而是送站點座標讓後端「比對」：
    *   後端會在這趟行程的 stops 裡找有沒有這個站，找到才用資料庫裡那筆的座標。
    */
-  async function sendParkingReportToBackend(stop, type, note, coords) {
+  async function sendParkingReportToBackend(stop, type, note, coords, kind) {
     const base = VERTEX_PROXY_BASE;
     if (!base || !firebaseAuth || !firebaseAuth.currentUser) return;
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
@@ -1694,7 +1707,7 @@
       payload.lng = Number(coords.lng);
       payload.accuracy = Number(coords.accuracy) || 0;
       payload.adjusted = Boolean(coords.adjusted);
-      payload.kind = 'lot';   // TODO：等 UI 加上「停車場／路邊格」選項後改由使用者指定（計畫 6.1）
+      payload.kind = PARKING_REPORT_KINDS.has(kind) ? kind : 'unknown';
     }
     const token = await firebaseAuth.currentUser.getIdToken();
     const res = await fetch(`${base}/parking-report`, {
@@ -1726,7 +1739,9 @@
         window.closeParkingReportSheet();
         return feedbackToast('訪客或唯讀成員無法回報停車位置', 'orange');
       }
-      pendingParkingReport = { stopId: stop.id, type, note };
+      const kind = document.getElementById('parkingReportKind')?.value || 'unknown';
+      if (!PARKING_REPORT_KINDS.has(kind)) return feedbackToast('請選擇停車位置類型', 'orange');
+      pendingParkingReport = { stopId: stop.id, type, note, kind };
       window.closeParkingReportSheet();
       return window.openParkingRecordSheet(stop.id);
     }
@@ -2785,9 +2800,9 @@
     if ((uid && trip.ownerUid === uid) || eq(trip.ownerEmail) || eq(trip.userEmail)) return 'owner';
     if (Array.isArray(trip.editorEmails) && trip.editorEmails.some(eq)) return 'editor';
     const mem = trip.members && trip.members[memberKeyOf(email)];
-    if (mem && (mem.role === 'owner' || mem.role === 'editor')) return mem.role;
-    // Firebase 抓不到文件時的離線退路，仍以本機快取的角色為準
-    return (mem && mem.role) || trip.role || 'viewer';
+    // legacy key 不能證明身分；需核對完整 email，且 owner 僅由上方權威欄位判斷。
+    if (mem && eq(mem.email) && mem.role === 'editor') return 'editor';
+    return 'viewer';
   }
 
   /* ── App 端行程 → 網頁偏好（相容層）────────────────────────────
@@ -2974,7 +2989,7 @@
         }
 
         // 共編行程：本機快取可能是 join 當下的空殼（stops/members 都舊）→ 一律抓最新 Firebase 為準
-        if (!isGuestView && (!trip || trip.collab) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
+        if (!isGuestView && (!trip || trip.collab || !Array.isArray(trip.stops) || !trip.stops.length) && typeof firebase !== 'undefined' && firebaseEnabled && firebaseDb) {
            try {
              // Auth 已在 initFromUrl 開頭 await authReady 確認過（E2E #2：成員重整不再被 rules 擋成 0 站）
              const doc = await firebaseDb.collection('micro_trips').doc(tripId).get();
@@ -2994,10 +3009,10 @@
             || /permission|權限/i.test(String(directLoadError.message || ''))
           );
           tripLoadFailureMessage = permissionDenied
-            ? '這個連結只有行程擁有者或已加入的成員可以開啟。請分享者重新按「分享」，取得新的唯讀分享連結；若要共同編輯，請改用邀請碼加入。'
-            : '找不到這份行程，可能已被刪除，或分享連結不完整。請向分享者索取新的唯讀分享連結。';
+            ? '目前無法讀取這份雲端行程，可能尚未儲存、已被刪除，或目前帳號沒有權限。若從「我的微旅行」開啟，請回原本的瀏覽器與帳號確認生成狀態；若是別人分享，請索取新的分享連結。'
+            : '找不到這份行程，可能尚未儲存、已被刪除，或連結不完整。請回「我的微旅行」確認生成狀態。';
           const heroTitleEl = document.querySelector('#view-itinerary .hero-title');
-          if (heroTitleEl) heroTitleEl.textContent = '無法載入分享行程';
+          if (heroTitleEl) heroTitleEl.textContent = '無法載入行程';
         }
 
         // 多人共作：依角色決定唯讀。訪客一律唯讀；登入者非 owner/editor 也唯讀。
@@ -3445,6 +3460,19 @@
     const coordB = readCoordinateObject(b['景點座標'] || b.scenicCoordinates || b.coordinates);
     if (coordA && coordB && approxDistanceMeters(coordA.lat, coordA.lng, coordB.lat, coordB.lng) < 30) return true;
     return false;
+  }
+
+  function isReplanEndpointDuplicate(stop, endpoint) {
+    if (!stop || !endpoint) return false;
+    const key = s => normalizeText(s.name || '').replace(/臺/g, '台').replace(/火車站/g, '車站');
+    if (key(stop) && key(stop) === key(endpoint)) return true;
+    const a = readStopCoordinates(stop), b = readStopCoordinates(endpoint);
+    return !!(a && b && approxDistanceMeters(a.lat, a.lng, b.lat, b.lng) < 30);
+  }
+
+  function removeReplanEndpointDuplicates(stops, start, end) {
+    return stops.filter(stop => stop === start || stop === end
+      || (!isReplanEndpointDuplicate(stop, start) && !isReplanEndpointDuplicate(stop, end)));
   }
 
   function deduplicateAdjacentTripStops(stops) {
@@ -7756,7 +7784,10 @@
     // 起點（出發）與終點（返回）是行程錨點：本身不可被搬移，其他站也不可移到起點之前
     // 或終點之後，否則會出現「先返回、後出發」這類錯亂順序（且在共編行程會被存回、推送給所有成員）。
     const isAnchor = (s) => s && (s.type === 'start' || s.type === 'end');
-    if (isAnchor(replanStops[sourceIndex]) || isAnchor(replanStops[targetIndex])) return;
+    if (isAnchor(replanStops[sourceIndex]) || isAnchor(replanStops[targetIndex])) {
+      feedbackToast('出發與返回站是行程錨點，不能調整順序', 'orange');
+      return;
+    }
 
     const [moved] = replanStops.splice(sourceIndex, 1);
     replanStops.splice(targetIndex, 0, moved);
@@ -8250,7 +8281,12 @@
   }
 
   function getLocalTripFeedbackMap() {
-    try { return JSON.parse(localStorage.getItem(TRIP_FEEDBACK_KEY) || '{}'); } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(localTripFeedbackKey()) || '{}'); } catch { return {}; }
+  }
+  function localTripFeedbackKey() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    // 不搬移舊共用 key：無法確認當時由哪個帳號填寫，換帳號不能看見前人的草稿。
+    return TRIP_FEEDBACK_KEY + ':' + (user ? user.uid : 'guest');
   }
   function getLocalTripFeedback(tripId) {
     const map = getLocalTripFeedbackMap();
@@ -8332,7 +8368,7 @@
         tripRating: entry.tripRating, aiAccuracy: entry.aiAccuracy,
         comment: entry.comment, stopRatings: entry.stopRatings, submittedAt: entry.submittedAt
       };
-      localStorage.setItem(TRIP_FEEDBACK_KEY, JSON.stringify(map));
+      localStorage.setItem(localTripFeedbackKey(), JSON.stringify(map));
     } catch (e) { console.warn('Save feedback to localStorage failed:', e); }
 
     // 2) Firestore：每位成員一份獨立回饋文件，避免共編 editor 互相覆寫 feedback map
@@ -8408,50 +8444,16 @@
 
         <div class="tripfb-summary">📍 本趟已到訪 ${visitedCount} / ${totalStops} 個景點</div>
 
-        <div id="tripfb-others"></div>
+        <div class="tripfb-sub">回饋僅供專案管理者查看，不會公開給其他旅伴。</div>
 
         <div class="tripfb-actions">
           <button type="button" class="tripfb-btn ghost" onclick="closeTripFeedback()">稍後</button>
           <button type="button" class="tripfb-btn primary" id="tripfb-submit" ${canSubmit ? '' : 'disabled'} onclick="submitTripFeedback()">送出回饋</button>
         </div>
       </div>`;
-    loadOthersFeedback(); // 非同步載入「大家的回饋」（個人行程＝自己的；共編行程＝所有成員的）
   }
 
-  // 讀取此行程已收到的回饋（micro_trips/{id}/feedback 子集合）並顯示在評分視窗內。
-  // 共編行程的成員都讀得到（安全規則的成員讀取權），所以旅伴互相看得到彼此的評分與留言。
-  async function loadOthersFeedback() {
-    const host = document.getElementById('tripfb-others');
-    if (!host) return;
-    if (!(firebaseEnabled && firebaseDb && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY')) { host.innerHTML = ''; return; }
-    // UIUX#11：純文字「載入中…」看起來像靜止的錯誤訊息，補骨架列讓人知道在跑
-    host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">載入大家的回饋中…</div>'
-      + (window.waiSkeletonRows ? waiSkeletonRows(2) : '');
-    try {
-      const snap = await firebaseDb.collection('micro_trips').doc(currentItineraryId)
-        .collection('feedback').get();
-      const entries = snap.docs.map(d => d.data()).filter(Boolean)
-        .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
-      if (!entries.length) {
-        host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px">🗣 這份行程還沒有任何回饋，送出第一則吧！</div>';
-        return;
-      }
-      const star = (n) => '★'.repeat(Math.max(0, Math.min(5, n || 0))) + '☆'.repeat(Math.max(0, 5 - (n || 0)));
-      host.innerHTML = `<div class="tripfb-label" style="margin-top:14px">🗣 大家的回饋（${entries.length}）</div>`
-        + entries.map((e) => `
-          <div style="border:1px solid #e3ecf5;border-radius:10px;padding:8px 10px;margin-top:6px;font-size:13px;">
-            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
-              <b>${escapeFeedbackText(e.name || e.email || '旅伴')}</b>
-              <span style="color:#e8a33d;letter-spacing:1px;">${star(e.tripRating)}</span>
-            </div>
-            <div style="color:#8fa4b8;font-size:12px;">AI 準確度 ${star(e.aiAccuracy)}${Number.isFinite(e.visitedCount) ? ` · 到訪 ${e.visitedCount}/${e.totalStops} 站` : ''}</div>
-            ${e.stopRatings && Object.keys(e.stopRatings).length ? `<div style="margin-top:3px;color:#5f7d99;font-size:12px;">${Object.entries(e.stopRatings).map(([n, r]) => `${escapeFeedbackText(n)} <span style="color:#e8a33d;">${star(r)}</span>`).join('　')}</div>` : ''}
-            ${e.comment ? `<div style="margin-top:4px;color:#2b4c6b;white-space:pre-wrap;">${escapeFeedbackText(e.comment)}</div>` : ''}
-          </div>`).join('');
-    } catch (e) {
-      host.innerHTML = '<div class="tripfb-sub" style="margin-top:14px;color:#9aa5b1;">（無法載入其他回饋）</div>';
-    }
-  }
+  // 回饋原文僅供管理者在 Firebase Console 查看；一般頁面不發出讀取查詢。
 
   function escapeFeedbackText(s) {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -10482,10 +10484,8 @@
     }
 
     const members = Object.keys(currentTripMembers).map(k => currentTripMembers[k]);
-    let myEmail = '';
-    try { const u = JSON.parse(localStorage.getItem('wai_user') || '{}'); myEmail = (u && u.currentUser && u.currentUser.email) || ''; } catch (e) {}
-    const myKey = String(myEmail).toLowerCase().replace(/[^a-z0-9]/g, '_');
-    const myRole = (currentTripMembers[myKey] || {}).role || collabRole || 'viewer';
+    const { email: myEmail } = currentUserIdentity();
+    const myRole = collabRole || 'viewer';
 
     if (countEl) countEl.textContent = `👥 ${members.length} 人`;
     if (orgEl) orgEl.textContent = currentTripOwnerName || (members.find(m => m.role === 'owner') || {}).name || '--';
@@ -10496,7 +10496,7 @@
         `<div class="avatar" title="${escapeHtml((m.name || m.email || '') + ' · ' + membersRoleLabel(m.role))}">${escapeHtml(String(m.name || m.email || '?').slice(0, 1))}</div>`
       ).join('');
       const rows = members.map(m => {
-        const isMe = String(m.email || '').toLowerCase().replace(/[^a-z0-9]/g, '_') === myKey;
+        const isMe = !!myEmail && String(m.email || '').trim().toLowerCase() === myEmail;
         return `${escapeHtml(m.name || m.email)}${isMe ? '（你）' : ''}：${membersRoleLabel(m.role)}`;
       }).join('｜');
       stackEl.innerHTML = `${avatars}<div class="avatar-info"><div style="font-weight:600;font-size:16px;">你是${membersRoleLabel(myRole)}</div><div style="font-size:13px;color:var(--ink3);">${rows}</div></div>`;
@@ -11388,11 +11388,28 @@
     // 閒置 45 秒後自動收尾。統計失敗不影響呼叫本身。
     try {
       if (window.WAI_COST && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY') {
-        const runId = await WAI_COST.ensureRun(currentItineraryId);
+        // 本機草稿未上雲時也可記錄用量，但不能立即綁定不存在的行程。
+        const trackingTripId = await getCloudTripIdForCost();
+        const runId = await WAI_COST.ensureRun(trackingTripId);
         if (runId) headers['X-Run-Id'] = runId;
       }
     } catch (_e) { /* 統計拿不到就不帶，功能照常 */ }
     return headers;
+  }
+
+  async function getCloudTripIdForCost() {
+    const tripId = currentItineraryId;
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!firebaseEnabled || !firebaseDb || !user || !tripId || tripId === 'TRIP-EMPTY') return null;
+    try {
+      const snapshot = await firebaseDb.collection('micro_trips').doc(tripId).get();
+      if (!snapshot.exists || firebaseAuth.currentUser !== user || currentItineraryId !== tripId) return null;
+      const data = snapshot.data() || {};
+      const email = String(user.email || '').trim().toLowerCase();
+      const same = value => email && String(value || '').trim().toLowerCase() === email;
+      return data.ownerUid === user.uid || same(data.ownerEmail) || same(data.userEmail)
+        || (data.memberEmails || []).some(same) || (data.editorEmails || []).some(same) ? tripId : null;
+    } catch (_) { return null; } // 無法確認資格時保持未綁定，Rules／後端權限不變。
   }
 
   function vertexHttpError(status, kind) {
@@ -11450,6 +11467,26 @@
     // 新規則的事件寫入會驗 isTripMemberOrOwner(tripId)：行程無效或尚未存進 Firestore 時必被拒，
     // 直接略過以免每個操作都噴 permission-denied 警告。
     if (!currentItineraryId || currentItineraryId === 'TRIP-EMPTY') return;
+    // 本機草稿／分享訪客不一定有雲端成員資格；不能只憑 ID 就送事件。
+    // 使用目前雲端資料核對，避免登出換帳號或已退出成員後沿用舊快取。
+    const eventUser = firebaseAuth.currentUser;
+    const eventTripId = currentItineraryId;
+    let eventTrip;
+    try {
+      const snapshot = await firebaseDb.collection('micro_trips').doc(eventTripId).get();
+      if (!snapshot.exists) return;
+      eventTrip = snapshot.data();
+    } catch (error) {
+      if (error && error.code === 'permission-denied') return;
+      console.warn('Firebase 事件資格確認失敗：', error);
+      return;
+    }
+    const email = eventUser.email;
+    const isMember = eventTrip.ownerUid === eventUser.uid || (email && (
+      eventTrip.ownerEmail === email || eventTrip.userEmail === email
+      || (Array.isArray(eventTrip.memberEmails) && eventTrip.memberEmails.includes(email))
+    ));
+    if (!isMember || firebaseAuth.currentUser !== eventUser || currentItineraryId !== eventTripId) return;
     try {
       await firebaseDb
         .collection('travel_sessions')
@@ -13155,10 +13192,7 @@
       const preservedStartStop = replanStops.find(s => s.type === 'start') || replanStops[0];
       const preservedEndStop = replanStops.find(s => s.type === 'end');
       // 過濾掉 AI 新生成中與保留起點重名的站點，避免重複
-      const startNorm = preservedStartStop ? normalizeText(preservedStartStop.name) : '';
-      const filteredNewStops = startNorm
-        ? newStops.filter(s => normalizeText(s.name) !== startNorm)
-        : newStops;
+      const filteredNewStops = removeReplanEndpointDuplicates(newStops, preservedStartStop, preservedEndStop);
       replanStops = filteredNewStops;
       if (preservedStartStop) replanStops.unshift({ ...preservedStartStop, transitMin: null });
       if (preservedEndStop) {
@@ -13246,6 +13280,10 @@
       // 最後輸出前重排一次，避免合併/補景點後路線南北來回跑
       try { replanStops = reorderStopsAlongRoute(replanStops, region); }
       catch (orderErr) { console.warn('[replanWithAI] 路線重排略過：', orderErr); }
+      // 補站也可能再次引入起終點別名；排序後、時間計算前再收斂一次。
+      replanStops = removeReplanEndpointDuplicates(replanStops,
+        replanStops.find(s => s.type === 'start') || replanStops[0],
+        replanStops.find(s => s.type === 'end'));
       ensureStopDayIndexes(replanStops, wizardData);
       // 對齊描述「（含 …）」與 mergedSubSpots，並清掉累加的重複括號
       reconcileMergedSubSpots(replanStops);
@@ -16396,6 +16434,7 @@
             }
 
             renderItineraryDisplay();
+            if (isReplanning) renderReplanBoard();
             renderMobileRouteSheet();
           } else {
             console.error('Directions request failed due to ' + status);

@@ -61,6 +61,35 @@ window.WAI_COLLAB = (function () {
   function emailKey(email) {
     return String(email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
   }
+  function sameEmail(a, b) {
+    return !!String(a || '').trim() && String(a).trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  }
+  function memberForEmail(trip, email) {
+    var member = trip && trip.members && trip.members[emailKey(email)];
+    return member && sameEmail(member.email, email) ? member : null;
+  }
+  function assertMemberIdentity(trip, email) {
+    var key = emailKey(email);
+    var member = trip.members && trip.members[key];
+    var emails = (trip.memberEmails || []).concat([trip.ownerEmail || trip.userEmail || '']);
+    if (!email || (member && !sameEmail(member.email, email)) || emails.some(function (other) {
+      return other && emailKey(other) === key && !sameEmail(other, email);
+    })) throw new Error('此帳號與既有成員的識別資料衝突，暫時無法操作；請聯絡管理者。');
+  }
+  function memberEmailsWithOwner(trip) {
+    var result = [];
+    (trip.memberEmails || []).concat([trip.ownerEmail || trip.userEmail || '']).forEach(function (email) {
+      if (email && !result.some(function (other) { return sameEmail(other, email); })) result.push(email);
+    });
+    return result;
+  }
+  function resolveRole(trip, email, uid) {
+    if (!trip || !email) return 'viewer';
+    if ((uid && trip.ownerUid === uid) || sameEmail(trip.ownerEmail, email) || sameEmail(trip.userEmail, email)) return 'owner';
+    if ((trip.editorEmails || []).some(function (other) { return sameEmail(other, email); })) return 'editor';
+    var member = memberForEmail(trip, email);
+    return member && member.role === 'editor' ? 'editor' : 'viewer';
+  }
   // 用於文件路徑／身分隔離的無碰撞 key。emailKey 需保留給既有共編 members schema；
   // identityKey 則以正規化 email 的 UTF-8 十六進位表示，避免 a.b 與 a_b 被壓成同一值。
   function identityKey(email) {
@@ -338,33 +367,38 @@ window.WAI_COLLAB = (function () {
     if (!norm) throw new Error('請輸入邀請碼。');
     var verified = await verifyInviteCode(norm);
     var tripRef = db().collection('micro_trips').doc(verified.tripId);
-    var tripSnap = await tripRef.get();
-    if (!tripSnap.exists) throw new Error('行程不存在或已被刪除。');
-    var data = tripSnap.data();
-    var emails = data.memberEmails || [];
-    var ekey = emailKey(user.email);
-    var already = emails.indexOf(user.email) !== -1;
-    if (!already && isFull(emails)) throw new Error('這個行程人數已滿（上限 ' + MAX_MEMBERS + ' 人）。');
-    if (!already) {
-      // 注意：set(merge) 不支援「點號路徑 key」（會被當字面欄位名），必須用巢狀物件才能寫進 members map。
-      var membersPatch = {};
-      membersPatch[ekey] = {
-        email: user.email,
-        name: user.name || (user.email || '旅伴'),
-        role: 'viewer', // 預設唯讀
-        ready: false,
-        prefs: normalizePrefs(user.prefs),
-        joinedAt: Date.now()
-      };
-      // 只寫 memberEmails / members，對齊安全規則「加入」分支的 hasOnly(['memberEmails','members'])。
-      // 不碰 editorEmails：剛加入者本來就不在 editor 名單；若在此對「無 editorEmails 欄位的舊行程」
-      // 下 arrayRemove，會把欄位從無建成 []，讓 affectedKeys 多一個 editorEmails → 規則擋下加入。
-      // 降級成員的 editor 移除，由 owner 的 setMemberRole 負責。
-      await tripRef.set({
-        memberEmails: firebase.firestore.FieldValue.arrayUnion(user.email),
-        members: membersPatch
-      }, { merge: true });
-    }
+    var already = false;
+    await db().runTransaction(async function (tx) {
+      var tripSnap = await tx.get(tripRef);
+      if (!tripSnap.exists) throw new Error('行程不存在或已被刪除。');
+      var data = tripSnap.data();
+      assertMemberIdentity(data, user.email);
+      var emails = memberEmailsWithOwner(data);
+      var ekey = emailKey(user.email);
+      already = emails.some(function (email) { return sameEmail(email, user.email); });
+      var maxMembers = Math.min(Math.max(Number(data.maxMembers) || MAX_MEMBERS, 1), 50);
+      if (!already && emails.length >= maxMembers) throw new Error('這個行程人數已滿（上限 ' + maxMembers + ' 人，含擁有者）。');
+      if (!already) {
+        // 注意：set(merge) 不支援「點號路徑 key」（會被當字面欄位名），必須用巢狀物件才能寫進 members map。
+        var membersPatch = {};
+        membersPatch[ekey] = {
+          email: user.email,
+          name: user.name || (user.email || '旅伴'),
+          role: 'viewer', // 預設唯讀
+          ready: false,
+          prefs: normalizePrefs(user.prefs),
+          joinedAt: Date.now()
+        };
+        // 只寫 memberEmails / members，對齊安全規則「加入」分支的 hasOnly(['memberEmails','members'])。
+        // 不碰 editorEmails：剛加入者本來就不在 editor 名單；若在此對「無 editorEmails 欄位的舊行程」
+        // 下 arrayRemove，會把欄位從無建成 []，讓 affectedKeys 多一個 editorEmails → 規則擋下加入。
+        // 降級成員的 editor 移除，由 owner 的 setMemberRole 負責。
+        tx.set(tripRef, {
+          memberEmails: firebase.firestore.FieldValue.arrayUnion(user.email),
+          members: membersPatch
+        }, { merge: true });
+      }
+    });
     var fresh = await tripRef.get();
     // alreadyMember 為暫態旗標（不寫進 Firestore），供前端區分「重新加入」與「首次加入」
     return Object.assign({ id: verified.tripId, alreadyMember: already }, fresh.data());
@@ -388,24 +422,40 @@ window.WAI_COLLAB = (function () {
   async function setMemberRole(tripId, memberEmail, role) {
     var allowed = ['owner', 'editor', 'viewer'];
     if (allowed.indexOf(role) === -1) throw new Error('未知角色：' + role);
-    var membersPatch = {};
-    membersPatch[emailKey(memberEmail)] = { role: role };
-    var rolePatch = { members: membersPatch };
-    if (role === 'editor') rolePatch.editorEmails = firebase.firestore.FieldValue.arrayUnion(memberEmail);
-    else rolePatch.editorEmails = firebase.firestore.FieldValue.arrayRemove(memberEmail);
-    await db().collection('micro_trips').doc(tripId).set(rolePatch, { merge: true });
+    var ref = db().collection('micro_trips').doc(tripId);
+    await db().runTransaction(async function (tx) {
+      var snap = await tx.get(ref);
+      if (!snap.exists) throw new Error('行程不存在');
+      assertMemberIdentity(snap.data(), memberEmail);
+      if (!memberForEmail(snap.data(), memberEmail)) throw new Error('找不到此成員');
+      var membersPatch = {};
+      membersPatch[emailKey(memberEmail)] = { role: role };
+      var rolePatch = { members: membersPatch };
+      if (role === 'editor') rolePatch.editorEmails = firebase.firestore.FieldValue.arrayUnion(memberEmail);
+      else rolePatch.editorEmails = firebase.firestore.FieldValue.arrayRemove(memberEmail);
+      tx.set(ref, rolePatch, { merge: true });
+    });
   }
 
   // 成員更新自己的偏好（興趣/節奏/預算/希望景點；avoid 來自帳號設定）
   async function setMemberPrefs(tripId, memberEmail, prefs) {
     var user = firebase.auth().currentUser;
     if (!user || user.email !== memberEmail) throw new Error('只能儲存自己的偏好');
-    await db().collection('micro_trips').doc(tripId).collection('member_prefs').doc(emailKey(memberEmail)).set({
-      email: memberEmail,
-      prefs: normalizePrefs(prefs),
-      ready: true,
-      updatedAt: serverTs()
-    }, { merge: true });
+    var tripRef = db().collection('micro_trips').doc(tripId);
+    var prefRef = tripRef.collection('member_prefs').doc(emailKey(memberEmail));
+    await db().runTransaction(async function (tx) {
+      var snap = await tx.get(tripRef);
+      if (!snap.exists) throw new Error('行程不存在');
+      assertMemberIdentity(snap.data(), memberEmail);
+      var pref = await tx.get(prefRef);
+      if (pref.exists && !sameEmail(pref.data().email, memberEmail)) throw new Error('此偏好紀錄的帳號資料衝突，請聯絡管理者。');
+      tx.set(prefRef, {
+        email: memberEmail,
+        prefs: normalizePrefs(prefs),
+        ready: true,
+        updatedAt: serverTs()
+      }, { merge: true });
+    });
   }
 
   // owner 撤銷整個行程的邀請碼（不再可加入新成員）
@@ -418,13 +468,21 @@ window.WAI_COLLAB = (function () {
   // 仍含其 email，下次登入 fetchMyCollabTrips 的 array-contains 又會把行程抓回來）。
   async function leaveSharedTrip(tripId, email) {
     if (!email) return;
-    var patch = {};
-    patch[emailKey(email)] = firebase.firestore.FieldValue.delete();
-    await db().collection('micro_trips').doc(tripId).set({
-      memberEmails: firebase.firestore.FieldValue.arrayRemove(email),
-      editorEmails: firebase.firestore.FieldValue.arrayRemove(email),
-      members: patch
-    }, { merge: true });
+    var ref = db().collection('micro_trips').doc(tripId);
+    await db().runTransaction(async function (tx) {
+      var snap = await tx.get(ref);
+      if (!snap.exists) return;
+      var patch = {};
+      // 已存在碰撞的舊資料也能退出，但不能刪掉另一位成員的 map。
+      if (memberForEmail(snap.data(), email)) patch[emailKey(email)] = firebase.firestore.FieldValue.delete();
+      var changes = {
+        memberEmails: firebase.firestore.FieldValue.arrayRemove(email),
+        editorEmails: firebase.firestore.FieldValue.arrayRemove(email)
+      };
+      // Firestore merge 中的空 map 會清空既有 map，沒有自己的項目時必須省略。
+      if (Object.keys(patch).length) changes.members = patch;
+      tx.set(ref, changes, { merge: true });
+    });
   }
 
   // owner 刪除整個共用行程：清 micro_trips doc（規則允許 owner 刪）+ 停用邀請碼。
@@ -494,7 +552,12 @@ window.WAI_COLLAB = (function () {
     var trip = Object.assign({ id: tripId }, snap.data());
     var prefsSnap = await db().collection('micro_trips').doc(tripId).collection('member_prefs').get();
     var members = Object.assign({}, trip.members || {});
-    prefsSnap.forEach(function (doc) { members[doc.id] = Object.assign({}, members[doc.id] || {}, doc.data()); });
+    prefsSnap.forEach(function (doc) {
+      var pref = doc.data();
+      if (members[doc.id] && sameEmail(members[doc.id].email, pref.email)) {
+        members[doc.id] = Object.assign({}, members[doc.id], { prefs: pref.prefs, ready: pref.ready });
+      }
+    });
     trip.members = members;
     return trip;
   }
@@ -585,6 +648,10 @@ window.WAI_COLLAB = (function () {
     generateShareToken: generateShareToken,
     normalizeCode: normalizeCode,
     emailKey: emailKey,
+    sameEmail: sameEmail,
+    memberForEmail: memberForEmail,
+    resolveRole: resolveRole,
+    memberEmailsWithOwner: memberEmailsWithOwner,
     identityKey: identityKey,
     parseBudgetNumber: parseBudgetNumber,
     formatBudget: formatBudget,

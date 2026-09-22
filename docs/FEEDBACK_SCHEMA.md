@@ -4,6 +4,8 @@
 > **狀態**：網頁端已實作（2026 Week 1）。Android 端請依此 schema 對齊。  
 > **原則**：回饋放在 `micro_trips/{tripId}/feedback/{emailKey}` 子集合，每位成員只寫自己的文件，避免共編成員互相覆寫或藉由行程文件更新他人回饋。
 
+> **2026-09-21 隱私決策**：Web 子集合及 Android 使用的頂層 `feedback` 原文均只供專案管理者查看。本輪 Rules 設為客戶端不可讀，管理者暫用 Firebase Console／受信任 Admin SDK；管理頁日後補齊。Web 已移除「大家的回饋」讀取。Android 舊版的個人化提示查詢需停用或改讀去識別統計，才能搭配新 Rules 發布；不要恢復一般登入者可讀以消除錯誤。
+
 ---
 
 ## 一、資料位置
@@ -69,7 +71,7 @@ await db.collection('micro_trips').doc(tripId)
 
 每位使用者只能寫入自己的 email 文件；Firestore Rules 會再次驗證文件內的 `email`。
 
-> **歷史相容**：舊版曾將回饋寫成 `micro_trips/{tripId}` 文件上的 `feedback` map（key = emailKey）。新版本不再寫入該 map，讀取一律走上述子集合；歷史 map 資料如需保留請自行遷移。
+> **歷史相容**：舊版曾將回饋寫成 `micro_trips/{tripId}` 文件上的 `feedback` map（key = emailKey）。新版本不再寫入該 map。若線上仍有舊 map，需另行盤點、遷移與清理；子集合 Rules 不會保護主文件內的舊 map。本輪未操作線上歷史資料。
 
 ---
 
@@ -95,12 +97,14 @@ users/{uid}
 網頁端另存一份 localStorage 供離線預填與個人（非 collab）行程：
 
 ```
-localStorage["wai_trip_feedback"] = {
+localStorage["wai_trip_feedback:<Firebase UID 或 guest>"] = {
   "<tripId>": { tripRating, aiAccuracy, comment, submittedAt }
 }
 ```
 
 Android 端可用等效本地儲存（SharedPreferences / Room），欄位對齊即可。
+
+舊版共用 `wai_trip_feedback` 不再讀取或自動搬移，因為無法證明草稿屬於目前帳號。已登入者的本機草稿按 UID 隔離；這不是雲端回饋讀取權限。
 
 ---
 
@@ -120,5 +124,5 @@ Android 端可用等效本地儲存（SharedPreferences / Room），欄位對齊
 ## 七、待兩端確認的協商點（週末對齊）
 
 1. `aiAccuracy` 採 **1–5 星**（本 schema）還是三段式（good/ok/bad）？→ 目前定為 **1–5**，Android 若偏好三段式需雙方改。
-2. `feedback` 放 **map 欄位**（本 schema）還是獨立 `trip_feedback` collection？→ 目前定為 **map**，若需跨行程分析再議。
-3. Firestore 安全規則：feedback 寫入權限（成員可寫自己那筆 / 是否允許 viewer 寫）→ 由 D4「安全規則收緊」統一處理。
+2. Web 已採行程子集合，Android 頂層 `feedback` 的不同 schema 仍相容；不是主文件 map。未來管理頁需整合兩種格式。
+3. viewer 仍可提交自己的回饋；回饋原文客戶端一律不能讀。管理者權限及管理頁另案實作。

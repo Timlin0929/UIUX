@@ -44,7 +44,7 @@ const VERTEX_UPSTREAM = 'https://aiplatform.googleapis.com';
 const PLACES_UPSTREAM = 'https://places.googleapis.com';
 // Places (New) 改走代理後，伺服器需要自己的 Maps 金鑰。
 // 必須是「不受 HTTP referrer 限制」的金鑰——瀏覽器用的那把在伺服器端會被 403。
-const GOOGLE_MAPS_SERVER_KEY = (process.env.GOOGLE_MAPS_SERVER_KEY || '').trim();
+const GOOGLE_MAPS_SERVER_KEY = (process.env.GOOGLE_MAPS_SERVER_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim();
 const TDX_UPSTREAM = 'https://tdx.transportdata.tw';
 
 if (!VERTEX_API_KEY) {
@@ -133,6 +133,28 @@ function normalizeEmail(email) {
 
 function tripOwnerEmail(data) {
   return String(data.ownerEmail || data.userEmail || '').trim();
+}
+
+// 所有加入入口共用：包含擁有者，以完整 email 去重；保留原值供舊 App 查詢。
+function tripMemberEmails(data) {
+  const unique = new Map();
+  const emails = (Array.isArray(data.memberEmails) ? data.memberEmails : []).concat(tripOwnerEmail(data));
+  for (const email of emails) {
+    if (normalizeEmail(email) && !unique.has(normalizeEmail(email))) unique.set(normalizeEmail(email), email);
+  }
+  return [...unique.values()];
+}
+
+function assertLegacyMemberIdentity(data, email) {
+  const key = legacyMemberKey(email);
+  const member = data.members && data.members[key];
+  if (!normalizeEmail(email)
+      || (member && normalizeEmail(member.email) !== normalizeEmail(email))
+      || tripMemberEmails(data).some((other) => legacyMemberKey(other) === key && normalizeEmail(other) !== normalizeEmail(email))) {
+    const err = new Error('此帳號與既有成員的識別資料衝突，暫時無法加入；請聯絡管理者。');
+    err.status = 409;
+    throw err;
+  }
 }
 
 function isTripOwner(user, data) {
@@ -302,7 +324,7 @@ async function requireFirebaseUser(req, res, next) {
 
 const PARKING_REPORT_COLLECTION = 'parking_reports';
 const PARKING_REPORT_TYPES = new Set(['found', 'full', 'closed', 'none', 'wrong', 'missing']);
-const PARKING_REPORT_KINDS = new Set(['lot', 'roadside', 'temp']);
+const PARKING_REPORT_KINDS = new Set(['lot', 'roadside', 'temp', 'unknown']); // temp 保留舊客戶端相容
 const PARKING_GEOFENCE_METERS = 800;   // 超出視為與這一站無關（多半是住家或飯店）
 const PARKING_MAX_ACCURACY = 50;       // 計畫 5.3：更差的定位無法支撐 30m 群聚
 const PARKING_REVOTE_DAYS = 30;        // 同一人對同一地點的重複回報視為更新，不是新的一票
@@ -573,8 +595,9 @@ app.post('/api/collab/invites/verify', collabLimiter, requireFirebaseUser, async
       return res.status(404).json({ error: 'trip not found', message: '行程不存在或已被刪除。' });
     }
     const trip = tripSnap.data();
-    const members = Array.isArray(trip.memberEmails) ? trip.memberEmails : [];
-    const alreadyMember = members.includes(req.user.email);
+    assertLegacyMemberIdentity(trip, req.user.email);
+    const members = tripMemberEmails(trip);
+    const alreadyMember = members.some((email) => normalizeEmail(email) === normalizeEmail(req.user.email));
     const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
     if (!alreadyMember && members.length >= maxMembers) {
       return res.status(409).json({ error: 'trip full', message: `這個行程人數已滿（上限 ${maxMembers} 人）。` });
@@ -601,7 +624,7 @@ app.post('/api/collab/invites/verify', collabLimiter, requireFirebaseUser, async
     });
   } catch (err) {
     console.error('[proxy] invite verify failed:', err && err.message);
-    return res.status(500).json({ error: 'invite verify failed', message: '目前無法驗證邀請碼，請稍後再試。' });
+    return res.status(err.status || 500).json({ error: 'invite verify failed', message: err.status ? err.message : '目前無法驗證邀請碼，請稍後再試。' });
   }
 });
 
@@ -660,16 +683,13 @@ app.post('/api/collab/join-requests', collabLimiter, requireFirebaseUser, async 
         err.status = 409;
         throw err;
       }
-      const memberEmails = Array.isArray(trip.memberEmails) ? trip.memberEmails : [];
+      assertLegacyMemberIdentity(trip, req.user.email);
+      const memberEmails = tripMemberEmails(trip);
       if (memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(req.user.email))) {
         return { status: 'accepted', alreadyMember: true };
       }
       const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
-      // ⚠️ 已知風險（2026-07-26 Codex 審查 #3）：此處只算既有 memberEmails，
-      // 但 resolve 接受時會先把 owner 補進陣列再判斷上限。若 memberEmails 有
-      // maxMembers-1 人「且不含 owner」，申請會通過變 pending，owner 按接受卻拿到 409，
-      // 申請永久卡住。預設 maxMembers=10 且個人行程 memberEmails 多為空，暫不處理。
-      // 要修的話：兩處統一改成「memberEmails ∪ {owner} 去重後的人數」。
+      // 與接受申請使用同一人數口徑；名額仍須在接受的 transaction 中重驗。
       if (memberEmails.length >= maxMembers) {
         const err = new Error(`這份行程的成員已達上限（${maxMembers} 人）。`);
         err.status = 409;
@@ -807,10 +827,9 @@ app.post('/api/collab/join-requests/resolve', collabLimiter, requireFirebaseUser
         return { status: 'rejected', collab: Boolean(trip.collab) };
       }
 
-      const memberEmails = Array.isArray(trip.memberEmails) ? trip.memberEmails.slice() : [];
-      if (!memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(ownerEmail))) {
-        memberEmails.push(ownerEmail);
-      }
+      assertLegacyMemberIdentity(trip, ownerEmail);
+      assertLegacyMemberIdentity(trip, requesterEmail);
+      const memberEmails = tripMemberEmails(trip);
       const alreadyMember = memberEmails.some((email) => normalizeEmail(email) === normalizeEmail(requesterEmail));
       const maxMembers = Math.min(Math.max(Number(trip.maxMembers) || 10, 1), 50);
       if (!alreadyMember && memberEmails.length >= maxMembers) {
@@ -820,10 +839,7 @@ app.post('/api/collab/join-requests/resolve', collabLimiter, requireFirebaseUser
       }
       if (!alreadyMember) memberEmails.push(requesterEmail);
 
-      // ⚠️ 已知風險（2026-07-26 Codex 審查 #4）：legacyMemberKey 把標點一律換成底線，
-      // a.b@x.com 與 a_b@x.com 會壓成同一個 key，理論上 requester 可覆蓋 owner 那筆。
-      // 這是既有 members schema 的沿襲問題（前端與 firestore.rules 目前都靠這個 key 對成員），
-      // 不是本次新引入；要根治得連同 rules 與前端一起遷移到 identityKey，故本批不動。
+      // 過渡期保留 legacy key，但上方已核對完整 email，碰撞時整筆交易不寫入。
       const members = trip.members && typeof trip.members === 'object' ? { ...trip.members } : {};
       const ownerKey = legacyMemberKey(ownerEmail);
       members[ownerKey] = {
