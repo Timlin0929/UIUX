@@ -53,16 +53,42 @@ Missing Firebase service account.
 
 ## 匯入 OpenData 景點
 
-先用預覽模式，不會寫入 Firebase：
+### 景點來源（`--source`）
+
+| 值 | 來源 | 狀態 |
+|---|---|---|
+| `taitung` | 台東觀光旅遊網 opendata（`tour.taitung.gov.tw`） | ✅ **可用，265 筆** |
+| `national` | 全國觀光 OpenData（`media.taiwan.net.tw`） | ❌ **已失效（404）** |
+| 省略＝`auto` | 先試 `national`，失效且目標是台東時自動改用 `taitung` | ✅ |
+
+**全國那支在 2026-09 實測回 404** —— 觀光署已把資料移到需要授權的 TDX
+（本專案的 `TDX_APP_ID` / `TDX_APP_KEY` 目前沒有設定，只有 `--enrich-fees -- --tdx` 會用到）。
+指定 `--source=national` 會直接丟例外並說明原因，不會靜默回 0 筆。
+若之後找到可用的全國來源，設 `OPENDATA_SOURCE_URL` 即可切回去。
+
+台東觀光網這支相較之下的優勢：
+
+- **100% 有地址（含鄉鎮）** → 行政區不必靠座標猜
+- **100% 有座標與圖片**（`photoUrl`，480×360）
+- `opentimeGoogle` 是 Google 的七行格式，正好是 `app/business-hours.js` 吃的格式
+  （實測 265 筆中 193 筆可解析、32 筆判為 unknown、40 筆沒有時間資料）
+
+> ⚠️ **圖片只寫進 Firestore（`photoUrl`），不會由 `export:local` 帶進 `app/poi-data.js`。**
+> 政府 opendata 的資料本身通常開放，但圖片授權不一定 —— 要先確認
+> `tour.taitung.gov.tw` 的使用條款。確認可用後，在 `toLocalPoi` 加一行 `photoUrl` 就能接上前端。
+
+### 執行
+
+先用預覽模式，不會寫入 Firebase，**也不會呼叫 Google API**（乾跑時跳過附近廁所查詢）：
 
 ```powershell
-npm run import:dry
+npm run import:taitung:dry
 ```
 
-確認輸出內容沒問題後，正式匯入：
+確認輸出內容沒問題後，正式匯入（這次會呼叫 Google API 查附近廁所）：
 
 ```powershell
-npm run import
+npm run import:taitung
 ```
 
 如果 PowerShell 擋住 npm，請改用：

@@ -8,6 +8,8 @@
     "dry": "node worker.js --dry-run",
     "import": "node worker.js --import",
     "import:dry": "node worker.js --import --dry-run",
+    "import:taitung": "node worker.js --import --source=taitung",
+    "import:taitung:dry": "node worker.js --import --source=taitung --dry-run",
     "export:local": "node worker.js --export-local",
     "export:local:dry": "node worker.js --export-local --dry-run",
     "verify:places": "node worker.js --verify-places",

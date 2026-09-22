@@ -29,7 +29,8 @@ The only npm project is the **crawler** ([crawler/](crawler/), run from that fol
 
 | Command | Purpose |
 |---|---|
-| `npm run import` (`import:dry`) | Taiwan tourism OpenData → Firestore `scenic_points` |
+| `npm run import:taitung` (`import:taitung:dry`) | **台東觀光旅遊網 opendata (265 spots) → Firestore `scenic_points`.** Use this one. 100% have address/coords/photo; `opentimeGoogle` is the same 7-line format `business-hours.js` parses. Photos land in Firestore as `photoUrl` but are **not** exported to `app/poi-data.js` (image licensing unconfirmed) |
+| `npm run import` (`import:dry`) | Same, `--source=auto`: tries the national feed first, falls back to Taitung. **The national feed (`media.taiwan.net.tw`) has been 404 since ~2026-09** — the tourism bureau moved it to the auth-gated TDX. `--source=national` now throws with an explanation instead of silently importing 0. Set `OPENDATA_SOURCE_URL` if a working national feed reappears |
 | `npm run verify:places` (`-- --force`, `-- --limit N`) | Strict-name-match each scenic point against Google Places; write back precise coords / hours / rating / `place_id` (keeps OpenData name) |
 | `npm run enrich:fees` (`-- --force`, `-- --loose`, `-- --tdx`) | Match real ticket prices (主來源: 台東觀光網 opendata, optional `--tdx` for nationwide TDX) → write `fee`/`feeNote`/`feeSource` back onto `scenic_points` |
 | `npm run export:local` (`export:local:dry`) | `scenic_points` → [app/poi-data.js](app/poi-data.js); also exports `parking_lots` → [app/parking-data.js](app/parking-data.js) when that collection is non-empty |

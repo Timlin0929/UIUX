@@ -548,9 +548,93 @@ async function fetchOfficialScenicSpots() {
     console.log('Loaded official OpenData scenic spots', spots.length);
     return spots;
   } catch (e) {
-    console.error('official opendata fetch error', e.message);
-    return [];
+    // 2026-09 實測：media.taiwan.net.tw 的 scenic_spot_C_f.json 回 404，
+    // 觀光署已把這份資料移到需要授權的 TDX。原本這裡吞掉錯誤回 []，
+    // 於是 processImport 只印「No official OpenData spots matched」，
+    // 看起來像「這個地區沒有資料」而不是「來源掛了」——排查會走錯方向。
+    console.error('全國觀光 OpenData 取得失敗：', OPENDATA_URL, '→', e.message);
+    if (e.response && e.response.status === 404) {
+      console.error('  這支來源已失效（觀光署資料改走需授權的 TDX）。');
+      console.error('  台東請改用：npm run import -- --source=taitung');
+    }
+    return null;   // null = 來源不可用；[] = 來源可用但沒資料。兩者必須分得開
   }
+}
+
+// ── 台東觀光旅遊網 opendata：景點來源 ────────────────────────────
+// 全國來源退役後，台東改以這支為主。相較之下它的優勢是：
+//   · 100% 有地址（含鄉鎮）→ 行政區不必用座標猜
+//   · 100% 有座標與圖片
+//   · opentimeGoogle 是 Google 的七行格式，正好是 business-hours.js 吃的格式
+// 需帶 X-Requested-With: XMLHttpRequest，否則會 302 轉走（與 buildTaitungFeeMap 同）。
+const TAITUNG_TOWNS = ['臺東市', '台東市', '成功鎮', '關山鎮', '長濱鄉', '海端鄉', '池上鄉',
+  '東河鄉', '鹿野鄉', '延平鄉', '卑南鄉', '金峰鄉', '太麻里鄉', '大武鄉', '達仁鄉', '綠島鄉', '蘭嶼鄉'];
+
+function taitungTownOf(address) {
+  const a = String(address || '').replace(/臺/g, '台');
+  const hit = TAITUNG_TOWNS.find((t) => a.includes(t.replace(/臺/g, '台')));
+  return hit ? hit.replace(/臺/g, '台') : null;
+}
+
+// 圖片是相對路徑（'~/image/52811/480x360'），要補成絕對網址才能用
+function taitungAbsoluteUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  return 'https://tour.taitung.gov.tw/' + s.replace(/^~?\//, '');
+}
+
+function normalizeTaitungOdSpot(raw) {
+  const name = String(raw && raw.name || '').trim();
+  if (!name) return null;
+  const parts = String(raw.latlng || '').split(',');
+  const lat = toNumber(parts[0]);
+  const lng = toNumber(parts[1]);
+  if (lat === null || lng === null) return null;
+
+  // opentimeGoogle 是七行 Google 格式，遠比 opentime 的自由文字（「全天候開放」）好解析
+  const gHours = Array.isArray(raw.opentimeGoogle) ? raw.opentimeGoogle.filter(Boolean) : [];
+  const openTime = gHours.length
+    ? gHours.join('\n').replace(/：/g, ': ')     // 全形冒號→半形，對齊 Places 的寫法
+    : String(raw.opentime || '').trim();
+
+  return {
+    id: raw.pid || (raw.id != null ? String(raw.id) : null),
+    name,
+    normalizedName: normalizeText(name),
+    lat,
+    lng,
+    city: '台東縣',
+    town: taitungTownOf(raw.address),
+    address: String(raw.address || '').replace(/臺/g, '台').trim(),
+    description: '',                              // 這支 opendata 沒有敘述欄位
+    openTime,
+    phone: String(raw.tel || '').trim(),
+    website: taitungAbsoluteUrl(raw.url),
+    photoUrl: taitungAbsoluteUrl(raw.img),
+    ticketText: String(raw.ticket || '').trim(),
+    updateTime: null
+  };
+}
+
+async function fetchTaitungScenicSpots() {
+  console.log('台東觀光網 opendata 抓取景點 …');
+  const r = await axios.get(TAITUNG_OD_ATTRACTIONS_URL, {
+    headers: {
+      'X-Requested-With': 'XMLHttpRequest',
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': 'https://tour.taitung.gov.tw/zh-tw/attraction',
+      'User-Agent': 'Mozilla/5.0'
+    },
+    timeout: 30000,
+    transformResponse: [(d) => d]        // 保留原字串，自行去 BOM 再解析
+  });
+  const payload = JSON.parse(String(r.data).replace(/^﻿/, ''));
+  const rows = extractOpenDataRows(payload);
+  const spots = rows.map(normalizeTaitungOdSpot).filter(Boolean);
+  const noTown = spots.filter((s) => !s.town).length;
+  console.log('台東觀光網景點', spots.length, '筆（無法判定鄉鎮：' + noTown + '）');
+  return spots;
 }
 
 function findOfficialSpot(name, region, spots) {
@@ -642,7 +726,8 @@ function makeDocId(spot) {
   return null;
 }
 
-async function buildImportedScenicPoint(spot) {
+async function buildImportedScenicPoint(spot, sourceLabel) {
+  const SRC = sourceLabel || 'official_opendata';
   const region = spot.town || spot.city || CRAWL_REGION;
   const docId = makeDocId(spot);
   
@@ -661,7 +746,9 @@ async function buildImportedScenicPoint(spot) {
   
   // Fetch nearby toilets
   let nearbyToiletLocations = [];
-  if (GOOGLE_KEY && spot.lat && spot.lng) {
+  // 乾跑不打 Google API：一次匯入 265 筆就是 265 次付費呼叫，
+  // 而 --dry-run 的用途是「看要寫什麼」，不需要真的去查廁所。
+  if (GOOGLE_KEY && !DRY && spot.lat && spot.lng) {
     nearbyToiletLocations = await fetchNearbyToilets(spot.lat, spot.lng);
     if (nearbyToiletLocations.length > 0) {
       console.log(`Found ${nearbyToiletLocations.length} nearby toilets for ${spot.name}`);
@@ -686,8 +773,8 @@ async function buildImportedScenicPoint(spot) {
     lng: spot.lng,
     formatted_address: spot.address || [spot.city, spot.town].filter(Boolean).join(''),
     tripTitle: `${region} 1\u5929\u5fae\u65c5\u884c`,
-    source: 'official_opendata',
-    crawl_source: 'official_opendata',
+    source: SRC,
+    crawl_source: SRC,
     crawl_confidence: 100,
     official_opendata_id: spot.id || null,
     official_opendata_name: spot.name,
@@ -703,6 +790,15 @@ async function buildImportedScenicPoint(spot) {
   if (spot.phone) data.phone = spot.phone;
   if (spot.website) data.website = spot.website;
   if (spot.updateTime) data.official_opendata_updated_at = spot.updateTime;
+  // 圖片先存進 Firestore，但「不」由 export:local 帶進 app/poi-data.js——
+  // 政府 opendata 的資料本身通常開放，圖片授權不一定，要先確認 tour.taitung.gov.tw
+  // 的使用條款。確認可用後，在 toLocalPoi 加一行 photoUrl 即可接上前端。
+  if (spot.photoUrl) {
+    data.photoUrl = spot.photoUrl;
+    data.photoSource = SRC;
+  }
+  // 門票原文；實際的 fee/feeNote 仍由 enrich-fees 解析後寫入，這裡只留原始字串備查
+  if (spot.ticketText) data.ticketText = spot.ticketText;
 
   return { docId, data };
 }
@@ -827,20 +923,47 @@ async function processImport(db) {
   console.log('Using Firestore collection', POI_COLLECTION);
   console.log('Import mode enabled for region', CRAWL_REGION);
 
-  const allOfficialSpots = await fetchOfficialScenicSpots();
-  const spots = allOfficialSpots
+  // 來源選擇：--source=taitung｜national（預設 auto）
+  //   auto = 先試全國來源；它已失效（回 null）且目標是台東時，自動改用台東觀光網。
+  const wanted = String(argv.source || process.env.IMPORT_SOURCE || 'auto').toLowerCase();
+  const isTaitung = /台東|臺東/.test(String(CRAWL_REGION || ''));
+  let allSpots = null;
+  let sourceLabel = null;
+
+  if (wanted === 'taitung') {
+    allSpots = await fetchTaitungScenicSpots();
+    sourceLabel = 'taitung_tour_opendata';
+  } else {
+    allSpots = await fetchOfficialScenicSpots();
+    sourceLabel = 'official_opendata';
+    if (allSpots === null) {
+      if (wanted === 'national') {
+        throw new Error('全國觀光 OpenData 來源不可用，且已指定 --source=national。改用 --source=taitung，或設定 OPENDATA_SOURCE_URL 指向可用的來源。');
+      }
+      if (!isTaitung) {
+        throw new Error(`全國觀光 OpenData 來源不可用，而 ${CRAWL_REGION} 沒有替代來源。`);
+      }
+      console.warn('→ 全國來源不可用，自動改用台東觀光網 opendata');
+      allSpots = await fetchTaitungScenicSpots();
+      sourceLabel = 'taitung_tour_opendata';
+    }
+  }
+
+  const spots = (allSpots || [])
     .filter((spot) => spotMatchesRegion(spot, CRAWL_REGION))
     .slice(0, IMPORT_LIMIT);
 
   if (!spots.length) {
-    console.log('No official OpenData spots matched import region', CRAWL_REGION);
+    // 這裡才是真的「來源可用但沒有符合的資料」
+    console.log('來源可用但沒有符合地區的景點', { region: CRAWL_REGION, source: sourceLabel, fetched: (allSpots || []).length });
     return;
   }
+  console.log('來源', sourceLabel, '→ 符合', CRAWL_REGION, '的景點', spots.length, '筆');
 
   let imported = 0;
   let skipped = 0;
   for (const spot of spots) {
-    const result = await buildImportedScenicPoint(spot);
+    const result = await buildImportedScenicPoint(spot, sourceLabel);
     if (!result || !result.docId) {
       console.log('Skipping spot without valid document id', spot.name);
       skipped += 1;
@@ -857,7 +980,7 @@ async function processImport(db) {
     imported += 1;
   }
 
-  console.log('Import summary', { region: CRAWL_REGION, imported, skipped, dryRun: DRY });
+  console.log('Import summary', { region: CRAWL_REGION, source: sourceLabel, imported, skipped, dryRun: DRY });
 }
 
 // 由景點的行政區資訊推導前端 explore wizard 使用的「目的地鍵」（dest token）
