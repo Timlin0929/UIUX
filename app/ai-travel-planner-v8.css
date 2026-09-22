@@ -4744,6 +4744,7 @@ button.notif-item { cursor: pointer; }
 }
 
 /* #6 手機操作列分層：桌機維持原樣（更多鈕隱藏、兩鈕直出） */
+#heroMoreGroup{display:contents;}
 #heroMoreBtn{display:none;}
 @media (max-width:1024px){
   .hero-actions{position:relative;}
@@ -6953,6 +6954,63 @@ button.notif-item { cursor: pointer; }
   word-break: normal;
 }
 
+/* 桌機行程卡採摘要瀏覽；低頻資料集中在單站編輯抽屜。 */
+.spot-card .stop-hours-row,
+.spot-card .stop-fee-row,
+.spot-card .stop-access-row,
+.spot-card .nearby-toilets-row,
+.spot-card .merged-subspots-row {
+  display: none;
+}
+
+.stop-edit-hint {
+  color: var(--ink3);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mobile-stop-actions { display: none; }
+
+.timeline-item[role="button"]:focus-visible .spot-card,
+.timeline-item.stop-editor-active .spot-card {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light), var(--shadow);
+  outline: none;
+}
+
+.stop-editor-backdrop[hidden] { display: none; }
+.stop-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 8800;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(24, 32, 29, 0.28);
+  backdrop-filter: blur(2px);
+}
+
+.stop-editor-drawer {
+  width: min(440px, 42vw);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -18px 0 48px rgba(21, 38, 59, 0.18);
+  padding: 26px 24px max(28px, env(safe-area-inset-bottom));
+  transform: translateX(20px);
+  opacity: 0;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.stop-editor-backdrop.open .stop-editor-drawer {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.stop-editor-drawer:focus { outline: none; }
+.stop-editor-drawer:focus-visible { box-shadow: -18px 0 48px rgba(21, 38, 59, 0.18), inset 0 0 0 3px var(--accent-light); }
+
 /* 共同行程相簿：外層只負責與旅記頁的版面銜接，內容樣式由 trip-photo-gallery.css 管理。 */
 .travellog-shared-gallery {
   margin-top: 18px;
@@ -7006,6 +7064,137 @@ button.notif-item { cursor: pointer; }
     padding: 14px 10px;
     border-radius: 16px;
   }
+}
+
+.stop-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stop-editor-heading { min-width: 0; }
+.stop-editor-kicker {
+  margin-bottom: 5px;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.stop-editor-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+.stop-editor-summary {
+  margin: 7px 0 0;
+  color: var(--ink2);
+  font-size: 13px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.stop-editor-close {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface2);
+  color: var(--ink2);
+  cursor: pointer;
+  font-size: 16px;
+  white-space: nowrap;
+}
+.stop-editor-close:hover { border-color: var(--accent); color: var(--accent-dark); }
+.stop-editor-body { display: flex; flex-direction: column; gap: 16px; padding-top: 18px; }
+.stop-editor-readonly {
+  border: 1px solid #f3d18a;
+  border-radius: 12px;
+  background: #fff8e8;
+  color: #8a5a00;
+  padding: 11px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  text-wrap: pretty;
+}
+.stop-editor-readonly.is-hidden { display: none; }
+.stop-editor-section {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface2);
+  padding: 15px;
+}
+.stop-editor-section h3 {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 14px;
+  white-space: nowrap;
+}
+.stop-editor-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.stop-editor-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.stop-editor-field > span:not(.sr-only) { color: var(--ink2); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.stop-editor-field input,
+.stop-editor-field select,
+.stop-editor-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 10px 11px;
+  font: inherit;
+}
+.stop-editor-field textarea { resize: vertical; min-height: 92px; line-height: 1.55; }
+.stop-editor-field input:focus,
+.stop-editor-field select:focus,
+.stop-editor-field textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-light); }
+.stop-editor-field :disabled { cursor: not-allowed; opacity: 0.7; }
+.stop-editor-help { margin: 10px 0 0; color: var(--ink3); font-size: 12px; line-height: 1.55; text-wrap: pretty; }
+.stop-editor-details { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+.stop-editor-details summary { color: var(--ink2); cursor: pointer; font-size: 13px; font-weight: 800; white-space: nowrap; }
+.stop-editor-details p { margin: 11px 0 0; color: var(--ink2); font-size: 13px; line-height: 1.7; text-wrap: pretty; }
+.stop-editor-secondary-actions,
+.stop-editor-footer { display: flex; gap: 10px; }
+.stop-editor-secondary-actions { padding-top: 2px; }
+.stop-editor-action,
+.stop-editor-cancel,
+.stop-editor-save {
+  min-height: 42px;
+  border-radius: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.stop-editor-action { flex: 1; border: 1px solid var(--border); background: var(--surface); color: var(--ink2); }
+.stop-editor-action.danger { border-color: #f3c5c5; color: #b42318; }
+.stop-editor-footer { position: sticky; bottom: -1px; padding-top: 12px; background: var(--surface); }
+.stop-editor-cancel { flex: 1; border: 1px solid var(--border); background: var(--surface2); color: var(--ink2); }
+.stop-editor-save { flex: 2; border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+
+@media (min-width: 1025px) {
+  .timeline .transit-mode-wrap { display: none; }
+}
+
+/* 桌機也降低次要資訊的視覺重量，避免每一列都與景點名稱搶焦點。 */
+.stop-hours-row,
+.stop-fee-row,
+.stop-access-row,
+.nearby-toilets-row {
+  color: var(--ink3);
+  line-height: 1.55;
+}
+
+.nearby-toilets-row {
+  margin-top: 2px;
 }
 
 @media (max-width: 1024px) {

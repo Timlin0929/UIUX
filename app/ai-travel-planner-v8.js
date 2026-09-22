@@ -43,6 +43,8 @@
   let activeReplanDeadlineAt = 0;
   let draggingStopId = null;
   let activeStopMenuId = null;
+  let activeStopEditorId = null;
+  let stopEditorReturnFocus = null;
   let isModifyWindowOpen = false;
   let modifyTargetStopId = null;
   let modifySource = 'wall';
@@ -2939,7 +2941,7 @@
     'mapPinId', 'manualStartMin', 'manualEndMin', 'placeId', 'businessHours',
     'coordVerified', 'desc', 'isMergedAttraction', 'mergedSubSpots',
     'mergedRadiusMeters', 'mergedMemberCoords', 'checkedInAt', 'isOutdoor', 'altNearby', 'dayIndex', 'dayIndexLocked',
-    'collabStopId', 'durationLocked'
+    'collabStopId', 'durationLocked', 'plannerNote'
   ]);
   function extractAppStopExtras(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -3206,6 +3208,7 @@
                     coordVerified: s.coordVerified || false, // 旗標必須跟著載入，否則存檔歸零、下次又全站重驗
                     businessHours: s.businessHours || null,
                     desc: s.desc || '',
+                    plannerNote: s.plannerNote || '',
                     isMergedAttraction: s.isMergedAttraction || false,
                     mergedSubSpots: s.mergedSubSpots || null,
                     mergedRadiusMeters: s.mergedRadiusMeters || null,
@@ -3299,6 +3302,7 @@
                 coordVerified: s.coordVerified || false, // 旗標必須跟著載入，否則存檔歸零、下次又全站重驗
                 businessHours: s.businessHours || scenicRecord?.businessHours || null,
                 desc: (scenicRecord?.desc || s.desc || ''),
+                plannerNote: s.plannerNote || '',
                 isMergedAttraction: s.isMergedAttraction || false,
                 mergedSubSpots: s.mergedSubSpots || null,
                 mergedRadiusMeters: s.mergedRadiusMeters || null,
@@ -5050,7 +5054,11 @@
   // UIUX#6：手機版把「網址匯入／匯出行程圖」收進「⋯ 更多」浮出選單（桌機兩鈕直出、更多鈕隱藏）
   function toggleHeroMore() {
     const g = document.getElementById('heroMoreGroup');
-    if (g) g.classList.toggle('open');
+    const btn = document.getElementById('heroMoreBtn');
+    if (g) {
+      const open = g.classList.toggle('open');
+      if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
   }
   document.addEventListener('click', (e) => {
     const g = document.getElementById('heroMoreGroup');
@@ -5059,6 +5067,7 @@
         && !g.contains(e.target)
         && !(btn && btn.contains(e.target))) {
       g.classList.remove('open');
+      if (btn) btn.setAttribute('aria-expanded', 'false');
     }
   });
 
@@ -9402,41 +9411,90 @@
     if (inserted) feedbackToast(`已加入「${place.name}」`, 'green');
   }
 
-  function adjustOverlappingStops(changedStopId) {
-    const changedIndex = replanStops.findIndex(stop => stop.id === changedStopId);
-    if (changedIndex < 0) return;
-    
-    const changedStop = replanStops[changedIndex];
-    let currentEndTime = changedStop.manualEndMin;
-    
-    // 檢查並調整所有後續停靠點
-    for (let i = changedIndex + 1; i < replanStops.length; i++) {
-      const nextStop = replanStops[i];
-      const nextStartTime = nextStop.manualStartMin;
-      
-      // 如果下一個停靠點的開始時間早於或等於當前結束時間，則發生重疊
-      if (nextStartTime <= currentEndTime) {
-        // 計算延遲的時間量（至少延遲5分鐘）
-        const overlap = currentEndTime - nextStartTime + 5;
-        const newStartTime = nextStartTime + overlap;
-        
-        // 更新下一個停靠點的開始時間
-        nextStop.manualStartMin = newStartTime;
-        
-        // 如果有手動設置的結束時間，也需要相應調整
-        if (Number.isFinite(nextStop.manualEndMin)) {
-          const duration = nextStop.manualEndMin - nextStartTime;
-          nextStop.manualEndMin = newStartTime + duration;
+  function stopDurationForCascade(stop, scheduledStop) {
+    const manualDuration = Number(stop && stop.manualEndMin) - Number(stop && stop.manualStartMin);
+    if (Number.isFinite(manualDuration) && manualDuration >= 5) return manualDuration;
+    const duration = Number(stop && stop.stayMin);
+    if (Number.isFinite(duration) && duration >= 5) return duration;
+    return Math.max(5, Number(scheduledStop && scheduledStop.computedStayMin) || 5);
+  }
+
+  // 回傳「前站離開到後站真正抵達」的完整時間。開車／機車除了道路時間，還要包含
+  // 從景點走回停車處及停妥後走到下一景點；跨日則不把過夜誤算成交通。
+  function cascadeTransitMinutes(stops, sourceIndex) {
+    const source = stops[sourceIndex];
+    const destination = stops[sourceIndex + 1];
+    if (!source || !destination) return 0;
+    const sourceDay = clampDayIndex(source.dayIndex, 1);
+    const destinationDay = clampDayIndex(destination.dayIndex, 1);
+    if (isMultiDayTrip(currentTripPreferences && currentTripPreferences.days) && sourceDay !== destinationDay) return 0;
+    const mode = getEffectiveStopTransitMode(source);
+    let minutes = normalizeTransitMinutesValue(source.transitMin);
+    if (!Number.isFinite(minutes)) minutes = getDefaultTransitMinutes(mode);
+    if (mode === 'car' || mode === 'scooter') {
+      const departWalk = Number(source.parkWalkMin);
+      const arriveWalk = Number(destination.parkWalkMin);
+      if (Number.isFinite(departWalk) && departWalk > 0) minutes += departWalk;
+      if (Number.isFinite(arriveWalk) && arriveWalk > 0) minutes += arriveWalk;
+    }
+    return Math.max(0, Number(minutes) || 0);
+  }
+
+  function cascadeOverlappingStopTimes(stops, changedIndex, schedule) {
+    if (!Array.isArray(stops) || changedIndex < 0 || changedIndex >= stops.length) return [];
+    const normalizedSchedule = Array.isArray(schedule) ? schedule : [];
+    const changed = [];
+    const anchor = stops[changedIndex];
+    const anchorScheduled = normalizedSchedule[changedIndex];
+    const anchorStart = Number.isFinite(anchor.manualStartMin)
+      ? anchor.manualStartMin : Number(anchorScheduled && anchorScheduled.start);
+    let previousEnd = Number.isFinite(anchor.manualEndMin)
+      ? anchor.manualEndMin
+      : anchorStart + stopDurationForCascade(anchor, anchorScheduled);
+    if (!Number.isFinite(previousEnd)) return changed;
+
+    for (let i = changedIndex + 1; i < stops.length; i++) {
+      const stop = stops[i];
+      const scheduledStop = normalizedSchedule[i];
+      const originalStart = Number.isFinite(stop.manualStartMin)
+        ? stop.manualStartMin : Number(scheduledStop && scheduledStop.start);
+      if (!Number.isFinite(originalStart)) continue;
+      const duration = stopDurationForCascade(stop, scheduledStop);
+      const feasibleArrival = previousEnd + cascadeTransitMinutes(stops, i - 1);
+
+      // 已經晚於可行抵達時間的使用者設定必須原封不動；只有早於或等於時才順延。
+      // 「等於」時數值雖不變，仍正規化 manualStart/End，避免 undefined 在下一輪變 NaN。
+      if (originalStart <= feasibleArrival) {
+        const newStart = feasibleArrival;
+        const newEnd = newStart + duration;
+        if (stop.manualStartMin !== newStart || stop.manualEndMin !== newEnd) {
+          stop.manualStartMin = newStart;
+          stop.manualEndMin = newEnd;
+          changed.push({ index: i, stopId: stop.id, start: newStart, end: newEnd });
         }
-        
-        // 更新當前結束時間為這個停靠點的新結束時間
-        currentEndTime = nextStop.manualEndMin || (newStartTime + nextStop.stayMin);
+        previousEnd = newEnd;
       } else {
-        // 如果沒有重疊，更新當前結束時間並繼續檢查
-        currentEndTime = nextStop.manualEndMin || (nextStartTime + nextStop.stayMin);
+        previousEnd = originalStart + duration;
       }
     }
+    return changed;
   }
+
+  function adjustOverlappingStops(changedStopId) {
+    const changedIndex = replanStops.findIndex(stop => stop.id === changedStopId);
+    if (changedIndex < 0) return [];
+    const changed = cascadeOverlappingStopTimes(replanStops, changedIndex, buildReplanSchedule());
+    if (changed.length) schedulePersistTrip();
+    return changed;
+  }
+
+  // 小型純函式測試入口：瀏覽器 Console 可直接餵入複製資料，不會改正式行程。
+  window.TravelLinkTestHelpers = Object.assign(window.TravelLinkTestHelpers || {}, {
+    cascadeOverlappingStopTimes(stops, changedIndex, schedule) {
+      const copies = (stops || []).map((stop) => ({ ...stop }));
+      return { stops: copies, changes: cascadeOverlappingStopTimes(copies, changedIndex, schedule) };
+    }
+  });
 
   // ══════════════════════════════════════════════════
   // UIUX#9 協作同步狀態（同步中／已同步／同步失敗＋重試）
@@ -9614,7 +9672,8 @@
       s.transitModeManual === true,
       Math.round(Number(s.parkWalkMin) || 0),
       s.manualStartMin ?? null, s.manualEndMin ?? null,
-      s.checkedInAt ?? null, Number(s.dayIndex) || 1, s.durationLocked === true
+      s.checkedInAt ?? null, Number(s.dayIndex) || 1, s.durationLocked === true,
+      s.plannerNote || ''
     ]));
   }
 
@@ -9645,6 +9704,7 @@
         businessHours: s.businessHours || null,
         coordVerified: s.coordVerified || false,
         desc: s.desc || '',
+        plannerNote: s.plannerNote || '',
         manualStartMin: s.manualStartMin ?? null,
         manualEndMin: s.manualEndMin ?? null,
         durationLocked: s.durationLocked === true,
@@ -9667,7 +9727,7 @@
 
   function applyCollabRemoteUpdate(data) {
     // 使用者正在拖曳/修改視窗開著/本地變更還沒存回 → 先擱置，稍後再套用（避免蓋掉手上的操作）
-    if (draggingStopId || isModifyWindowOpen || persistTripDebounceTimer || persistTripWriteActive) {
+    if (draggingStopId || isModifyWindowOpen || activeStopEditorId || persistTripDebounceTimer || persistTripWriteActive) {
       collabLivePendingData = data;
       clearTimeout(collabLiveRetryTimer);
       collabLiveRetryTimer = setTimeout(() => {
@@ -9838,6 +9898,7 @@
       businessHours: stop.businessHours || null,
       coordVerified: stop.coordVerified || false,
       desc: stop.desc || '',
+      plannerNote: stop.plannerNote || '',
       isMergedAttraction: stop.isMergedAttraction || false,
       mergedSubSpots: stop.mergedSubSpots || null,
       mergedRadiusMeters: stop.mergedRadiusMeters || null,
@@ -10666,7 +10727,7 @@
         </div>
       </div>
       <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `${getPrefsDayCount(currentTripPreferences || {}) >= 3 ? '三天兩夜' : '兩天一夜'}・第 ${getPrefsDayCount(currentTripPreferences || {})} 天 ${minutesToClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
-      <div class="stay-suggestion-note">可直接調整每個景點的建議停留時間，系統會即時重新計算後續行程。</div>
+      <div class="stay-suggestion-note">選取景點可查看詳細資訊與調整安排；儲存後系統會即時重新計算後續行程。</div>
     `;
 
     schedule.forEach((stop, index) => {
@@ -10745,11 +10806,11 @@
         actionButtonsHtml = collabReadOnly
           ? (isEndpointStop
             ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>`
-            : (stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>` : ''))
+            : (stop.stayMin > 0 ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span><span class="stop-edit-hint">查看詳情</span>` : ''))
           : (isEndpointStop ? `<span class="tag" style="background:var(--accent2-light);color:var(--accent2-dark);">${endpointLabel}</span>` : (stop.stayMin > 0 ? `
           <span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>
-          <button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${stop.id}')">調整</button>
-          ${buildStopMoreMenu(stop)}
+          <span class="stop-edit-hint">選取以編輯</span>
+          <span class="mobile-stop-actions"><button class="stay-edit-btn" onclick="event.stopPropagation(); openStayTimeAdjuster('${jsAttrStr(stop.id)}')">調整</button>${buildStopMoreMenu(stop)}</span>
         ` : ''));
       }
 
@@ -10760,7 +10821,7 @@
       }
 
       html += `
-        <div id="itinerary-stop-${stop.id}" class="${itemClasses}" onclick="openItineraryStop('${stop.id}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
+        <div id="itinerary-stop-${escapeHtml(stop.id)}" class="${itemClasses}" role="button" tabindex="0" aria-label="${collabReadOnly ? '查看' : '編輯'}景點：${escapeHtml(stop.name)}" onclick="openItineraryStop('${jsAttrStr(stop.id)}')" onkeydown="activateItineraryStopFromKeyboard(event, '${jsAttrStr(stop.id)}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
           <div class="time-box"><div class="time-val">${timeStr}</div></div>
           <div class="node"><div class="node-dot" ${nodeDotStyle}></div></div>
           <div class="content-box">
@@ -14613,6 +14674,192 @@
     renderRideMode(modeId);
   }
 
+  function isDesktopStopEditorAvailable() {
+    return !!(window.matchMedia && window.matchMedia('(min-width: 1025px)').matches);
+  }
+
+  function getStopEditorSchedule(stopId) {
+    return buildReplanSchedule().find((item) => item.id === stopId) || null;
+  }
+
+  function renderStopEditor(stopId) {
+    const body = document.getElementById('stopEditorBody');
+    const title = document.getElementById('stopEditorTitle');
+    const summary = document.getElementById('stopEditorSummary');
+    const stop = replanStops.find((item) => item.id === stopId);
+    if (!body || !title || !summary || !stop) return false;
+
+    const schedule = getStopEditorSchedule(stopId);
+    const stopIndex = replanStops.findIndex((item) => item.id === stopId);
+    const isEndpoint = stop.type === 'start' || stop.type === 'end';
+    const isLast = stopIndex === replanStops.length - 1;
+    const readOnly = collabReadOnly || currentTripStatus === 'ongoing';
+    const startValue = schedule && Number.isFinite(schedule.start) ? minutesToClock(schedule.start) : '';
+    const duration = Number(stop.stayMin) || Number(stop.computedStayMin) || 30;
+    const durationOptions = getSuggestedStayDurations(stop);
+    const currentMode = normalizeTransitMode(stop.transitMode);
+    const allowedModes = new Set(['walk', getPreferredVehicleMode(), currentMode]);
+    const modeOptions = TRANSIT_MODE_OPTIONS.filter((option) => allowedModes.has(option.value));
+    const detail = hasMeaningfulSpotDescription(stop.desc) ? String(stop.desc).trim() : '此景點目前沒有額外介紹。';
+
+    title.textContent = `${stop.emoji || '📍'} ${stop.name || '景點'}`;
+    summary.textContent = readOnly
+      ? '目前為唯讀狀態，可查看但不能變更這一站。'
+      : '集中調整這一站的時間、停留、交通與備註。';
+
+    body.innerHTML = `
+      <div class="stop-editor-readonly${readOnly ? '' : ' is-hidden'}" role="status">🔒 ${collabReadOnly ? '你的旅伴權限是唯讀。' : '行程進行中，站點設定暫停編輯。'}</div>
+      <section class="stop-editor-section" aria-labelledby="stopEditorTimeHeading">
+        <h3 id="stopEditorTimeHeading">時間安排</h3>
+        <div class="stop-editor-field-grid">
+          <label class="stop-editor-field">
+            <span>抵達時間</span>
+            <input id="stopEditorStart" type="time" value="${escapeHtml(startValue)}" ${readOnly ? 'disabled' : ''}>
+          </label>
+          <label class="stop-editor-field">
+            <span>停留時間</span>
+            <select id="stopEditorDuration" ${readOnly || isEndpoint ? 'disabled' : ''}>
+              ${durationOptions.map((minutes) => `<option value="${minutes}" ${minutes === duration ? 'selected' : ''}>${minutes < 60 ? `${minutes} 分鐘` : `${Math.floor(minutes / 60)} 小時${minutes % 60 ? ` ${minutes % 60} 分鐘` : ''}`}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        <p class="stop-editor-help">若新時間與後續行程重疊，系統會依序延後受影響的站點。</p>
+      </section>
+      ${isLast ? '' : `
+        <section class="stop-editor-section" aria-labelledby="stopEditorTransitHeading">
+          <h3 id="stopEditorTransitHeading">前往下一站</h3>
+          <label class="stop-editor-field">
+            <span>交通方式</span>
+            <select id="stopEditorTransit" ${readOnly ? 'disabled' : ''}>
+              ${modeOptions.map((option) => `<option value="${option.value}" ${option.value === currentMode ? 'selected' : ''}>${option.icon} ${option.label}</option>`).join('')}
+            </select>
+          </label>
+        </section>
+      `}
+      <section class="stop-editor-section" aria-labelledby="stopEditorNoteHeading">
+        <h3 id="stopEditorNoteHeading">行程備註</h3>
+        <label class="stop-editor-field">
+          <span class="sr-only">行程備註</span>
+          <textarea id="stopEditorNote" rows="4" maxlength="500" placeholder="例如：集合位置、訂位資訊或需要攜帶的物品" ${readOnly ? 'disabled' : ''}>${escapeHtml(stop.plannerNote || '')}</textarea>
+        </label>
+      </section>
+      <details class="stop-editor-details">
+        <summary>查看景點資訊</summary>
+        <p>${escapeHtml(detail)}</p>
+      </details>
+      ${readOnly ? '' : `
+        <div class="stop-editor-secondary-actions">
+          ${isEndpoint ? '' : `<button type="button" class="stop-editor-action" onclick="openStopReplacementFromEditor('${jsAttrStr(stop.id)}')">替換景點</button>`}
+          ${isEndpoint ? '' : `<button type="button" class="stop-editor-action danger" onclick="requestStopDeletionFromEditor('${jsAttrStr(stop.id)}')">刪除景點</button>`}
+        </div>
+        <div class="stop-editor-footer">
+          <button type="button" class="stop-editor-cancel" onclick="closeStopEditor()">取消</button>
+          <button type="button" class="stop-editor-save" onclick="saveStopEditor()">儲存變更</button>
+        </div>
+      `}
+    `;
+    return true;
+  }
+
+  function openStopEditor(stopId) {
+    if (!isDesktopStopEditorAvailable()) return false;
+    const backdrop = document.getElementById('stopEditorBackdrop');
+    const drawer = document.getElementById('stopEditorDrawer');
+    if (!backdrop || !drawer) return false;
+    stopEditorReturnFocus = document.activeElement;
+    activeStopEditorId = stopId;
+    if (!renderStopEditor(stopId)) {
+      activeStopEditorId = null;
+      return false;
+    }
+    backdrop.hidden = false;
+    requestAnimationFrame(() => {
+      backdrop.classList.add('open');
+      drawer.focus({ preventScroll: true });
+    });
+    document.body.classList.add('stop-editor-open');
+    const card = document.getElementById(`itinerary-stop-${stopId}`);
+    if (card) card.classList.add('stop-editor-active');
+    return true;
+  }
+
+  function closeStopEditor(options) {
+    const backdrop = document.getElementById('stopEditorBackdrop');
+    const previousId = activeStopEditorId;
+    activeStopEditorId = null;
+    document.body.classList.remove('stop-editor-open');
+    if (previousId) {
+      const card = document.getElementById(`itinerary-stop-${previousId}`);
+      if (card) card.classList.remove('stop-editor-active');
+    }
+    if (backdrop) {
+      backdrop.classList.remove('open');
+      backdrop.hidden = true;
+    }
+    if (!(options && options.skipFocus) && stopEditorReturnFocus && document.contains(stopEditorReturnFocus)) {
+      stopEditorReturnFocus.focus({ preventScroll: true });
+    }
+    stopEditorReturnFocus = null;
+  }
+
+  function saveStopEditor() {
+    if (collabReadOnly || currentTripStatus === 'ongoing' || !activeStopEditorId) return;
+    const stop = replanStops.find((item) => item.id === activeStopEditorId);
+    if (!stop) return closeStopEditor();
+    const startInput = document.getElementById('stopEditorStart');
+    const durationInput = document.getElementById('stopEditorDuration');
+    const transitInput = document.getElementById('stopEditorTransit');
+    const noteInput = document.getElementById('stopEditorNote');
+    const startMin = clockToMinutes(startInput && startInput.value);
+    const duration = Number(durationInput && durationInput.value);
+    if (!Number.isFinite(startMin) || (!Number.isFinite(duration) && stop.type !== 'start' && stop.type !== 'end')) {
+      feedbackToast('請確認抵達時間與停留時間', 'orange');
+      return;
+    }
+    stop.manualStartMin = startMin;
+    if (Number.isFinite(duration) && stop.type !== 'start' && stop.type !== 'end') {
+      stop.stayMin = duration;
+      stop.manualEndMin = startMin + duration;
+      stop.durationLocked = true;
+    } else {
+      stop.manualEndMin = startMin + Math.max(0, Number(stop.stayMin) || 0);
+    }
+    stop.plannerNote = String(noteInput && noteInput.value || '').trim().slice(0, 500);
+    if (transitInput) {
+      stop.transitMode = normalizeTransitMode(transitInput.value);
+      stop.transitModeManual = true;
+      stop.transitMin = null;
+      stop.parkWalkMin = null;
+    }
+    adjustOverlappingStops(stop.id);
+    closeStopEditor({ skipFocus: true });
+    renderItineraryDisplay();
+    refreshRouteDirections();
+    schedulePersistTrip();
+    const savedCard = document.getElementById(`itinerary-stop-${stop.id}`);
+    if (savedCard) savedCard.focus({ preventScroll: true });
+    feedbackToast('已儲存單站設定', 'green');
+  }
+
+  function openStopReplacementFromEditor(stopId) {
+    const stop = replanStops.find((item) => item.id === stopId);
+    closeStopEditor({ skipFocus: true });
+    if (stop && Array.isArray(stop.altNearby) && stop.altNearby.length) openSwapPanel(stopId);
+    else modifyStopById(stopId);
+  }
+
+  function requestStopDeletionFromEditor(stopId) {
+    closeStopEditor({ skipFocus: true });
+    removeStopById(stopId);
+  }
+
+  function activateItineraryStopFromKeyboard(event, stopId) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (event.target && event.target.closest('button, select, input, textarea, a')) return;
+    event.preventDefault();
+    openItineraryStop(stopId);
+  }
+
   function openItineraryStop(stopId) {
     const stop = replanStops.find(s => s.id === stopId) || replanStops.find(s => s.id.includes(stopId));
     if (!stop) {
@@ -14621,6 +14868,12 @@
     }
 
     switchView('itinerary');
+    const useDesktopEditor = isDesktopStopEditorAvailable();
+    if (useDesktopEditor) {
+      // 桌機抽屜已包含景點資訊；先關閉舊地圖浮窗，避免兩個面板重複且互相遮擋。
+      closePinInfo();
+      openStopEditor(stop.id);
+    }
     activeItineraryStopId = stop.id;
     // 自動聚焦該停靠點所屬的路線階段（不清除 activeItineraryStopId），讓地圖路線跳到該段並顯示 pin
     const _stopIdx = replanStops.findIndex(s => s.id === stop.id);
@@ -14632,7 +14885,7 @@
     }
     renderToiletMarkersForActiveRouteStage();
 
-    if (stop.mapPinId) {
+    if (stop.mapPinId && !useDesktopEditor) {
       showPinInfo(stop.mapPinId);
     }
 
@@ -18448,10 +18701,24 @@
 
   // ── a11y：Esc 關閉最上層彈窗（原本所有彈窗只能點外部/右上關閉，鍵盤無法操作）──
   document.addEventListener('keydown', (e) => {
+    const stopEditorBackdrop = document.getElementById('stopEditorBackdrop');
+    if (e.key === 'Tab' && stopEditorBackdrop && !stopEditorBackdrop.hidden) {
+      const focusable = Array.from(stopEditorBackdrop.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'))
+        .filter((el) => el.offsetParent !== null);
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!focusable.includes(document.activeElement)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+        else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      return;
+    }
     if (e.key !== 'Escape') return;
     const visible = (el) => el && getComputedStyle(el).display !== 'none';
     const openCls = (id) => { const el = document.getElementById(id); return el && el.classList.contains('open') ? el : null; };
     // 由「最上層/最 modal」往下嘗試，關掉第一個開著的就停
+    if (stopEditorBackdrop && !stopEditorBackdrop.hidden) { closeStopEditor(); return; }
     if (openCls('memoryStudioOverlay') && typeof closeMemoryStudio === 'function') { closeMemoryStudio(); return; }
     if (visible(document.getElementById('imgLightbox')) && typeof closeImageLightbox === 'function') { closeImageLightbox(); return; }
     if (visible(document.getElementById('noteModal'))) { closeNoteModal(); return; }

@@ -26,7 +26,7 @@
   </div>
   
   <div class="header-center">
-    <div class="nav-pill-group">
+    <div class="nav-pill-group" role="navigation" aria-label="旅程功能">
       <button class="nav-pill active" onclick="switchView('itinerary')">行程</button>
       <button class="nav-pill" onclick="switchView('budget')">預算</button>
       <button class="nav-pill" onclick="switchView('members')">旅伴</button>
@@ -46,7 +46,7 @@
     <div class="user-menu-wrap" id="userMenuWrap">
       <button class="login-prompt-btn" onclick="openLogin()">登入 / 註冊</button>
     </div>
-    <button class="tool-btn primary" onclick="toggleAI()"><svg class="wai-icon" aria-hidden="true"><use href="#wai-sparkles"></use></svg> AI 隨行管家</button>
+    <button class="tool-btn primary" onclick="toggleAI()" aria-label="開啟 AI 隨行管家"><svg class="wai-icon" aria-hidden="true"><use href="#wai-sparkles"></use></svg><span class="tool-btn-label">AI 隨行管家</span></button>
   </div>
 </header>
 
@@ -56,12 +56,12 @@
     
     <div id="view-itinerary" class="view-section active">
       <div class="hero-section">
-        <div class="hero-title">尚未載入行程</div>
+        <div class="hero-title" id="itineraryTitle">尚未載入行程</div>
         <div class="hero-meta">
           <div class="hero-tag">⏱️ 等待匯入時間</div>
           <div class="hero-tag">📍 等待匯入目的地</div>
         </div>
-        <div class="hero-actions" id="itineraryHeroActions">
+        <div class="hero-actions" id="itineraryHeroActions" role="toolbar" aria-label="行程操作">
           <label class="trip-vehicle-wrap" id="tripPrimaryVehicleWrap" title="切換全程主要交通工具（走路的路段不受影響）" style="display:none;">
             🚦 主要交通工具
             <select id="tripPrimaryVehicleSelect" class="trip-vehicle-select" onchange="setTripPrimaryVehicle(this.value)">
@@ -70,18 +70,18 @@
               <option value="car">🚗 汽車</option>
             </select>
           </label>
-          <button class="replan-btn secondary" id="replanEditOrderBtn" onclick="enterReplanMode()">✏️ 調整順序</button>
-          <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
           <button class="replan-btn primary" id="replanStartTripBtn" onclick="startTripProgress()" style="display:none;">▶ 開始行程</button>
           <button class="replan-btn primary" id="replanCompleteTripBtn" onclick="window.markTripAsCompleted()" style="display:none;">🏁 結束行程</button>
           <button class="replan-btn secondary" id="replanResetTripBtn" onclick="window.resetTripProgress()" style="display:none;">↩ 重設進度</button>
           <span id="heroMoreGroup">
+            <button class="replan-btn secondary" id="replanEditOrderBtn" onclick="enterReplanMode()">✏️ 調整順序</button>
+            <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
             <button class="replan-btn maps-route-btn" onclick="openFullTripNavigation()" title="以 Google Maps 開啟整趟路線" aria-label="以 Google Maps 開啟整趟路線（新分頁）">🗺 Google Maps 路線 <span aria-hidden="true">↗</span></button>
             <button class="replan-btn secondary" onclick="openMapShareDialog()" title="分享整趟 Google Maps 路線">📤 分享地圖</button>
             <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
             <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           </span>
-          <button class="replan-btn secondary" id="heroMoreBtn" onclick="toggleHeroMore()" aria-label="更多操作"><svg class="wai-icon" aria-hidden="true"><use href="#wai-more-horizontal"></use></svg> 更多</button>
+          <button class="replan-btn secondary" id="heroMoreBtn" onclick="toggleHeroMore()" aria-label="更多行程操作" aria-controls="heroMoreGroup" aria-haspopup="menu" aria-expanded="false"><svg class="wai-icon" aria-hidden="true"><use href="#wai-more-horizontal"></use></svg> 更多</button>
           <button class="replan-btn primary" id="replanApplyBtn" onclick="applyReplan()" style="display:none;">套用新規劃</button>
           <button class="replan-btn secondary" id="replanCancelBtn" onclick="cancelReplan()" style="display:none;">取消</button>
           <div class="prototype-id-chip" id="prototypeTripId">原型資料</div>
@@ -683,6 +683,22 @@
       <div class="replan-gen-cursor" id="replanGenCursor">◌</div>
     </div>
   </div>
+</div>
+
+<!-- ─── OVERLAY: DESKTOP SINGLE-STOP EDITOR ───
+     必須直屬 body；放進 .left-panel 會受其 stacking context 限制，遭頁首與地圖浮窗覆蓋。 -->
+<div class="stop-editor-backdrop" id="stopEditorBackdrop" hidden onclick="if(event.target===this)closeStopEditor()">
+  <aside class="stop-editor-drawer" id="stopEditorDrawer" role="dialog" aria-modal="true" aria-labelledby="stopEditorTitle" aria-describedby="stopEditorSummary" tabindex="-1">
+    <div class="stop-editor-header">
+      <div class="stop-editor-heading">
+        <div class="stop-editor-kicker">單站設定</div>
+        <h2 class="stop-editor-title" id="stopEditorTitle">編輯景點</h2>
+        <p class="stop-editor-summary" id="stopEditorSummary">集中調整這一站的時間、停留與交通方式。</p>
+      </div>
+      <button class="stop-editor-close" type="button" onclick="closeStopEditor()" aria-label="關閉單站設定">✕</button>
+    </div>
+    <div class="stop-editor-body" id="stopEditorBody"></div>
+  </aside>
 </div>
 
 <!-- ─── OVERLAY: LOGIN ─── -->
