@@ -53,3 +53,8 @@ __pycache__/
 
 # 回顧短片 App 交接文件（僅內部傳閱，不進版控）
 TRAVEL_STORY_RECAP_APP_HANDOFF.md
+RECAP_VIDEO_TEMPLATE_HANDOFF.md
+457aebc3781c4d5d96a2544eada951e7.mov
+
+# 探索首頁改版 DEMO（設計對照用，不進版控）
+prototypes/explore-home-redesign.html
