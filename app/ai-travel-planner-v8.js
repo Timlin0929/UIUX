@@ -7576,8 +7576,9 @@
       applyExportTimeFit(); // 進入匯出分頁先檢查並壓縮超時行程，摘要與後續生成皆用壓縮後排程
       const mapShareInfo = getFullTripNavigationInfo();
       const mapShareUrl = mapShareInfo ? mapShareInfo.url : '';
-      const mapShareQr = mapShareUrl
-        ? `https://api.qrserver.com/v1/create-qr-code/?size=132x132&data=${encodeURIComponent(mapShareUrl)}`
+      // 本地產生，不把路線網址送給第三方服務（見 app/qr-encode.js）
+      const mapShareQr = (mapShareUrl && typeof WAIQR !== 'undefined' && WAIQR)
+        ? (WAIQR.toDataURL(mapShareUrl, { size: 132 }) || '')
         : '';
       bodyEl.innerHTML = `
         <div class="travel-panel maps-share-panel">
@@ -7594,7 +7595,9 @@
                 </div>
                 ${mapShareInfo.omittedStops > 0 ? `<div class="travel-hint">Google Maps 最多支援 9 個中停點，目前省略 ${mapShareInfo.omittedStops} 站。</div>` : ''}
               </div>
-              <img class="maps-share-qr" src="${mapShareQr}" alt="Google Maps 路線 QR Code" loading="eager">
+              ${mapShareQr
+                ? `<img class="maps-share-qr" src="${mapShareQr}" alt="Google Maps 路線 QR Code" loading="eager">`
+                : '<div class="travel-hint maps-share-qr-fallback">站點較多、路線網址太長，無法產生 QR；請用上方的「複製連結」分享。</div>'}
             </div>
           ` : '<div class="travel-hint">目前至少需要兩個有座標的站點，才能建立 Google Maps 分享連結。</div>'}
         </div>
@@ -11090,9 +11093,11 @@
       const share = currentTripShareToken
         ? `${location.origin}${location.pathname}?sharedId=${encodeURIComponent(currentItineraryId)}&token=${encodeURIComponent(currentTripShareToken)}&guest=1`
         : (currentInviteCode || '');
-      qrEl.innerHTML = share
-        ? `<img alt="邀請 QR" loading="lazy" style="width:100%;height:100%;border-radius:10px;object-fit:contain;" src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(share)}">`
-        : '邀請碼產生中…';
+      // 本地產生，不把含 token 的邀請連結送給第三方服務（見 app/qr-encode.js）
+      const shareQr = (share && typeof WAIQR !== 'undefined' && WAIQR) ? WAIQR.toDataURL(share, { size: 120 }) : '';
+      qrEl.innerHTML = shareQr
+        ? `<img alt="邀請 QR" style="width:100%;height:100%;border-radius:10px;object-fit:contain;" src="${shareQr}">`
+        : (share ? '請改用邀請碼加入' : '邀請碼產生中…');
       if (hintEl) hintEl.textContent = share ? '讓朋友掃描 QR，或輸入上方邀請碼即可加入' : '邀請碼產生中…';
     }
   }
