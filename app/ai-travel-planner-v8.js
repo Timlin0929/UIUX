@@ -10903,8 +10903,15 @@
         // 回報存活於 tripProgress，不像 routeStageCache 會被重畫沖掉。
         const latestReport = getLatestParkingReport(nextStop.id);
         const reportWarnText = latestReport ? PARKING_REPORT_WARN[latestReport.type] : '';
+        // 「找不到」和「有但走得比較遠」是兩回事。只有真的一無所獲才說找不到，
+        // 否則就把最近那一座講出來——使用者要的是資訊，不是一句否定。
+        // nextStop 是 schedule 的項目，不是 replanStops 的元素——用 indexOf 會永遠拿到 -1。
+        // schedule 由 buildReplanSchedule 依序產生，與 replanStops 是 1:1，直接用索引對應。
+        const farParking = _nearestFarParkingByStopIndex[index + 1];
         const systemWarnText = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
-          ? '⚠️ 目的地停車：找不到鄰近停車場，請預留路邊或付費停車的時間。'
+          ? (farParking
+            ? `🅿️ 目的地停車：最近是「${farParking.name}」，停好後步行約 ${Math.max(1, Math.round(farParking.walkSeconds / 60))} 分鐘。`
+            : '⚠️ 目的地停車：附近查不到停車場資料，請預留路邊或付費停車的時間。')
           : '';
         // 有人回報「我停好了」（found）就不顯示任何警告，即使系統自己找不到停車場
         const warnText = latestReport
@@ -16789,17 +16796,61 @@
     return `${Number(c.lat).toFixed(4)},${Number(c.lng).toFixed(4)}`;
   }
 
-  // 只接受能由 Directions 驗證、且實際步行時間在門檻內的候選，避免顯示不確定的遠距停車場。
-  async function pickWalkableParking(center, candidates) {
-    for (const cand of (candidates || [])) {
+  // 直線距離換算的步行秒數。1.25 m/s 是一般成人步速，1.35 是「路網不是直線」的繞路係數
+  // （實測台東市區的停車場→景點，Directions 距離大致是直線的 1.3～1.4 倍）。
+  const WALK_SPEED_MPS = 1.25;
+  const WALK_DETOUR_FACTOR = 1.35;
+  function estimateWalkSeconds(from, to) {
+    const m = measureDistanceMeters(from, to);
+    if (!Number.isFinite(m)) return null;
+    return Math.round((m * WALK_DETOUR_FACTOR) / WALK_SPEED_MPS);
+  }
+
+  // 優先用 Directions 驗證實際步行時間；但 Directions「沒有回答」不等於「這裡沒有停車場」。
+  //
+  // 原本只要 resolveWalkRoute 回 null 就淘汰候選，於是一趟 7 站 × 最多 4 個候選 ＝ 一次送出
+  // 28 個步行請求，只要被限流（OVER_QUERY_LIMIT）或 directionsService 還沒就緒，全部候選都會
+  // 被判死，畫面就每一段都掛「找不到鄰近停車場」。實測台東森林公園旁有一筆名字就叫
+  // 「台東森林公園第一停車場」、距離 593 公尺的本地資料，仍被誤報成找不到。
+  //
+  // 改成：Directions 有答案就照舊嚴格判定；沒答案才退回直線距離推估，並標記 walkEstimated，
+  // 讓 UI 能說明這是估計值而不是實測。寧可說「約 8 分鐘（估計）」，也不要謊稱沒有停車場。
+  //
+  // 另外：通過不了門檻 ≠ 附近沒有停車場。大型景區的座標是「園區中心」而不是入口，
+  // 實測台東森林公園第一停車場離園區中心 593 公尺、Directions 給 14 分鐘，超過 12 分門檻，
+  // 於是畫面印出「找不到鄰近停車場」——但停車場就在那裡。這是在講假話。
+  // 所以把「最近但太遠」的那個也記下來（outInfo.nearestFar），交給 UI 照實說明。
+  async function pickWalkableParking(center, candidates, outInfo) {
+    const list = candidates || [];
+    let estimatedFallback = null;
+    for (const cand of list) {
       const route = await resolveWalkRoute(cand, center, 'validate');
       const leg = route && route.routes && route.routes[0] && route.routes[0].legs && route.routes[0].legs[0];
       const sec = leg && leg.duration ? Number(leg.duration.value) : null;
-      if (Number.isFinite(sec) && sec <= PARKING_MAX_WALK_SECONDS) {
-        return { ...cand, walkSeconds: sec, parkingSource: cand.parkingSource || 'api' };
+      if (Number.isFinite(sec)) {
+        // Directions 給了明確答案：在門檻內就採用，超過門檻就是真的太遠，跳過。
+        if (sec <= PARKING_MAX_WALK_SECONDS) {
+          return { ...cand, walkSeconds: sec, parkingSource: cand.parkingSource || 'api' };
+        }
+        // 太遠，不自動採用，但記下來讓使用者知道「最近的在哪、要走多久」
+        if (outInfo && (!outInfo.nearestFar || sec < outInfo.nearestFar.walkSeconds)) {
+          outInfo.nearestFar = { name: cand.name, walkSeconds: sec };
+        }
+        continue;
+      }
+      // Directions 沒有回答——保留第一個「直線推估也在門檻內」的候選當退路，
+      // 但先繼續問完其他候選，實測值永遠優先於推估值。
+      if (!estimatedFallback) {
+        const est = estimateWalkSeconds(cand, center);
+        if (Number.isFinite(est) && est <= PARKING_MAX_WALK_SECONDS) {
+          estimatedFallback = {
+            ...cand, walkSeconds: est, walkEstimated: true,
+            parkingSource: cand.parkingSource || 'api'
+          };
+        }
       }
     }
-    return null;
+    return estimatedFallback;
   }
 
   // 台東縣府公有／民營路外停車場（app/parking-data.js，crawler `crawl:parking`＋`export:local` 產生）。
@@ -16834,7 +16885,7 @@
   }
 
   // 解析某景點最近、步行 ≤12 分鐘可達的停車點：景點資料 → 本地縣府資料 → TDX → Google Places。
-  async function resolveParkingCoord(center, stop = null) {
+  async function resolveParkingCoord(center, stop = null, outInfo = null) {
     if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) {
       return null;
     }
@@ -16873,18 +16924,18 @@
       const isIsland = typeof getIslandFerryConfig === 'function' && !!getIslandFerryConfig(currentTripRegion);
       if (county === 'Taitung' && !isIsland) {
         const localList = getLocalParkingList();
-        const chosenLocal = await pickWalkableParking(center, nearbyTdxParkings(center, localList, PARKING_SEARCH_RADIUS_METERS, PARKING_CANDIDATE_LIMIT));
+        const chosenLocal = await pickWalkableParking(center, nearbyTdxParkings(center, localList, PARKING_SEARCH_RADIUS_METERS, PARKING_CANDIDATE_LIMIT), outInfo);
         if (chosenLocal) return finish(chosenLocal);
       }
       // 2) TDX 候選 → 用步行時間挑
       if (county) {
         const list = await fetchTdxParking(county);
-        const chosen = await pickWalkableParking(center, nearbyTdxParkings(center, list, PARKING_SEARCH_RADIUS_METERS, PARKING_CANDIDATE_LIMIT));
+        const chosen = await pickWalkableParking(center, nearbyTdxParkings(center, list, PARKING_SEARCH_RADIUS_METERS, PARKING_CANDIDATE_LIMIT), outInfo);
         if (chosen) return finish(chosen);
       }
       // 3) Places 候選 → 用步行時間挑
       const placeCands = await listParkingFromPlaces(center);
-      const chosen2 = await pickWalkableParking(center, placeCands);
+      const chosen2 = await pickWalkableParking(center, placeCands, outInfo);
       return finish(chosen2);
     } catch (e) {
       return finish(null);
@@ -16968,6 +17019,10 @@
   }
 
   // 對所有「開車類」路段的目的地景點平行解析停車點，回傳 { stopIndex: {lat,lng,name}|null }
+  // 找不到「步行可達」的停車點時，這裡記下同一站「最近但超過門檻」的那一個，
+  // 讓警告文字能說出實情（哪一座、要走多久），而不是一句「找不到鄰近停車場」。
+  const _nearestFarParkingByStopIndex = {};
+
   async function resolveParkingForStages(locations, renderToken) {
     const parkingByStopIndex = {};
     const tasks = [];
@@ -16978,11 +17033,13 @@
       const di = dest.stopIndex;
       if (Object.prototype.hasOwnProperty.call(parkingByStopIndex, di)) continue;
       parkingByStopIndex[di] = null;
+      const info = {};
       tasks.push(
         _promiseWithTimeout(resolveParkingCoord(
           { lat: Number(dest.lat), lng: Number(dest.lng) },
-          replanStops[di] || null
-        ), 9000)
+          replanStops[di] || null,
+          info
+        ).then((p) => { _nearestFarParkingByStopIndex[di] = info.nearestFar || null; return p; }), 9000)
           .then((p) => { if (renderToken === routeRenderToken) parkingByStopIndex[di] = p || null; })
           .catch(() => {})
       );
@@ -17723,7 +17780,13 @@
                 <span class="stage-meta-text">${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}</span>
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
-                ${(isParkingMode && !destParking) ? `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ 目的地（${escapeHtml(shortStopName(destination.name || destination.title || '下一站'))}）找不到鄰近停車場，請自行尋找路邊或付費停車</span>` : ''}
+                ${(isParkingMode && !destParking) ? (() => {
+                  const far = _nearestFarParkingByStopIndex[destination.stopIndex];
+                  const who = escapeHtml(shortStopName(destination.name || destination.title || '下一站'));
+                  return far
+                    ? `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;">🅿️ ${who}：最近的停車場是「${escapeHtml(far.name)}」，步行約 ${Math.max(1, Math.round(far.walkSeconds / 60))} 分鐘</span>`
+                    : `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ ${who}：附近查不到停車場資料，請自行尋找路邊或付費停車</span>`;
+                })() : ''}
               </div>
               ${altEligible ? `<button type="button" class="route-alt-btn" onclick="event.stopPropagation();openRouteAlternatives(${i})">🔀 替代路線 (${routeAlts.length})</button>` : ''}
             `;
@@ -17758,6 +17821,16 @@
                   const label = destParking.parkingSource === 'mine' ? '' : `${destParking.name}：`;
                   note.textContent = `🅿️ ${label}${sourceNote}`;
                   note.style.display = 'block';
+                }
+              }
+              // Directions 沒驗成、改用直線推估挑到的停車場：先寫一行「估計」文字。
+              // 若下面的 drawWalkOverlay 拿得到真實步行路線，會覆蓋成實測值。
+              if (destParking.walkEstimated && !sourceNote) {
+                const estNote = stageDiv.querySelector('.stage-walk-note');
+                if (estNote) {
+                  const mins = Math.max(1, Math.round(Number(destParking.walkSeconds || 0) / 60));
+                  estNote.textContent = `🅿️ ${destParking.name}：步行約 ${mins} 分鐘（依直線距離估計）`;
+                  estNote.style.display = 'block';
                 }
               }
               drawWalkOverlay(i, destParking, destination, renderToken).then((walk) => {
@@ -17841,6 +17914,11 @@
         }
       );
     }
+    // 左側時間軸在停車解析完成之前就畫好了，於是右側階段卡已寫出「最近的停車場是 X」，
+    // 左邊卻還停在「附近查不到停車場資料」。解析完後重畫一次，兩邊才會講同一件事。
+    // 用 scheduleParkWalkRefresh：scheduleDisplayRefit 只在「排程真的被壓縮過」時才重畫
+    // （fit.changed），停車訊息變了但時間沒變的情況它不會動，左邊就一直是舊文字。
+    if (typeof scheduleParkWalkRefresh === 'function') scheduleParkWalkRefresh();
     });
   }
 
