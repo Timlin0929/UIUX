@@ -37,7 +37,17 @@
   let plannerNotifFilter = 'all';
   let plannerNotifLoaded = false;
   let currentTripDepartureDate = '';
-  const isPrototypeMode = true;
+  // 行程 id 的除錯 chip（畫面右上角的「原型 my_1••••59」）。
+  // 這是開發期辨識用的，終端使用者看到只會困惑「原型」是什麼意思；改成明確開啟制。
+  const isPrototypeMode = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('debug') === '1') { localStorage.setItem('wai_show_debug_chip', '1'); return true; }
+      if (params.get('debug') === '0') { localStorage.removeItem('wai_show_debug_chip'); return false; }
+      if (localStorage.getItem('wai_show_debug_chip') === '1') return true;
+      return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    } catch (_e) { return false; }
+  })();
   let isReplanning = false;
   // 多個外部查詢會在一次重新規劃中累加；整輪也必須有上限，避免介面長時間被鎖定。
   let activeReplanDeadlineAt = 0;
@@ -5304,9 +5314,30 @@
     };
   }
 
+  /**
+   * API 用量統計是「營運自己看的」，不是旅費。
+   * 一般使用者在預算頁看到「NT$49.35／12,620 Tokens／places:searchNearby|…」只會以為
+   * 這趟要跟他收這筆錢，而且那串原始 API method 對他毫無意義。
+   * 與展示模擬一樣採明確開啟制：?cost=1 或本機儲存旗標，localhost 預設開著方便開發。
+   */
+  function isApiCostPanelVisible() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('cost') === '1') { localStorage.setItem('wai_show_api_cost', '1'); return true; }
+      if (params.get('cost') === '0') { localStorage.removeItem('wai_show_api_cost'); return false; }
+      if (localStorage.getItem('wai_show_api_cost') === '1') return true;
+      return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    } catch (_e) { return false; }
+  }
+
   async function renderApiCost() {
     const host = ensureApiCostHost();
     if (!host) return;
+    if (!isApiCostPanelVisible()) {
+      host.style.display = 'none';
+      host.innerHTML = '';
+      return;
+    }
     if (!window.WAI_COST || !currentItineraryId || currentItineraryId === 'TRIP-EMPTY') {
       host.style.display = 'none';
       return;
