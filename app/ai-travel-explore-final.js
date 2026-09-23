@@ -1939,19 +1939,22 @@ function buildNearestNeighborRoute(stops, startIndex, wizardData = {}) {
   return route;
 }
 
-function improveRouteWithTwoOpt(route, lockFirstStop = false, wizardData = {}) {
+function improveRouteWithTwoOpt(route, lockFirstStop = false, wizardData = {}, lockLastStop = false) {
   if (!Array.isArray(route) || route.length < 4) return Array.isArray(route) ? [...route] : [];
   let bestRoute = [...route];
   let bestDistance = getRouteDistanceMeters(bestRoute, wizardData);
   if (!Number.isFinite(bestDistance)) return [...route];
 
   const segmentStart = lockFirstStop ? 1 : 0;
+  // lockLastStop：終點錨點必須留在原位，否則 2-opt 會把它翻到中間，
+  // 回程那一段就不再是「最後一段」，整個閉環的意義就沒了。
+  const segmentEnd = lockLastStop ? bestRoute.length - 1 : bestRoute.length;
   let improved = true;
 
   while (improved) {
     improved = false;
     for (let i = segmentStart; i < bestRoute.length - 2; i += 1) {
-      for (let j = i + 1; j < bestRoute.length; j += 1) {
+      for (let j = i + 1; j < segmentEnd; j += 1) {
         const candidate = [...bestRoute];
         const reversedSegment = candidate.slice(i, j + 1).reverse();
         candidate.splice(i, reversedSegment.length, ...reversedSegment);
@@ -2246,16 +2249,27 @@ function sortStopsByNearestRoute(stops, wizardData = {}) {
 
 // 最後輸出前再重排中段站，避免合併/補景點後出現南北來回跑：
 // 以「起點座標」為錨點（鎖第一站）跑最近鄰 + 2-opt，讓中段沿路單調前進；無座標站附到尾端。
-function reorderStopsAlongRoute(middleStops, startCoords, wizardData = {}) {
+function reorderStopsAlongRoute(middleStops, startCoords, wizardData = {}, endCoords = null) {
   if (!Array.isArray(middleStops) || middleStops.length < 3) return middleStops;
   const coordStops = middleStops.filter(s => getStopCoordinate(s));
   const noCoordStops = middleStops.filter(s => !getStopCoordinate(s));
   if (coordStops.length < 3 || !startCoords || !Number.isFinite(Number(startCoords.lat))) return middleStops;
   const anchor = { name: '出發', type: 'start', lat: Number(startCoords.lat), lng: Number(startCoords.lng) };
-  const seq = [anchor, ...coordStops];
+
+  // ⚠ 終點錨點不能省。原本只鎖起點跑「開放路徑」最佳化，等於告訴演算法「走到哪算哪」，
+  //   但實際行程一定要回到終點（多半就是出發的台東車站）。少了回程那一段的成本，
+  //   離起點最遠的景點很自然會被排到倒數——實測就出現「加路蘭 → 初鹿牧場(11km 往內陸)
+  //   → 鯉魚山(12.7km 回市區) → 車站」這種折返。把終點放進序列並鎖住尾端，
+  //   最佳化看到的才是真正的閉環。
+  const end = endCoords && Number.isFinite(Number(endCoords.lat)) ? endCoords : startCoords;
+  const endAnchor = { name: '返回', type: 'end', lat: Number(end.lat), lng: Number(end.lng) };
+
+  const seq = [anchor, ...coordStops, endAnchor];
   const nn = buildNearestNeighborRoute(seq, 0, wizardData);
-  const opt = improveRouteWithTwoOpt(nn, true, wizardData); // lockFirstStop：鎖住起點錨點
-  const ordered = opt.filter(s => s !== anchor);
+  // 最近鄰會把終點錨點吃進中間，先抽出來再放回尾端，2-opt 才有正確的閉環可改善
+  const nnNoEnd = nn.filter(s => s !== endAnchor);
+  const opt = improveRouteWithTwoOpt([...nnNoEnd, endAnchor], true, wizardData, true);
+  const ordered = opt.filter(s => s !== anchor && s !== endAnchor);
   if (ordered.length !== coordStops.length) return middleStops; // 防呆：數量對不上就不動
   return noCoordStops.length ? [...ordered, ...noCoordStops] : ordered;
 }
@@ -3274,23 +3288,46 @@ function fitGeneratedStopsToTimeLimit(stops, wizardData = {}) {
     if (applied <= 0) break;
   }
 
-  // 殘量收尾（精準落點優先）：守 35% 後若仍超出（額度用罄），允許從「停留最久」的景點再多扣
-  // （可略超過 35%，但每站至少保留 HARD_MIN 分），把剩餘分鐘扣到剛好落在設定時長。餐廳仍不扣。
-  const HARD_MIN = 5;
+  // 殘量收尾：守 35% 後若仍超出，再從「停留最久」的景點多扣一點。
+  //
+  // ⚠ 這裡原本的下限是 5 分鐘，結果是把時間硬塞進固定站數——實測 8 小時排 7 站時，
+  //   poi-data 建議停留 40 分的卑南大圳水利公園被壓到 12 分。開 2.2 公里去待 12 分鐘
+  //   不是一個「站」，使用者看到的是一份每站都來不及看的行程。
+  //
+  //   改成：下限提高到「還算得上有去過」的 MEANINGFUL_MIN，但不超過該站原本的建議時長
+  //   （資料本來就說 15 分鐘的小景點，不該被硬拉到 20）。扣到下限仍然放不下時，
+  //   寧可整站拿掉，也不要讓每一站都變成打卡點——少一站的行程比七站走馬看花好。
+  const MEANINGFUL_MIN = 20;
+  const floorOf = (t) => Math.min(MEANINGFUL_MIN, t.orig || MEANINGFUL_MIN);
   guard = 0;
   while (guard++ < 4000) {
     const overflow = estimateTripMinutes(stops) - targetMin;
     if (overflow <= 0) break;
-    const cands = info.filter(t => t.eligible && stayOf(t.stop) > HARD_MIN);
-    if (!cands.length) break;
-    cands.sort((a, b) => stayOf(b.stop) - stayOf(a.stop));
-    const t = cands[0];
-    const cur = stayOf(t.stop);
-    const cut = Math.min(cur - HARD_MIN, overflow);
-    if (cut <= 0) break;
-    const nv = cur - cut;
-    t.stop.duration = nv;
-    t.stop.stayMin = nv;
+    const cands = info.filter(t => t.eligible && stayOf(t.stop) > floorOf(t));
+    if (cands.length) {
+      cands.sort((a, b) => stayOf(b.stop) - stayOf(a.stop));
+      const t = cands[0];
+      const cur = stayOf(t.stop);
+      const cut = Math.min(cur - floorOf(t), overflow);
+      if (cut > 0) {
+        const nv = cur - cut;
+        t.stop.duration = nv;
+        t.stop.stayMin = nv;
+        changed = true;
+        continue;
+      }
+    }
+    // 全部都到下限了還是超時 → 拿掉一站（評分最低的；沒有評分就拿最後一個非端點站）
+    const removable = info.filter((t) => t.eligible && stops.indexOf(t.stop) >= 0);
+    if (removable.length <= 1) break;   // 至少保留一個真正的景點
+    removable.sort((a, b) => {
+      const ra = Number(a.stop.rating) || 0, rb = Number(b.stop.rating) || 0;
+      if (ra !== rb) return ra - rb;
+      return stops.indexOf(b.stop) - stops.indexOf(a.stop);
+    });
+    const drop = stops.indexOf(removable[0].stop);
+    if (drop < 0) break;
+    stops.splice(drop, 1);
     changed = true;
   }
   return changed;
@@ -3455,7 +3492,7 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   _genPerf.mark('opt: 補時段(fillTripTimeBudget)');
   _sub('整理路線順序中…');
   // 最後輸出前再重排一次，避免合併/補景點後路線南北來回跑
-  const orderedStops = reorderStopsAlongRoute(filledStops, _startCoords, wizardData);
+  const orderedStops = reorderStopsAlongRoute(filledStops, _startCoords, wizardData, _endCoords);
   const ruledStops = applyTripPlanningRules(orderedStops, wizardData);
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
 
