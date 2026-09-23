@@ -4556,11 +4556,25 @@
   let tripPhotoSyncConfigured = false;
   let tripPhotoGalleryMountKey = '';
 
+  // 顯示名稱優先用 app 內設定的暱稱（wai_user），Firebase Auth 的 displayName 多半是空的，
+  // 退到 email 前綴會讓相簿上出現一串像 travelowner090141b1 的帳號字串。
+  // ※ 身分一律以 uid 為準；name 只是標籤，撞名由相簿在顯示時消歧（見 trip-photo-gallery.js）。
+  function currentPhotoDisplayName(user) {
+    try {
+      const stored = JSON.parse(localStorage.getItem('wai_user') || '{}');
+      const name = stored && stored.currentUser && stored.currentUser.name;
+      if (name) return String(name);
+    } catch (_e) {}
+    if (user && user.displayName) return user.displayName;
+    if (user && user.email) return user.email.split('@')[0];
+    return '旅伴';
+  }
+
   function currentPhotoOwner() {
     const user = firebaseAuth && firebaseAuth.currentUser;
     return user ? {
       uid: user.uid || '',
-      name: user.displayName || (user.email ? user.email.split('@')[0] : '') || '旅伴',
+      name: currentPhotoDisplayName(user),
       email: user.email || '',
       role: collabRole || (currentTripIsCollab ? 'member' : 'owner')
     } : { uid: '', name: '', email: '', role: 'viewer' };

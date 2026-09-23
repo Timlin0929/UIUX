@@ -885,6 +885,40 @@ section('14. 首次使用流程的 13 項修正');
     /wheel-picker\.js\?v=/.test(EH) && /wheel-picker\.js\?v=/.test(PH));
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('15. 相簿上傳者標籤：撞名消歧');
+(() => {
+  const G = require(path.join(APP, 'trip-photo-gallery.js'));
+  const U = G.utils;
+  const fake = [
+    { id: 'p1', ownerUid: 'uidAAAA1111', ownerName: '小明', url: 'x', capturedAt: 1 },
+    { id: 'p2', ownerUid: 'uidBBBB2222', ownerName: '小明', url: 'x', capturedAt: 2 },
+    { id: 'p3', ownerUid: 'uidCCCC3333', ownerName: '阿華', url: 'x', capturedAt: 3 }
+  ];
+  const opts = U.memberOptions(fake);
+  const byUid = Object.fromEntries(opts.map((m) => [m.uid, m.name]));
+
+  check('沒撞名的維持原本的名字', byUid.uidCCCC3333 === '阿華');
+  check('撞名的兩個帳號標籤不同', byUid.uidAAAA1111 !== byUid.uidBBBB2222,
+    '身分是 uid，但畫面只給人看名字——兩個「小明」分不出誰是誰');
+  check('撞名時以 uid 尾碼消歧',
+    byUid.uidAAAA1111 === '小明 #1111' && byUid.uidBBBB2222 === '小明 #2222');
+  check('每個 uid 只出現一次', opts.length === 3);
+
+  // 換成 email 前綴一樣會撞，所以不能只是換欄位
+  const sameLocalPart = [
+    { id: 'q1', ownerUid: 'u1', ownerName: 'tim', url: 'x', capturedAt: 1 },
+    { id: 'q2', ownerUid: 'u2', ownerName: 'tim', url: 'x', capturedAt: 2 }
+  ];
+  const two = U.memberOptions(sameLocalPart);
+  check('email 前綴相同時也會被消歧', two[0].name !== two[1].name);
+
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  check('顯示名稱優先用 app 內暱稱', /function currentPhotoDisplayName/.test(P)
+    && /stored\.currentUser && stored\.currentUser\.name/.test(P));
+})();
+
+
 
 
 

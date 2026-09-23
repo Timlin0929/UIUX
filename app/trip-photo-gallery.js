@@ -203,14 +203,42 @@
       return a.dayKey.localeCompare(b.dayKey) || (a.stopId === 'unassigned' ? 1 : b.stopId === 'unassigned' ? -1 : 0);
     });
   }
-  function memberOptions(photos) {
-    var members = {};
+  /* 上傳者標籤。身分一直都是 uid，name 只是給人看的字串——所以兩個不同帳號取同樣的
+     暱稱時，畫面上會出現兩個一模一樣的「小明」，看不出哪張是誰的。
+     （這不是換欄位能解決的：改用 email 前綴一樣會撞，tim@gmail.com 與 tim@nttu.edu.tw
+     都會顯示 tim。）
+     做法是只在真的撞到時才加後綴，沒撞的人維持乾淨的名字。後綴取 uid 尾四碼——
+     uid 本來就是這份資料的身分，不必為了消歧多存 email 進照片文件。 */
+  function buildOwnerLabels(photos) {
+    var byName = {};
+    var names = {};
     (photos || []).forEach(function (photo) {
       var owner = ownerOf(photo);
-      if (owner.uid) members[owner.uid] = owner.name;
+      if (!owner.uid || names[owner.uid]) return;
+      names[owner.uid] = owner.name;
+      if (!byName[owner.name]) byName[owner.name] = [];
+      byName[owner.name].push(owner.uid);
     });
-    return Object.keys(members).sort(function (a, b) { return members[a].localeCompare(members[b], 'zh-Hant'); })
-      .map(function (uid) { return { uid: uid, name: members[uid] }; });
+    var labels = {};
+    Object.keys(names).forEach(function (uid) {
+      var name = names[uid];
+      labels[uid] = byName[name].length > 1
+        ? name + ' #' + String(uid).slice(-4)
+        : name;
+    });
+    return labels;
+  }
+
+  function ownerLabel(photo) {
+    var owner = ownerOf(photo);
+    var labels = state && state.ownerLabels;
+    return (labels && owner.uid && labels[owner.uid]) || owner.name;
+  }
+
+  function memberOptions(photos) {
+    var labels = buildOwnerLabels(photos);
+    return Object.keys(labels).sort(function (a, b) { return labels[a].localeCompare(labels[b], 'zh-Hant'); })
+      .map(function (uid) { return { uid: uid, name: labels[uid] }; });
   }
   function normalizeRole(role) {
     role = text(role || 'viewer').toLowerCase();
@@ -293,7 +321,7 @@
         (selectable ? '<label class="tpg-select"><input type="checkbox" data-action="select" ' + (selected ? 'checked' : '') + '><span>選取</span></label>' : '') +
       '</div>' +
       '<div class="tpg-photo__body">' +
-        '<div class="tpg-photo__meta"><span class="tpg-author" title="上傳者">' + escapeHtml(owner.name) + '</span>' + statusBadge(photo) + '</div>' +
+        '<div class="tpg-photo__meta"><span class="tpg-author" title="上傳者">' + escapeHtml(ownerLabel(photo)) + '</span>' + statusBadge(photo) + '</div>' +
         '<span class="tpg-time nowrap">' + escapeHtml(formatTime(photo.capturedAt)) + '</span>' +
         ((retry || remove) ? '<div class="tpg-photo__actions">' +
           (retry ? '<button type="button" data-action="retry">重新同步</button>' : '') +
@@ -319,6 +347,7 @@
     var actor = state.options.actor || {};
     var filtered = filterPhotos(state.photos, state.filter, actor.uid);
     var groups = groupPhotos(filtered, state.options.stops || []);
+    state.ownerLabels = buildOwnerLabels(state.photos);
     var members = memberOptions(state.photos);
     var selectedCount = state.selected.size;
     var title = text(state.options.title || '共同行程相簿');
