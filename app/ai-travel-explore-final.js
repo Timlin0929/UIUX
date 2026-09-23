@@ -3626,16 +3626,35 @@ async function saveMicroTripToFirebase(trip) {
     const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
     // 剝除暫存旗標 __saving，避免把 UI 狀態寫進 Firestore
     // 並拿掉 role：那是「本機這個人」的角色，owner 存檔會把 role:'owner' 漏進共用文件，害加入者讀到後誤判成可編輯。
-    const { role, ...cleanTrip } = sanitizeTripForFirestore(serializeTripForStorage(trip));
+    //
+    // ⚠ 協作欄位必須一起剝掉，只留 role 是不夠的。
+    //   merge:true 只保護「沒出現在 payload 裡」的欄位；只要 cleanTrip 帶著本機那份過期的
+    //   memberEmails（建立 lobby 時的快照，裡面只有 owner），這一寫就會把後來加入的成員
+    //   整個洗掉。實測：B 加入後 owner 生成團體行程，B 就從 memberEmails 消失，於是
+    //   isTripMemberOrOwner() 判他不是成員——共同相簿、presence、回憶全部 permission-denied，
+    //   而且因為規則要求 editorEmails ⊆ memberEmails，連「升成可編輯」都永久失敗。
+    //   planner 的 persistCurrentTripStops 早就這樣做了，這支漏了。
+    const {
+      role, members: _m, memberEmails: _me, memberUids: _mu, editorEmails: _ee,
+      ownerEmail: _oe, ownerUid: _ou, ownerName: _on,
+      guestReadable: _gr, shareToken: _stk, inviteCode: _ivc, maxMembers: _mmx,
+      collabCreatedAt: _ccat,
+      ...cleanTrip
+    } = sanitizeTripForFirestore(serializeTripForStorage(trip));
     // merge:true：共編行程的協作欄位（members / inviteCode / memberEmails…）由 collab.js 另外維護，
     // 這裡只更新行程內容，不可整份覆寫把它們清掉。
-    await tripRef.set({
+    const payload = {
       ...cleanTrip,
       stops: cleanTrip.stops || [],
-      userEmail: currentUser && currentUser.email ? currentUser.email : 'unknown',
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+    };
+    // userEmail 在共編行程不能寫：安全規則的 isOwner() 也認 userEmail，
+    // 若由 editor 存檔就會把他升成擁有者等級。planner 的 persist 早就這樣擋了。
+    if (!trip.collab) {
+      payload.userEmail = currentUser && currentUser.email ? currentUser.email : 'unknown';
+    }
+    await tripRef.set(payload, { merge: true });
     console.log('微旅行已保存到 Firebase:', trip.id);
     return true;
   } catch (error) {
