@@ -5815,10 +5815,18 @@ function closeWizard() {
   if (ov) ov.classList.remove('open');
   if (isGeneratingTrip) showGenMiniBar(); // 生成中關閉 → 改用右下角浮動小進度卡
 }
-function closeCollabCode() { document.getElementById('collabCodeOverlay').classList.remove('open'); }
-function copyCollabCode() {
-  const code = document.getElementById('collabCodeDisplay').textContent;
-  navigator.clipboard.writeText(code).then(() => showToast('邀請碼已複製！', 'green')).catch(() => showToast(code, 'green'));
+// 「開始規劃行程內容」底下的說明。原本固定寫「先邀請朋友加入、各自填好偏好，再開始規劃」，
+// 不管幾個人加入、偏好填了沒都照印——兩個人都填完了還在叫擁有者去邀請，看起來像沒生效。
+function collabPlanningHint(memberList) {
+  const list = Array.isArray(memberList) ? memberList.filter(Boolean) : [];
+  const filled = list.filter((m) => {
+    const pf = m.prefs || m.preferences || {};
+    return (pf.interests || []).length || pf.pace || pf.budget;
+  }).length;
+  if (list.length <= 1) return '還沒有旅伴加入。把上面的邀請碼分享出去，或直接開始規劃。';
+  const waiting = list.length - filled;
+  if (waiting > 0) return `${list.length} 位旅伴中還有 ${waiting} 位沒填偏好；現在就開始規劃也可以，生成時以已填的為準。`;
+  return `${list.length} 位旅伴的偏好都填好了，可以開始規劃。`;
 }
 
 // 只允許往回跳（往前必須通過每一步的驗證，例如 Step 3 的出發日期必填）
@@ -7277,7 +7285,9 @@ function renderCollabPanel() {
   const members = d.members || {};
   const memberList = Object.keys(members).map(k => members[k]);
   const link = WAI_COLLAB.buildShareLink(d.id, d.shareToken);
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=144x144&data=${encodeURIComponent(link)}`;
+  // QR 改在本地產生。原本把分享連結（含 sharedId 與 token）當 query string 送給
+  // api.qrserver.com——等於把私密邀請權杖交給第三方，而且服務慢或掛掉時 QR 就不見。
+  const qrUrl = (typeof WAIQR !== 'undefined' && WAIQR) ? WAIQR.toDataURL(link, { size: 144 }) : '';
   const profile = WAI_COLLAB.aggregateGroupProfile(members);
   const myMember = WAI_COLLAB.memberForEmail(d, collabState.myEmail);
   if (!collabState.myPrefsDraft) {
@@ -7305,7 +7315,7 @@ function renderCollabPanel() {
         <input class="collab-link-input" id="collabShareLink" readonly value="${link}">
         <button class="collab-mini-btn" onclick="collabCopy(document.getElementById('collabShareLink').value,'唯讀分享連結')">🔗 複製唯讀連結</button>
       </div>
-      <div class="collab-qr-row"><img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div class="collab-qr-fallback" style="display:none">QR Code 暫時無法載入，請改用邀請碼或複製連結加入。</div><div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
+      <div class="collab-qr-row">${qrUrl ? `<img class="collab-qr" src="${qrUrl}" alt="行程邀請 QR Code">` : '<div class="collab-qr-fallback">連結太長，無法產生 QR；請改用邀請碼或複製連結加入。</div>'}<div class="collab-qr-fallback">掃描 QR Code 即可開啟唯讀預覽；邀請朋友共作請使用上方邀請碼。</div></div>
       ${(() => {
         // 好友一鍵邀請：列出尚未加入這份行程的好友，點一下複製含邀請碼的訊息（零 schema 變動）
         try {
@@ -7393,7 +7403,7 @@ function renderCollabPanel() {
       ${isOwner
         ? (!isPlanned
             ? `<button class="collab-primary" onclick="startCollabPlanning('${d.id}')">🧭 開始規劃行程內容</button>
-               <div class="collab-wait">先邀請朋友加入、各自填好偏好，再開始規劃。</div>`
+               <div class="collab-wait">${escapeHtml(collabPlanningHint(memberList))}</div>`
             : `<button class="collab-primary" onclick="collabGenerate()">🚀 生成團體行程</button>
                <button class="collab-secondary" onclick="startCollabPlanning('${d.id}')">✏️ 修改行程設定</button>`)
         : `<div class="collab-wait">由擁有者規劃與生成行程；你可先填好偏好。</div>`}

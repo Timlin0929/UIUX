@@ -23,7 +23,8 @@
 <script src="friends.js?v=20260722-friends3"></script>
 <script src="notifications.js?v=20260722-friends2"></script>
 <script src="wheel-picker.js?v=20260923-ux13"></script>
-<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260923-ux13">
+<script src="qr-encode.js?v=20260923-qr2"></script>
+<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260923-qr1">
 <link rel="stylesheet" href="./design-tokens.css?v=20260727-fix3">
 <script src="./icons.js?v=20260727-fix3"></script>
 <script src="./ui-feedback.js?v=20260727-fix3"></script>
@@ -238,17 +239,6 @@
   </div>
 </div>
 
-<!-- ─── OVERLAY: COLLAB INVITE CODE DISPLAY ─── -->
-<div class="overlay" id="collabCodeOverlay" onclick="if(event.target===this)closeCollabCode()" style="z-index:350">
-  <div class="login-modal" style="position:relative;max-width:380px;text-align:center;">
-    <button class="lm-close" onclick="closeCollabCode()" aria-label="關閉邀請碼顯示">✕</button>
-    <div class="lm-title">🎉 行程已建立！</div>
-    <div class="lm-sub">分享以下邀請碼，讓朋友加入共作</div>
-    <div class="collab-code-box" id="collabCodeDisplay">WNDR-XXXX</div>
-    <button class="lm-submit" onclick="copyCollabCode()">📋 複製邀請碼</button>
-  </div>
-</div>
-
 <!-- ─── OVERLAY: COLLAB PANEL (members + prefs + group generate) ─── -->
 <div class="overlay" id="collabPanelOverlay" style="z-index:360">
   <div class="login-modal collab-panel" style="position:relative">
@@ -456,7 +446,7 @@
   <button class="mbn-item" id="mbnFriends" onclick="showMainView('friends')"><span class="mbn-ico" aria-hidden="true"><svg class="wai-icon lg" aria-hidden="true"><use href="#wai-users"></use></svg></span>好友</button>
 </nav>
 
-<script src="./ai-travel-explore-final.js?v=20260923-collab1"></script>
+<script src="./ai-travel-explore-final.js?v=20260923-qr1"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
 <div id="genMiniBar" hidden onclick="reopenWizGen()">
   <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>
