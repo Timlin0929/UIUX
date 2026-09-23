@@ -4925,8 +4925,11 @@ function renderGrid() {
     const farHtml = t.farForOneDay
       ? '<br><span class="tpl-far">⚠️ 來回 ' + Math.round(t.km) + ' km，當天往返太趕，建議排兩日。</span>'
       : '';
+    // 「4/4」單看是無字天書。補 title／aria-label 說明那是「幾站有 Google 評分」，
+    // 平均分只由有評分的站算出來，沒評分的站不會被當成 0 分拉低平均。
+    const ratingHint = t.ratedCount + ' 站有 Google 評分（共 ' + t.stops.length + ' 站），平均 ' + t.rating.toFixed(1) + ' 星';
     const ratingHtml = t.rating
-      ? '<span class="tpl-fact">★ <b>' + t.rating.toFixed(1) + '</b>'
+      ? '<span class="tpl-fact" title="' + escapeHtml(ratingHint) + '" aria-label="' + escapeHtml(ratingHint) + '">★ <b>' + t.rating.toFixed(1) + '</b>'
         + '<span class="tpl-rated-n">' + t.ratedCount + '/' + t.stops.length + '</span></span>'
       : '';
     // 站點清單預設收合：一張卡列 5 站會把「停留時長／評分／預覽」推到很下面，
@@ -5183,11 +5186,15 @@ function openPreview(key) {
     clock += (s2.duration || 45) + 20;   // 停留 + 粗估車程
     const kind = s2.via ? 'transit' : 'sight';
     const kindLabel = s2.via ? ((s2.fromDistrict || '') + '・沿途') : '主軸';
+    // 「主軸／沿途」是內部用語，卡片上沒有圖例。補 title 讓滑過去就看得懂。
+    const kindHint = s2.via
+      ? '沿途順路：不在' + t.key + '，是往返台東車站途中順道經過的' + (s2.fromDistrict || '鄰近鄉鎮') + '景點'
+      : '主軸景點：位在' + t.key + '，是這份範本的主要目的地';
     return '<div class="pm-spot">'
       + '<span class="pm-spot-emoji">' + (s2.via ? '\u{1F697}' : '\u{1F4CD}') + '</span>'
       + '<span class="pm-spot-name">' + escapeHtml(s2.name) + '</span>'
       + '<span class="pm-spot-time">' + hh + ':' + mm + '</span>'
-      + '<span class="pm-spot-tag ' + kind + '">' + escapeHtml(kindLabel) + '</span>'
+      + '<span class="pm-spot-tag ' + kind + '" title="' + escapeHtml(kindHint) + '" aria-label="' + escapeHtml(kindHint) + '">' + escapeHtml(kindLabel) + '</span>'
       + '</div>';
   }).join('');
   document.getElementById('pmBody').innerHTML =

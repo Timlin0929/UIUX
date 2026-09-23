@@ -1239,3 +1239,13 @@ button.notif-item{cursor:pointer;}
 }
 .wai-dt-field.is-invalid{border-color:#e0a0a0;background:#fffafa;}
 .wai-dt-field:focus-visible{outline:3px solid rgba(31,142,250,.35);outline-offset:2px;}
+
+/* Hero 的第三順位連結：通往 intro.html（原本站內沒有任何入口） */
+.hero-link-tertiary{
+  align-self:center;margin-left:4px;padding:6px 2px;
+  color:rgba(255,255,255,.82);font-size:14px;font-weight:600;
+  text-decoration:underline;text-underline-offset:3px;white-space:nowrap;
+}
+.hero-link-tertiary:hover{color:#fff;}
+.hero-link-tertiary:focus-visible{outline:2px solid #fff;outline-offset:3px;border-radius:6px;}
+@media(max-width:900px){ .hero-link-tertiary{margin-left:0;} }
