@@ -64,26 +64,65 @@
   function clampIdx(i, len) { return Math.max(0, Math.min(len - 1, i)); }
 
   // ── 建立一個滾輪欄位；items: [{value,label}]；回傳 { el, getIndex, setIndex, rebuild } ──
-  function makeColumn(items, selectedIdx, onSettle) {
+  function makeColumn(items, selectedIdx, onSettle, label) {
     var col = document.createElement('div');
     col.className = 'wai-wheel-col';
+    // 滾輪欄位原本是純 div，鍵盤按不到、讀屏也唸不出這是可選的清單。
+    // 做成 listbox：欄位本身可聚焦，選項帶 role=option / aria-selected。
+    col.setAttribute('role', 'listbox');
+    col.setAttribute('tabindex', '0');
+    if (label) col.setAttribute('aria-label', label);
     var current = selectedIdx;
     var initializing = false; // 初始化/重建時的程式化捲動，避免觸發 settle 與被 scroll-snap 蓋掉
 
     function render() {
       var html = '<div class="wai-wheel-pad"></div>';
       for (var i = 0; i < items.length; i++) {
-        html += '<div class="wai-wheel-item' + (i === current ? ' is-on' : '') + '" data-i="' + i + '">' + items[i].label + '</div>';
+        html += '<div class="wai-wheel-item' + (i === current ? ' is-on' : '') + '" data-i="' + i + '"'
+          + ' role="option" aria-selected="' + (i === current ? 'true' : 'false') + '">' + items[i].label + '</div>';
       }
       html += '<div class="wai-wheel-pad"></div>';
       col.innerHTML = html;
+      syncActiveDescendant();
     }
     render();
 
+    function syncActiveDescendant() {
+      var nodes = col.querySelectorAll('.wai-wheel-item');
+      if (!nodes[current]) return;
+      if (!nodes[current].id) {
+        for (var i = 0; i < nodes.length; i++) nodes[i].id = 'waipk-' + (label || 'col') + '-' + i + '-' + Math.random().toString(36).slice(2, 6);
+      }
+      col.setAttribute('aria-activedescendant', nodes[current].id);
+    }
+
     function highlight(idx) {
       var nodes = col.querySelectorAll('.wai-wheel-item');
-      for (var i = 0; i < nodes.length; i++) nodes[i].classList.toggle('is-on', i === idx);
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].classList.toggle('is-on', i === idx);
+        nodes[i].setAttribute('aria-selected', i === idx ? 'true' : 'false');
+      }
+      syncActiveDescendant();
     }
+
+    // 鍵盤操作：上下鍵移動一格、Home/End 跳到頭尾、PageUp/PageDown 一次五格。
+    col.addEventListener('keydown', function (e) {
+      var delta = 0;
+      if (e.key === 'ArrowDown') delta = 1;
+      else if (e.key === 'ArrowUp') delta = -1;
+      else if (e.key === 'PageDown') delta = 5;
+      else if (e.key === 'PageUp') delta = -5;
+      else if (e.key === 'Home') delta = -items.length;
+      else if (e.key === 'End') delta = items.length;
+      else return;
+      e.preventDefault();
+      var target = clampIdx(current + delta, items.length);
+      if (target === current) return;
+      current = target;
+      highlight(current);
+      scrollToIndex(current, true);
+      if (onSettle) onSettle(current);
+    });
     function scrollToIndex(idx, smooth) {
       col.scrollTo({ top: idx * ITEM_H, behavior: smooth ? 'smooth' : 'auto' });
     }
@@ -157,20 +196,49 @@
     var old = document.querySelector('.wai-pk-overlay');
     if (old) old.parentNode.removeChild(old);
 
+    var returnFocus = document.activeElement;
+
     var overlay = document.createElement('div');
     overlay.className = 'wai-pk-overlay';
     var card = document.createElement('div');
     card.className = 'wai-pk-card';
+    // 這是一個真正的強制回應對話框，之前完全沒有語意：讀屏不會宣告，焦點也不會被留住。
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
 
     var titleEl = document.createElement('div');
     titleEl.className = 'wai-pk-title';
     titleEl.textContent = title;
+    titleEl.id = 'wai-pk-title-' + Math.random().toString(36).slice(2, 8);
+    card.setAttribute('aria-labelledby', titleEl.id);
 
     var actions = document.createElement('div');
     actions.className = 'wai-pk-actions';
     function mkBtn(cls, text) { var b = document.createElement('button'); b.type = 'button'; b.className = 'wai-pk-btn ' + cls; b.textContent = text; return b; }
-    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); document.removeEventListener('keydown', onKey); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
+    function close() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+      // 焦點送回原本的觸發欄位，否則關閉後焦點掉到 body，鍵盤使用者得重新 Tab 一輪
+      if (returnFocus && document.contains(returnFocus) && typeof returnFocus.focus === 'function') {
+        returnFocus.focus();
+      }
+    }
+    function focusables() {
+      return Array.prototype.filter.call(
+        card.querySelectorAll('button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+        function (el) { return el.offsetParent !== null; }
+      );
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+      if (e.key !== 'Tab') return;
+      var list = focusables();
+      if (!list.length) return;
+      var first = list[0], last = list[list.length - 1];
+      if (!card.contains(document.activeElement)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
 
     if (typeof opts.onClear === 'function') {
       var clearBtn = mkBtn('clear', '清除');
@@ -191,6 +259,9 @@
     overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
     document.addEventListener('keydown', onKey);
     document.body.appendChild(overlay);
+    // 開啟後把焦點帶進第一個滾輪欄位，讓上下鍵可以直接用
+    var firstCol = card.querySelector('.wai-wheel-col');
+    if (firstCol) firstCol.focus();
     return { overlay: overlay, close: close };
   }
 
@@ -238,9 +309,9 @@
     }
     var monthsInit = monthItems(selY);
     var daysInit = dayItems(selY, selM);
-    colY = makeColumn(years, idxY, onYearChange);
-    colM = makeColumn(monthsInit, idxOfValue(monthsInit, selM), onMonthChange);
-    colD = makeColumn(daysInit, idxOfValue(daysInit, selD), null);
+    colY = makeColumn(years, idxY, onYearChange, '年');
+    colM = makeColumn(monthsInit, idxOfValue(monthsInit, selM), onMonthChange, '月');
+    colD = makeColumn(daysInit, idxOfValue(daysInit, selD), null, '日');
 
     var wrap = document.createElement('div');
     wrap.className = 'wai-pk-wheels';
@@ -283,9 +354,9 @@
     var hoursInit = hourItems();
     var colH, colMin;
     function onHourChange() { colMin.rebuild(minItems(colH.getValue())); }
-    colH = makeColumn(hoursInit, idxOfValue(hoursInit, selH), onHourChange);
+    colH = makeColumn(hoursInit, idxOfValue(hoursInit, selH), onHourChange, '時');
     var minsInit = minItems(selH);
-    colMin = makeColumn(minsInit, idxOfValue(minsInit, selMin), null);
+    colMin = makeColumn(minsInit, idxOfValue(minsInit, selMin), null, '分');
 
     var wrap = document.createElement('div');
     wrap.className = 'wai-pk-wheels';
@@ -302,7 +373,49 @@
 
   window.WAIPicker = { openDate: openDate, openTime: openTime };
 
+  /* ── 觸發欄位的鍵盤可用性 ───────────────────────────────────────────
+     .wai-dt-field 在各頁都是 `<div onclick="pickXxx()">`，沒有 role 也沒有 tabindex，
+     鍵盤完全按不到。精靈的「出發日期」是必填，於是整條建立行程的流程對鍵盤使用者是斷的。
+
+     這些欄位由各頁的樣板字串產生、且會一直重畫，所以不在樣板裡逐一補屬性（容易漏），
+     改在這裡統一裝飾：欄位一出現就補上語意，再用委派處理 Enter／空白鍵。 */
+  function decorateFields(root) {
+    var scope = (root && root.querySelectorAll) ? root : document;
+    var list = scope.querySelectorAll ? scope.querySelectorAll('.wai-dt-field') : [];
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (el.getAttribute('tabindex') === null) el.setAttribute('tabindex', '0');
+      if (!el.getAttribute('role')) el.setAttribute('role', 'button');
+    }
+  }
+
+  function startFieldWatcher() {
+    decorateFields(document);
+    if (typeof MutationObserver !== 'function' || !document.body) return;
+    new MutationObserver(function (records) {
+      for (var i = 0; i < records.length; i++) {
+        var added = records[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (!node || node.nodeType !== 1) continue;
+          if (node.classList && node.classList.contains('wai-dt-field')) decorateFields(node.parentNode || document);
+          else decorateFields(node);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var field = e.target && e.target.closest ? e.target.closest('.wai-dt-field') : null;
+    if (!field) return;
+    e.preventDefault();
+    field.click();
+  });
+
   // 載入即注入欄位樣式，讓 .wai-dt-field 觸發欄位在開啟彈窗前就有正確外觀
-  if (document.head) ensureStyle();
-  else document.addEventListener('DOMContentLoaded', ensureStyle);
+  if (document.head) { ensureStyle(); }
+  else { document.addEventListener('DOMContentLoaded', ensureStyle); }
+  if (document.body) startFieldWatcher();
+  else document.addEventListener('DOMContentLoaded', startFieldWatcher);
 })();

@@ -3817,13 +3817,13 @@ function renderUserMenu() {
     const _fu = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
     const _hasPwd = !!(_fu && (_fu.providerData || []).some(p => p && p.providerId === 'password'));
     wrap.innerHTML = `
-      <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${u.name}">
-        ${u.emoji||'😊'}
+      <div class="user-avatar-btn" onclick="toggleUserDropdown()" title="${escapeHtml(u.name || '')}">
+        ${escapeHtml(u.emoji || '😊')}
       </div>
       <div class="user-dropdown" id="userDropdown">
         <div class="user-dropdown-header">
-          <div class="user-dropdown-name">${u.name}</div>
-          <div class="user-dropdown-email">${u.email}</div>
+          <div class="user-dropdown-name">${escapeHtml(u.name || '')}</div>
+          <div class="user-dropdown-email">${escapeHtml(u.email || '')}</div>
         </div>
         <div class="user-dd-item dd-mobile-only" onclick="showMainView('explore');toggleUserDropdown()">🧭 探索</div>
         <div class="user-dd-item" onclick="showMainView('mytrips');toggleUserDropdown()">📋 我的微旅行 <span style="margin-left:auto;background:var(--accent-light);color:var(--accent);font-size:13px;padding:1px 7px;border-radius:8px">${myTrips.length}</span></div>
@@ -3839,16 +3839,71 @@ function renderUserMenu() {
         <div class="user-dd-item danger" onclick="doLogout()">👋 登出</div>
       </div>`;
   }
+  enhanceUserMenuA11y(wrap);
 }
+
+// 選單的觸發器與項目都是 <div onclick>，鍵盤完全按不到，讀屏也只會唸成一段文字。
+// 改成在產生後統一補語意，而不是去改十幾行樣板字串——那樣容易漏，也會動到既有樣式。
+function enhanceUserMenuA11y(wrap) {
+  if (!wrap) return;
+  const trigger = wrap.querySelector('.user-avatar-btn');
+  const dd = wrap.querySelector('#userDropdown');
+  if (trigger) {
+    trigger.setAttribute('role', 'button');
+    trigger.setAttribute('tabindex', '0');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-controls', 'userDropdown');
+    trigger.setAttribute('aria-expanded', dd && dd.classList.contains('open') ? 'true' : 'false');
+    if (!trigger.getAttribute('aria-label')) trigger.setAttribute('aria-label', '帳號選單');
+  }
+  if (dd) {
+    dd.setAttribute('role', 'menu');
+    dd.setAttribute('aria-label', '帳號選單');
+    dd.querySelectorAll('.user-dd-item').forEach((item) => {
+      item.setAttribute('role', 'menuitem');
+      item.setAttribute('tabindex', '0');
+    });
+    dd.querySelectorAll('.user-dd-sep').forEach((sep) => sep.setAttribute('role', 'separator'));
+  }
+}
+
+// Enter／空白鍵啟動；Esc 關閉並把焦點送回觸發器。
+document.addEventListener('keydown', (e) => {
+  const wrap = document.getElementById('userMenuWrap');
+  if (!wrap) return;
+  const dd = document.getElementById('userDropdown');
+  if (e.key === 'Escape' && dd && dd.classList.contains('open')) {
+    e.preventDefault();
+    dd.classList.remove('open');
+    const trigger = wrap.querySelector('.user-avatar-btn');
+    if (trigger) { trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); }
+    return;
+  }
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const target = e.target && e.target.closest ? e.target.closest('.user-dd-item, .user-avatar-btn') : null;
+  if (!target || !wrap.contains(target)) return;
+  e.preventDefault();
+  target.click();
+});
+
 function toggleUserDropdown() {
   const dd = document.getElementById('userDropdown');
   if (dd) dd.classList.toggle('open');
+  const trigger = document.querySelector('#userMenuWrap .user-avatar-btn');
+  if (trigger) trigger.setAttribute('aria-expanded', dd && dd.classList.contains('open') ? 'true' : 'false');
+  // 用鍵盤開啟時把焦點帶進第一個項目，否則 Tab 會直接跳出選單
+  if (dd && dd.classList.contains('open')) {
+    const first = dd.querySelector('.user-dd-item');
+    if (first && document.activeElement === trigger) first.focus();
+  }
 }
 document.addEventListener('click', e => {
   const wrap = document.getElementById('userMenuWrap');
   if (wrap && !wrap.contains(e.target)) {
     const dd = document.getElementById('userDropdown');
     if (dd) dd.classList.remove('open');
+    const trigger = wrap.querySelector('.user-avatar-btn');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
   }
 });
 
@@ -5657,11 +5712,29 @@ function copyCollabCode() {
   navigator.clipboard.writeText(code).then(() => showToast('邀請碼已複製！', 'green')).catch(() => showToast(code, 'green'));
 }
 
+// 只允許往回跳（往前必須通過每一步的驗證，例如 Step 3 的出發日期必填）
+function goToWizStep(i) {
+  const target = Number(i);
+  if (!Number.isFinite(target) || target < 0 || target >= wizStep) return;
+  wizStep = target;
+  renderWizard();
+}
+
 function renderWizard() {
   const steps = document.getElementById('wizSteps');
   const stepTitles = ['目的地', '交通 & 偏好', '出發日期 & 時間', '預算 & 其他'];
-  steps.innerHTML = Array(WIZ_TOTAL).fill(0).map((_,i)=>`
-    <div class="wizard-step ${i<wizStep?'done':i===wizStep?'active':''}"><span class="step-num">${i+1}</span><span class="step-label">${stepTitles[i]}</span></div>`).join('');
+  // 這排 chip 長得就像分頁，使用者會去點它——原本是純 <div>，點了完全沒反應，
+  // 無障礙樹裡也找不到（整個精靈只有「上一步／下一步」兩個可聚焦元素）。
+  // 已完成的步驟可以直接跳回去；還沒走到的維持不可點（往前仍要通過各步驟的驗證）。
+  steps.innerHTML = Array(WIZ_TOTAL).fill(0).map((_, i) => {
+    const state = i < wizStep ? 'done' : (i === wizStep ? 'active' : '');
+    const canGo = i < wizStep;
+    return `<button type="button" class="wizard-step ${state}"
+      ${canGo ? `onclick="goToWizStep(${i})"` : 'aria-disabled="true" tabindex="-1"'}
+      ${i === wizStep ? 'aria-current="step"' : ''}
+      aria-label="${canGo ? '回到' : ''}步驟 ${i + 1}：${escapeHtml(stepTitles[i])}${canGo ? '' : (i === wizStep ? '（目前）' : '（尚未完成）')}"
+      ><span class="step-num">${i + 1}</span><span class="step-label">${escapeHtml(stepTitles[i])}</span></button>`;
+  }).join('');
   document.getElementById('wizardBadge').textContent = `Step ${wizStep+1} / ${WIZ_TOTAL}`;
   document.getElementById('wizBackBtn').style.visibility = wizStep===0 ? 'hidden' : '';
   document.getElementById('wizNextBtn').textContent = wizStep===WIZ_TOTAL-1 ? '🚀 建立行程' : '下一步 →';
@@ -5839,11 +5912,15 @@ function renderWizard() {
     body.innerHTML = `<h3 class="wizard-block-title">📅 出發日期 & 時間</h3>
       <p class="wizard-block-help">設定出發與回程日期，以及當天的出發時間</p>
       <div class="wizard-field">
-        <label>出發日期</label>
-        <div class="wai-dt-field" onclick="pickWizDepartureDate()">
+        <label for="wizDepartureDateField">出發日期 <span class="wizard-required" aria-hidden="true">必填</span></label>
+        <div class="wai-dt-field" id="wizDepartureDateField" onclick="pickWizDepartureDate()"
+          aria-label="出發日期，必填" aria-required="true"
+          aria-describedby="wizDepartureDateErr"
+          aria-invalid="${wizData.departureDate ? 'false' : 'true'}">
           <span class="${wizData.departureDate?'':'wai-dt-ph'}">${wizData.departureDate ? wizData.departureDate.replace(/-/g,'/') : '請選擇出發日期'}</span>
           <span class="wai-dt-ic">📅</span>
         </div>
+        <p class="wizard-field-err" id="wizDepartureDateErr" role="alert" hidden>請先選擇出發日期</p>
         ${wizData.departureDate && wizData.returnDate ? `<p style="margin-top:6px;font-size:14px;color:#4a7fad;">📅 預計回程：${wizData.returnDate}${(() => { const dc = getWizardDayCount(wizData.days); return dc >= 2 ? `（第 ${dc} 天）` : '（當天）'; })()}</p>` : ''}
       </div>
 
@@ -6368,7 +6445,16 @@ function wizNext() {
   if (isGeneratingTrip) { showToast('正在生成行程中，請稍候…', 'orange'); return; }
   if (wizStep===0 && !wizData.dest && !wizData.destCustom) { showToast('請選擇或輸入目的地', 'orange'); return; }
   // Step 3（出發日期 & 時間）：必須先選好出發日期才能進下一步
-  if (wizStep===2 && !wizData.departureDate) { showToast('請先選擇出發日期', 'orange'); return; }
+  // toast 會自己消失，消失後畫面上沒有任何線索說是哪一欄出錯——
+  // 錯誤要留在欄位旁邊，並把焦點帶過去。
+  if (wizStep===2 && !wizData.departureDate) {
+    const err = document.getElementById('wizDepartureDateErr');
+    const field = document.getElementById('wizDepartureDateField');
+    if (err) err.hidden = false;
+    if (field) { field.setAttribute('aria-invalid', 'true'); field.classList.add('is-invalid'); field.focus(); }
+    showToast('請先選擇出發日期', 'orange');
+    return;
+  }
   // Step 3：有出發日期但回程日期空，自動推算
   if (wizStep===2 && wizData.departureDate && !wizData.returnDate) autoUpdateReturnDate();
   if (wizStep===WIZ_TOTAL-1) { finishWizard(); return; }

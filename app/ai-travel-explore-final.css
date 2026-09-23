@@ -320,7 +320,14 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-panel-title{font-size:22px;font-weight:900;margin:0;color:#222126;}
 .wizard-panel-sub{margin:6px 0 0;font-size:16px;color:#64636e;}
 .wizard-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:14px 16px;border-bottom:1px solid #e6e3dc;background:#fff;}
-.wizard-step{border:1px solid #ddd;border-radius:12px;font-size:13px;padding:8px 6px;text-align:center;color:#666;font-weight:700;transition:all .24s ease;display:flex;flex-direction:column;align-items:center;gap:3px;}
+/* 改成 <button> 才能鍵盤操作；font/background/width 要明確寫掉瀏覽器預設值，
+   否則會繼承不到版面的字型、也會被按鈕預設背景蓋掉。 */
+.wizard-step{border:1px solid #ddd;border-radius:12px;font-size:13px;padding:8px 6px;text-align:center;color:#666;font-weight:700;transition:all .24s ease;display:flex;flex-direction:column;align-items:center;gap:3px;
+  width:100%;box-sizing:border-box;background:#fff;font-family:inherit;appearance:none;-webkit-appearance:none;}
+.wizard-step[onclick]{cursor:pointer;}
+.wizard-step[aria-disabled="true"]{cursor:default;}
+.wizard-step[onclick]:hover{border-color:#2fa08c;color:#22865d;}
+.wizard-step:focus-visible{outline:3px solid rgba(31,142,250,.35);outline-offset:2px;}
 .step-num{font-size:17px;font-weight:900;line-height:1;}
 .step-label{font-size:12px;line-height:1.2;display:block;}
 .wizard-step.active{border-color:transparent;background:linear-gradient(135deg,#0f7c6b 0%,#2fa08c 100%);color:#fff;transform:translateY(-1px);box-shadow:0 8px 16px rgba(17,121,107,.3);}
@@ -1219,3 +1226,16 @@ button.notif-item{cursor:pointer;}
   .filter-bar{padding:8px 16px 10px;}
   .grouplab{font-size:11px;padding-left:7px;margin-left:2px;}
 }
+
+/* ── 精靈必填欄位的標示與 inline 錯誤 ──
+   原本只有 toast，消失後畫面上沒有任何線索指出是哪一欄擋住了下一步。 */
+.wizard-required{
+  display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
+  background:#fdeceb;color:#c0392b;font-size:12px;font-weight:700;
+  vertical-align:middle;white-space:nowrap;   /* 短標籤不拆行 */
+}
+.wizard-field-err{
+  margin:6px 0 0;color:#c0392b;font-size:14px;font-weight:600;line-height:1.5;
+}
+.wai-dt-field.is-invalid{border-color:#e0a0a0;background:#fffafa;}
+.wai-dt-field:focus-visible{outline:3px solid rgba(31,142,250,.35);outline-offset:2px;}

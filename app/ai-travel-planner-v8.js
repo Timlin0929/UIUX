@@ -18158,10 +18158,62 @@
     }
   };
 
+  // 觸發器與項目都是 <div onclick>，鍵盤按不到、讀屏唸不出是選單。
+  // 在產生後統一補上語意，比去改樣板字串安全（不動到既有樣式）。
+  function enhanceUserMenuA11y() {
+    const wrap = document.getElementById('userMenuWrap');
+    if (!wrap) return;
+    const dd = wrap.querySelector('#userDropdown');
+    const trigger = wrap.querySelector('.user-avatar-btn');
+    if (trigger) {
+      trigger.setAttribute('role', 'button');
+      trigger.setAttribute('tabindex', '0');
+      trigger.setAttribute('aria-haspopup', 'menu');
+      trigger.setAttribute('aria-controls', 'userDropdown');
+      trigger.setAttribute('aria-expanded', dd && dd.classList.contains('open') ? 'true' : 'false');
+      if (!trigger.getAttribute('aria-label')) trigger.setAttribute('aria-label', '帳號選單');
+    }
+    if (dd) {
+      dd.setAttribute('role', 'menu');
+      dd.setAttribute('aria-label', '帳號選單');
+      dd.querySelectorAll('.user-dd-item').forEach((item) => {
+        item.setAttribute('role', 'menuitem');
+        item.setAttribute('tabindex', '0');
+      });
+      dd.querySelectorAll('.user-dd-sep').forEach((sep) => sep.setAttribute('role', 'separator'));
+    }
+  }
+  window.enhanceUserMenuA11y = enhanceUserMenuA11y;
+
   window.toggleUserDropdown = function() {
     const dd = document.getElementById('userDropdown');
     if (dd) dd.classList.toggle('open');
+    const trigger = document.querySelector('#userMenuWrap .user-avatar-btn');
+    if (trigger) trigger.setAttribute('aria-expanded', dd && dd.classList.contains('open') ? 'true' : 'false');
+    if (dd && dd.classList.contains('open')) {
+      const first = dd.querySelector('.user-dd-item');
+      if (first && document.activeElement === trigger) first.focus();
+    }
   };
+
+  // Enter／空白鍵啟動；Esc 關閉並把焦點送回觸發器。
+  document.addEventListener('keydown', (e) => {
+    const wrap = document.getElementById('userMenuWrap');
+    if (!wrap) return;
+    const dd = document.getElementById('userDropdown');
+    if (e.key === 'Escape' && dd && dd.classList.contains('open')) {
+      e.preventDefault();
+      dd.classList.remove('open');
+      const trigger = wrap.querySelector('.user-avatar-btn');
+      if (trigger) { trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); }
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target && e.target.closest ? e.target.closest('.user-dd-item, .user-avatar-btn') : null;
+    if (!target || !wrap.contains(target)) return;
+    e.preventDefault();
+    target.click();
+  });
 
   window.openChangePwd = function() {
     const u = firebaseAuth && firebaseAuth.currentUser;
@@ -18365,6 +18417,7 @@
           <div class="user-dd-item danger" onclick="doLogout()">👋 登出</div>
         </div>`;
     }
+    enhanceUserMenuA11y();
   }
 
   const PLANNER_NOTIF_META = {
@@ -18744,6 +18797,8 @@
     if (wrap && !wrap.contains(e.target)) {
       const dd = document.getElementById('userDropdown');
       if (dd) dd.classList.remove('open');
+      const trigger = wrap.querySelector('.user-avatar-btn');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
     }
     const notifWrap = document.getElementById('notifWrap');
     if (notifWrap && !notifWrap.contains(e.target)) {
