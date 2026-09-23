@@ -5192,15 +5192,23 @@ function copyTrip() {
   // 離島的 dest 就是它自己；本島各鄉鎮共用「台東」這個目的地鍵（poi-data 的分桶）
   const dest = t.island ? t.key : '台東';
   const desired = t.stops.filter((s) => !s.via).map((s) => s.name).join('、');
-  if (typeof openWizard === 'function') {
-    openWizard();
-    wizData.dest = dest;
-    wizData.desiredSpots = desired;
-    wizData.tripName = t.title;
-    if (t.farForOneDay) wizData.days = '2天1夜';
-    if (typeof renderWizard === 'function') renderWizard();
-  }
-  showToast('已帶入「' + t.title + '」的景點，調整偏好後就能生成', 'green');
+
+  // ⚠ 不能在這裡直接寫 wizData：openWizard() 只是打開「單人／共編」模式選擇，
+  //   真正的精靈是使用者選完模式後由 selectTripMode() 開的，而那一步會
+  //   `wizData = buildInitialWizData(mode)` 整個重設——先寫進去的目的地、
+  //   想去景點、行程名稱全部會被沖掉（實測 wizData 只剩 {days:'8小時'}）。
+  //   改成先存成待套用的種子，等模式選定後再併進初始值。
+  pendingTemplateSeed = {
+    key: t.key,
+    title: t.title,
+    dest,
+    destCustom: t.island ? t.key : '',
+    desiredSpots: desired,
+    tripName: t.title,
+    days: t.farForOneDay ? '2天1夜' : undefined
+  };
+  if (typeof openWizard === 'function') openWizard();
+  showToast('已選擇「' + t.title + '」，選好製作方式就會帶入', 'green');
 }
 function closeCopySuccess() { document.getElementById('copySuccessOverlay').classList.remove('open'); }
 function goToMyTrips() { closeCopySuccess(); showMainView('mytrips'); }
@@ -5613,21 +5621,56 @@ function renderSideMyTrips() {
 // ══════════════════════════════════════════════════
 // NEW TRIP WIZARD
 // ══════════════════════════════════════════════════
+// 從範本進來時暫存的起始值；由 selectTripMode() 在建立 wizData 時併入。
+let pendingTemplateSeed = null;
+
+// 使用者剛從預覽選了一份範本，模式選擇彈窗要講出來是哪一份——
+// 否則點完「用這份開始規劃」只看到一個空白的「選擇你的製作方式」，
+// 會以為剛才的選擇沒生效。
+function renderModeChoiceSeedNote() {
+  const sub = document.querySelector('#modeChoiceOverlay .lm-sub');
+  if (!sub) return;
+  if (!sub.dataset.baseText) sub.dataset.baseText = sub.textContent;
+  sub.textContent = pendingTemplateSeed
+    ? `將以「${pendingTemplateSeed.title}」為起點 · ${sub.dataset.baseText}`
+    : sub.dataset.baseText;
+}
+
 function openWizard() {
+  renderModeChoiceSeedNote();
   document.getElementById('modeChoiceOverlay').classList.add('open');
 }
 function closeModeChoice() {
   document.getElementById('modeChoiceOverlay').classList.remove('open');
+  // 取消就放掉範本種子，否則下次自己按「建立微旅行」會莫名其妙帶入舊範本
+  pendingTemplateSeed = null;
+  renderModeChoiceSeedNote();
 }
 function selectTripMode(mode) {
+  const seed = pendingTemplateSeed;
   closeModeChoice();
   // 多人共作：先進「成員 + 邀請碼」lobby，確認有人加入後，才由 owner 開始規劃行程內容
-  if (mode === 'collab') { startCollabLobby(); return; }
+  if (mode === 'collab') { pendingTemplateSeed = seed; startCollabLobby(); return; }
   wizStep = 0;
-  wizData = buildInitialWizData(mode);
+  wizData = buildInitialWizData(mode, templateSeedExtra(seed));
   clearWizardPrefetchState();
   renderWizard();
   document.getElementById('wizardOverlay').classList.add('open');
+  if (seed) showToast(`已帶入「${seed.title}」的目的地與景點`, 'green');
+}
+
+// 把範本種子轉成 buildInitialWizData 的 extra；undefined 的欄位不覆蓋預設值。
+function templateSeedExtra(seed) {
+  if (!seed) return undefined;
+  const extra = {
+    dest: seed.dest,
+    desiredSpots: seed.desiredSpots,
+    tripName: seed.tripName,
+    fromTemplateKey: seed.key
+  };
+  if (seed.destCustom) extra.destCustom = seed.destCustom;
+  if (seed.days) extra.days = seed.days;
+  return extra;
 }
 
 // 以帳號偏好初始化 wizData（solo 與 collab 共用）
@@ -5695,7 +5738,10 @@ async function startCollabLobby() {
 // 從 lobby 進四步精靈規劃行程內容（行程已存在，finishWizard 走「更新」分支）
 function startCollabPlanning(tripId) {
   wizStep = 0;
-  wizData = buildInitialWizData('collab', { collabTripId: tripId });
+  // 共編也可能是從範本進來的（預覽 → 用這份開始規劃 → 共編行程），種子要一路帶到這裡
+  const seed = pendingTemplateSeed;
+  pendingTemplateSeed = null;
+  wizData = buildInitialWizData('collab', { collabTripId: tripId, ...(templateSeedExtra(seed) || {}) });
   closeCollabPanel();
   clearWizardPrefetchState();
   renderWizard();
