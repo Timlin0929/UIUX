@@ -806,6 +806,86 @@ section('13. 展示 Sandbox 與桌機單站抽屜回歸');
     /useDesktopEditor[\s\S]{0,120}?closePinInfo\(\)[\s\S]{0,80}?openStopEditor/.test(openStop));
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('14. 首次使用流程的 13 項修正');
+(() => {
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const PH = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.html'), 'utf8');
+  const EH = fs.readFileSync(path.join(APP, 'ai-travel-explore-final.html'), 'utf8');
+  const EC = fs.readFileSync(path.join(APP, 'ai-travel-explore-final.css'), 'utf8');
+  const W  = fs.readFileSync(path.join(APP, 'wheel-picker.js'), 'utf8');
+
+  // 1 API 成本面板預設不給一般使用者看
+  check('API 用量統計改為明確開啟制',
+    /function isApiCostPanelVisible/.test(P) && /if \(!isApiCostPanelVisible\(\)\)/.test(P),
+    '預算頁原本直接印出 NT$49.35 與 places:searchNearby|… 給終端使用者');
+
+  // 2 停車：Directions 沒回應要退回推估；找不到也不能謊稱附近沒有
+  check('步行驗證失敗時退回直線推估', /walkEstimated: true/.test(P) && /function estimateWalkSeconds/.test(P));
+  // 鎖在真正的賦值那一行；只寫 /outInfo\.nearestFar/ 會被上面的判空式一起命中，拿掉賦值也不會紅。
+  check('記錄「最近但超過門檻」的停車場',
+    /outInfo\.nearestFar = \{ name: cand\.name, walkSeconds: sec \}/.test(P));
+  // ⚠ 不能直接搜「找不到鄰近停車場」——檔案裡還有 4 處註解在解釋這個 bug，
+  //   那樣會永遠紅。只比對真正會渲染出去的那兩句舊文案。
+  check('不再宣稱「找不到鄰近停車場」',
+    !/找不到鄰近停車場，請預留路邊或付費停車的時間/.test(P)
+    && !/找不到鄰近停車場，請自行尋找路邊或付費停車/.test(P),
+    '593 公尺外就有停車場時說找不到，是在講假話');
+  check('停車訊息用 index+1 對應 replanStops',
+    /_nearestFarParkingByStopIndex\[index \+ 1\]/.test(P),
+    'nextStop 是 schedule 項目，用 indexOf 會永遠拿到 -1');
+
+  // 3 + 10 範本要一路帶進精靈
+  check('範本改存成 pendingTemplateSeed', /pendingTemplateSeed = \{/.test(ESRC));
+  check('選完模式後併入初始值', /buildInitialWizData\(mode, templateSeedExtra\(seed\)\)/.test(ESRC),
+    'selectTripMode 會重設 wizData，先寫進去的會被沖掉');
+  check('模式對話框顯示已選範本', /renderModeChoiceSeedNote/.test(ESRC));
+
+  // 4 日期/時間選擇器的鍵盤與語意
+  check('滾輪欄位是 listbox 且可聚焦',
+    /col\.setAttribute\('role', 'listbox'\)/.test(W) && /col\.setAttribute\('tabindex', '0'\)/.test(W));
+  check('選擇器有 dialog 語意', /card\.setAttribute\('aria-modal', 'true'\)/.test(W));
+  check('方向鍵可操作滾輪', /e\.key === 'ArrowDown'/.test(W) && /e\.key === 'ArrowUp'/.test(W));
+  check('觸發欄位補上 role/tabindex', /function decorateFields/.test(W) && /startFieldWatcher/.test(W));
+  check('關閉後焦點送回觸發欄位', /returnFocus\.focus\(\)/.test(W));
+
+  // 5 停留時間不得被壓成打卡
+  check('停留下限提高到有意義的長度', /MEANINGFUL_MIN = 20/.test(ESRC) && !/const HARD_MIN = 5;/.test(ESRC),
+    '原本會把 40 分的景點壓到 12 分');
+  check('擠不下時改為拿掉一站', /stops\.splice\(drop, 1\)/.test(ESRC));
+
+  // 6 + 13 精靈步驟與必填
+  check('步驟 chip 變成可操作的 button', /goToWizStep\(/.test(ESRC) && /aria-current="step"/.test(ESRC));
+  check('出發日期有必填標示與 inline 錯誤',
+    /wizard-required/.test(ESRC) && /wizDepartureDateErr/.test(ESRC) && /wizard-field-err/.test(EC));
+
+  // 7 除錯 chip 不給一般使用者
+  check('原型 id chip 改為明確開啟制', /wai_show_debug_chip/.test(P) && !/const isPrototypeMode = true;/.test(P));
+
+  // 8 使用者選單語意
+  check('explore 使用者選單有 menu 語意', /enhanceUserMenuA11y/.test(ESRC) && /'menuitem'/.test(ESRC));
+  check('planner 使用者選單有 menu 語意', /enhanceUserMenuA11y/.test(P) && /'menuitem'/.test(P));
+  check('使用者名稱進 innerHTML 前有 escape', /escapeHtml\(u\.name \|\| ''\)/.test(ESRC));
+
+  // 9 標籤說明
+  check('範本評分有說明', /\u7ad9\u6709 Google \u8a55\u5206/.test(ESRC));
+  check('主軸／沿途有說明', /kindHint/.test(ESRC));
+
+  // 11 intro.html 站內入口
+  check('首頁有 intro.html 入口', /href="intro\.html"/.test(EH));
+
+  // 12 路線最佳化要含回程
+  // 同理：lockLastStop 在參數與註解都出現，要鎖在真正改變迴圈上界的那一行。
+  check('2-opt 可鎖定終點',
+    /const segmentEnd = lockLastStop \? bestRoute\.length - 1 : bestRoute\.length;/.test(ESRC));
+  check('重排時帶入終點錨點', /const endAnchor = \{/.test(ESRC) && /reorderStopsAlongRoute\(filledStops, _startCoords, wizardData, _endCoords\)/.test(ESRC));
+
+  // 快取
+  check('改動檔案都 bump 過 ?v=',
+    /wheel-picker\.js\?v=/.test(EH) && /wheel-picker\.js\?v=/.test(PH));
+})();
+
+
 
 
 
