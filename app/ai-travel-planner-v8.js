@@ -9848,6 +9848,14 @@
         if (!collabReadOnly && banner) { banner.remove(); document.body.style.paddingTop = ''; }
         if (collabReadOnly && !banner) showCollabReadOnlyBanner(newRole);
         if (wasReadOnly !== collabReadOnly && isReplanning) renderReplanBoard();
+        // 權限變了，畫面上的編輯入口也要跟著變。
+        // 原本只處理橫幅與重排板，於是擁有者把成員降成唯讀時，對方畫面上的
+        // 「調整順序／重新規劃／開始行程」還留著——實測唯讀成員仍能進入排序模式，
+        // 做完才發現存不回去（persist 與 Firestore rules 會擋，但那時工已經白做了）。
+        if (wasReadOnly !== collabReadOnly) {
+          updateItineraryStageUI();
+          renderItineraryDisplay();   // 每一站的編輯／刪除按鈕也吃 collabReadOnly
+        }
       }
     }
     if (data.members) {
@@ -10676,6 +10684,12 @@
   }
 
   function enterReplanMode() {
+    // 唯讀成員不該進到排序模式。按鈕平常就會隱藏，但權限是會即時變的——
+    // 在這裡也擋一次，避免「按鈕還在畫面上」的那個時間差被按到。
+    if (collabReadOnly) {
+      feedbackToast('你的權限是唯讀，無法調整行程順序', 'orange');
+      return;
+    }
     isReplanning = true;
     activeStopMenuId = null;
     closeModifyWindow();
