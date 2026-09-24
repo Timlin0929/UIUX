@@ -199,10 +199,28 @@ window.TripPhotoManager = (function () {
     });
   }
 
-  function exifDateToEpoch(value) {
+  // EXIF 的偏移標籤（OffsetTimeOriginal 0x9011 / OffsetTimeDigitized 0x9012），格式如 "+08:00"。
+  // 回傳分鐘數；認不出來就回 null。
+  function exifOffsetToMinutes(value) {
+    var match = String(value || '').trim().match(/^([+-])(\d{2}):?(\d{2})$/);
+    if (!match) return null;
+    var minutes = (+match[2]) * 60 + (+match[3]);
+    return match[1] === '-' ? -minutes : minutes;
+  }
+
+  // DateTimeOriginal 是「牆上時間」，本身不帶時區。
+  //   有 OffsetTimeOriginal → 用它換算成絕對時間，跨時區才正確（新一點的手機都會寫）
+  //   沒有                  → 只能假設拍攝裝置與此刻的裝置同一時區（timeAssumption: 'device-local'）
+  function exifDateToEpoch(value, offsetMinutes) {
     var match = String(value || '').trim().match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
     if (!match) return null;
-    var epoch = new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]).getTime();
+    var epoch;
+    if (Number.isFinite(offsetMinutes)) {
+      epoch = Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6])
+        - offsetMinutes * 60000;
+    } else {
+      epoch = new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]).getTime();
+    }
     return Number.isFinite(epoch) ? epoch : null;
   }
 
@@ -283,7 +301,16 @@ window.TripPhotoManager = (function () {
       var exifIfd = pointer(ifd0, 0x8769);
       var gpsIfd = pointer(ifd0, 0x8825);
       var exif = exifIfd != null ? readIfd(exifIfd) : {};
-      var rawDate = readAsciiTag(exif, 0x9003) || readAsciiTag(exif, 0x9004) || readAsciiTag(ifd0, 0x0132);
+      // 日期與對應的偏移標籤要配成對：DateTimeOriginal 配 0x9011、DateTimeDigitized 配 0x9012。
+      // 拿錯配對比沒有偏移更糟（會把時間往錯的方向推）。
+      var rawDate = readAsciiTag(exif, 0x9003);
+      var rawOffset = rawDate ? readAsciiTag(exif, 0x9011) : '';
+      if (!rawDate) {
+        rawDate = readAsciiTag(exif, 0x9004);
+        rawOffset = rawDate ? readAsciiTag(exif, 0x9012) : '';
+      }
+      if (!rawDate) { rawDate = readAsciiTag(ifd0, 0x0132); rawOffset = ''; }
+      var offsetMinutes = exifOffsetToMinutes(rawOffset);
       var coords = null;
       if (gpsIfd != null) {
         var gps = readIfd(gpsIfd);
@@ -303,7 +330,13 @@ window.TripPhotoManager = (function () {
           }
         }
       }
-      return { rawDate: rawDate || null, capturedAt: exifDateToEpoch(rawDate), coords: coords };
+      return {
+        rawDate: rawDate || null,
+        rawOffset: rawOffset || null,
+        offsetMinutes: offsetMinutes,
+        capturedAt: exifDateToEpoch(rawDate, offsetMinutes),
+        coords: coords
+      };
     } catch (_error) {
       return null;
     }
@@ -330,7 +363,9 @@ window.TripPhotoManager = (function () {
           if (parsed.capturedAt) {
             result.capturedAt = parsed.capturedAt;
             result.timeSource = 'exif';
-            result.timeAssumption = 'device-local';
+            // 有 EXIF 偏移就是絕對時間，沒有才是「假設同裝置時區」
+            result.timeAssumption = Number.isFinite(parsed.offsetMinutes) ? 'exif-offset' : 'device-local';
+            result.exifOffset = parsed.rawOffset || null;
           }
           if (parsed.coords) {
             result.coords = parsed.coords;
@@ -566,6 +601,14 @@ window.TripPhotoManager = (function () {
     };
   }
 
+  // 目前裝置的 IANA 時區名稱。Android 端對應 ZoneId.systemDefault().id。
+  function deviceTimeZone() {
+    try {
+      var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return typeof tz === 'string' ? tz : '';
+    } catch (_e) { return ''; }
+  }
+
   async function findDuplicateHints(hash, tripId, excludeId) {
     if (!hash) return [];
     var photos = await getAll();
@@ -594,6 +637,9 @@ window.TripPhotoManager = (function () {
       hash: hash,
       metadata: metadata,
       capturedAt: metadata.capturedAt,
+      // 與 Android 約定用 IANA 名稱（例如 Asia/Taipei）而不是 ±08:00 偏移：
+      // 名稱可以換算出偏移，偏移換不回地區（夏令時、歷史時區變更都還原不了）。
+      capturedTimezone: deviceTimeZone(),
       uploadedAt: Date.now(),
       owner: normalizeOwner(context.owner),
       ownerUid: String((context.owner && context.owner.uid) || ''),

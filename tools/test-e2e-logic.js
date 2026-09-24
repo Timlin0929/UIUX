@@ -918,6 +918,58 @@ section('15. 相簿上傳者標籤：撞名消歧');
     && /stored\.currentUser && stored\.currentUser\.name/.test(P));
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('16. EXIF 時區偏移與 capturedTimezone（與 Android 對齊）');
+(() => {
+  const M = fs.readFileSync(path.join(APP, 'trip-photo-manager.js'), 'utf8');
+  const ctx = { Number: Number, String: String, Date: Date, Math: Math };
+  vm.createContext(ctx);
+  vm.runInContext(extractFunction(M, 'exifOffsetToMinutes'), ctx);
+  vm.runInContext(extractFunction(M, 'exifDateToEpoch'), ctx);
+  const off = ctx.exifOffsetToMinutes;
+  const toEpoch = ctx.exifDateToEpoch;
+
+  check('+08:00 → 480 分', off('+08:00') === 480);
+  check('-05:00 → -300 分', off('-05:00') === -300);
+  check('沒有冒號也要認得（+0800）', off('+0800') === 480);
+  check('空字串／亂碼 → null', off('') === null && off('Asia/Taipei') === null);
+
+  const wall = '2026:09:28 09:32:00';
+  // 有偏移時是絕對時間：台北 09:32 = UTC 01:32
+  check('有偏移時以 UTC 換算', toEpoch(wall, 480) === Date.UTC(2026, 8, 28, 1, 32, 0));
+  // 沒有偏移時退回「裝置當地時區」的解讀
+  check('沒有偏移時用裝置當地時區',
+    toEpoch(wall, null) === new Date(2026, 8, 28, 9, 32, 0).getTime());
+  // 同一個牆上時間，不同偏移必須相差正確的時數
+  check('+08:00 與 -05:00 相差 13 小時',
+    toEpoch(wall, -300) - toEpoch(wall, 480) === 13 * 3600 * 1000,
+    '這正是「兩端時區解讀不一致」會造成的偏移量');
+  check('無法解析的日期回 null', toEpoch('not a date', 480) === null);
+
+  // 偏移標籤必須與日期標籤配對，拿錯配對比沒有更糟
+  check('DateTimeOriginal 配 0x9011',
+    /readAsciiTag\(exif, 0x9003\)[\s\S]{0,160}?readAsciiTag\(exif, 0x9011\)/.test(M));
+  check('DateTimeDigitized 配 0x9012',
+    /readAsciiTag\(exif, 0x9004\)[\s\S]{0,160}?readAsciiTag\(exif, 0x9012\)/.test(M));
+  check('IFD0 DateTime 沒有偏移可用', /rawDate = readAsciiTag\(ifd0, 0x0132\); rawOffset = ''/.test(M));
+
+  check('有偏移時標記 exif-offset',
+    /timeAssumption = Number\.isFinite\(parsed\.offsetMinutes\) \? 'exif-offset' : 'device-local'/.test(M));
+
+  // capturedTimezone：用 IANA 名稱，不是 ±08:00
+  check('capturedTimezone 取 IANA 名稱',
+    /function deviceTimeZone/.test(M)
+    && /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/.test(M));
+  check('建立照片紀錄時寫入 capturedTimezone',
+    /capturedTimezone: deviceTimeZone\(\)/.test(M));
+
+  // 讀取遠端照片不得重新分類（Android 端明確要求）
+  check('ingestRemote 不重新分類',
+    !/classifyPhoto/.test(extractFunction(M, 'ingestRemote')),
+    '兩端都只讀 stopId 欄位，重算會讓同一張照片在兩端落到不同站');
+})();
+
+
 
 
 

@@ -4540,10 +4540,21 @@
     }
   }
 
-  async function uploadTripPhoto(blob, tripId) {
+  // 檔名用 photoId（＝ Firestore 文件 id，UUID，不含斜線），與 Android 端一致。
+  //
+  // 為什麼不是 stopId：照片可以被重新分類到別的景點（updateClassification 會改 stopId
+  // 並重新發布），但 Storage 物件不會跟著搬家——檔名裡的 stopId 一旦過期，除錯時比沒有
+  // 更誤導。photoId 永遠不變，且與文件一一對應，看到檔案就找得到文件，反過來也一樣。
+  // 景點歸屬一律以文件裡的 stopId 欄位為準，不從路徑反推。
+  //
+  // 舊照片不改名：storagePath 是逐筆存在文件裡的，舊路徑照樣解析得到，這是只往前生效的改動。
+  async function uploadTripPhoto(blob, tripId, photoId) {
     const uid = firebaseAuth.currentUser.uid;
     const ts = Date.now();
-    const path = `trip-photos/${uid}/${tripId || 'no-trip'}/${ts}.jpg`;
+    // photoId 理論上一定有（createPhotoRecord 以 uuid() 產生）；萬一沒有就退回時間戳，
+    // 寧可檔名不好認，也不要讓整趟上傳失敗。
+    const name = String(photoId || '').trim().replace(/[\\/]/g, '') || String(ts);
+    const path = `trip-photos/${uid}/${tripId || 'no-trip'}/${name}.jpg`;
     const snapshot = await firebaseStorage.ref(path).put(blob, { contentType: 'image/jpeg' });
     const url = await snapshot.ref.getDownloadURL();
     return { url, path, ts };
@@ -4672,7 +4683,7 @@
         upload: async (blob, photo) => {
           if (!firebaseAuth || !firebaseAuth.currentUser || !firebaseStorage) throw new Error('請先登入後再同步照片。');
           const compressed = await compressImageToJpeg(blob);
-          return uploadTripPhoto(compressed, photo && photo.tripId || '');
+          return uploadTripPhoto(compressed, photo && photo.tripId || '', photo && photo.id || '');
         },
         publish: publishQueuedTripPhoto,
         subscribe: remoteAdapters.subscribe,
