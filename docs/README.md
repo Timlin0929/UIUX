@@ -5,6 +5,7 @@
 ## 架構
 
 - [專題技術摘要](architecture/專題技術摘要.md)：系統架構、技術棧、核心演算法、資料 schema、安全邊界與已知限制。
+- [網頁端 ↔ Android 跨端契約](architecture/APP_CROSSEND_CONTRACT.md)：照片欄位白名單、Storage 路徑、共編權限、explore_templates 耦合與待確認事項。
 - [回饋 Schema](FEEDBACK_SCHEMA.md)：Web 與 App 的旅程回饋資料格式。
 - [多人共同建立行程](../COLLAB.md)：角色、邀請、分享與 Rules 相容性。
 
