@@ -977,6 +977,46 @@ section('16. EXIF 時區偏移與 capturedTimezone（與 Android 對齊）');
 
 
 // ══════════════════════════════════════════════════════════════
+// 18. photos 的 storagePath 防護（Cloud Function 以管理員權限依此路徑刪檔）
+// ══════════════════════════════════════════════════════════════
+(function () {
+  console.log('\n── 18. photos storagePath 防護 ──');
+  const R = fs.readFileSync(path.join(APP, '..', 'firestore.rules'), 'utf8').replace(/\r\n/g, '\n');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const photosBlock = (R.match(/match \/photos\/\{photoId\} \{[\s\S]*?\n      \}\n/) || [''])[0];
+  const createRule = (photosBlock.match(/allow create:[\s\S]*?;/) || [''])[0];
+  const updateRule = (photosBlock.match(/allow update:[\s\S]*?;/) || [''])[0];
+
+  const m = createRule.match(/storagePath\.matches\('trip-photos\/' \+ request\.auth\.uid \+ '([^']+)'\)/);
+  check('create 限制 storagePath 在上傳者自己的資料夾', !!m,
+    '少了這條，任何成員都能填別人的檔案路徑，刪文件時 Function 就會代刪');
+  check('update 禁止改 storagePath 與 url',
+    /request\.resource\.data\.storagePath == resource\.data\.storagePath/.test(updateRule)
+    && /request\.resource\.data\.url == resource\.data\.url/.test(updateRule),
+    'editor 可以改別人照片的分類；若也能改路徑，改完再刪就能讓 Function 刪錯檔');
+
+  // 網頁實際上傳的路徑必須通過 create 條件，否則上傳成功、寫文件卻被拒
+  const tpl = P.match(/const path = `trip-photos\/\$\{uid\}\/\$\{tripId \|\| 'no-trip'\}\/\$\{name\}\.jpg`;/);
+  check('網頁上傳路徑模板未變', !!tpl, '改了路徑格式要一併確認 Rules 的 matches');
+  if (m) {
+    const uid = 'BEXvnUBc1Mat01ep2rvLW2UHSSa2';
+    const re = new RegExp('^trip-photos/' + uid + m[1] + '$');   // Rules 的 matches 是全字串比對
+    check('網頁路徑通過 Rules', re.test(`trip-photos/${uid}/my_1790138720174/9f1c2a7e-photo.jpg`));
+    check('別人的資料夾被擋', !re.test('trip-photos/someoneElse/my_1790138720174/a.jpg'));
+    check('其他服務的檔案被擋', !re.test(`recap-videos/${uid}/my_1790138720174/recap.mp4`));
+    check('多一層資料夾被擋', !re.test(`trip-photos/${uid}/a/b/c.jpg`));
+  }
+})();
+
+
+
+
+
+
+
+
+
+// ══════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════');
 console.log('通過 ' + pass + '，失敗 ' + fail);
 if (failures.length) {

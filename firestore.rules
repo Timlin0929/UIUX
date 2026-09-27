@@ -483,14 +483,23 @@ service cloud.firestore {
         }
 
         allow read: if isTripMemberOrOwner(tripId);
+        // storagePath 必須在上傳者自己的資料夾下：刪照片時 Cloud Function 會用管理員權限
+        // 刪這個路徑的檔案，不能讓人填別人的檔案。只限 uid 不限 tripId——App 舊照片可能放在
+        // local_{roomId} 資料夾（行程上雲前拍的），搬進 photos 時要能建立。
         allow create: if isTripMemberOrOwner(tripId)
           && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.storagePath is string
+          && request.resource.data.storagePath.matches('trip-photos/' + request.auth.uid + '/[^/]+/[^/]+')
           && validPhotoShape(request.resource.data);
+        // storagePath／url 建立後不可改：editor 可協助改分類，但改路徑再刪文件會讓
+        // Function 刪掉擁有者的其他檔案、或把別張照片從 memories 移除
         allow update: if isTripMemberOrOwner(tripId)
           && (resource.data.ownerUid == request.auth.uid
             || isEditor(get(/databases/$(database)/documents/micro_trips/$(tripId)).data))
           && request.resource.data.ownerUid == resource.data.ownerUid
           && request.resource.data.tripId == resource.data.tripId
+          && request.resource.data.storagePath == resource.data.storagePath
+          && request.resource.data.url == resource.data.url
           && validPhotoShape(request.resource.data);
         allow delete: if isTripMemberOrOwner(tripId)
           && (resource.data.ownerUid == request.auth.uid
@@ -573,6 +582,15 @@ service cloud.firestore {
 
     match /custom_pois/{docId} {
       allow read: if request.auth != null;
+    }
+
+    // ★App 探索頁「官方精選範本」（2026-09-24）
+    //   內容由 scripts/export_explore_templates.mjs 執行網頁自己的 explore-templates.js ＋ poi-data.js 產生，
+    //   再用 scripts/upload_explore_templates.py（Admin SDK，繞過 Rules）寫入 explore_templates/current。
+    //   兩端看到同一份範本；內容是公開的景點資料，不含個資。用戶端一律不可寫。
+    match /explore_templates/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
     }
 
     match /invites/{code} {
