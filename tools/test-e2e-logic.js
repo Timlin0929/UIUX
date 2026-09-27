@@ -1200,6 +1200,119 @@ async function section19() {
     'storage.rules 只准本人刪檔，照刪只會得到 403 紅字');
 }
 
+// ══════════════════════════════════════════════════════════════
+// 20. 行程中調整「預計離開時間」：後續順延、原訂不變、衝突只報新出現的
+// ══════════════════════════════════════════════════════════════
+function section20() {
+  console.log('\n── 20. 預計離開時間 ──');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const c = {
+    Math, Number, String, Array, Object, Set, Date,
+    currentTripStatus: 'ongoing', currentTripPreferences: {}, replanStops: [],
+    ensureStopDayIndexes: () => {}, getReplanStartMinutes: () => 540, isMultiDayTrip: () => false,
+    getMultiDayWindow: () => ({ days: [] }), clampDayIndex: (v, f) => Math.max(1, Math.round(Number(v)) || f),
+    normalizeTransitMode: (m) => m || 'car', getEffectiveStopTransitMode: (s) => s.transitMode || 'car',
+    normalizeTransitMinutesValue: (v) => (Number.isFinite(v) ? v : null), getDefaultTransitMinutes: () => 15
+  };
+  vm.createContext(c);
+  ['buildReplanSchedule', 'clockToScheduleMinutes', 'assessLeaveImpact'].forEach((n) => vm.runInContext(extractFunction(P, n), c));
+  const build = () => vm.runInContext('buildReplanSchedule()', c);
+  const mk = () => [
+    { id: 'a', type: 'start', name: '出發', stayMin: 0, transitMin: 15 },
+    { id: 'b', name: '三仙台', stayMin: 60, transitMin: 15 },
+    { id: 'c', name: '都蘭', stayMin: 45, transitMin: 15 },
+    { id: 'd', name: '市區', stayMin: 30, transitMin: 15 },
+    { id: 'e', type: 'end', name: '返回', stayMin: 0 }
+  ];
+  c.replanStops = mk();
+  const base = build();
+  const startOf = (sch, id) => sch.find((r) => r.id === id).start;
+  const endOf = (sch, id) => sch.find((r) => r.id === id).end;
+
+  // 正在三仙台（b），想多待 30 分
+  c.replanStops[1].expectedLeaveMin = endOf(base, 'b') + 30;
+  let sch = build();
+  check('本站結束改成預計離開時間', endOf(sch, 'b') === endOf(base, 'b') + 30);
+  check('後面每一站依序順延 30 分', ['c', 'd', 'e'].every((id) => startOf(sch, id) === startOf(base, id) + 30),
+    JSON.stringify(sch.map((r) => [r.id, r.start])));
+  check('原訂停留不被改寫', c.replanStops[1].stayMin === 60, '延長停留是預測，不是改規劃');
+
+  // 規劃中不採用（例如重設進度後殘留）
+  c.currentTripStatus = 'planning';
+  check('規劃中不套用預計離開時間', endOf(build(), 'b') === endOf(base, 'b'));
+  c.currentTripStatus = 'ongoing';
+
+  // 提早走：後面跟著提早
+  c.replanStops = mk();
+  c.replanStops[1].expectedLeaveMin = endOf(base, 'b') - 20;
+  sch = build();
+  check('提早離開，後面跟著提早', startOf(sch, 'c') === startOf(base, 'c') - 20);
+  // 比抵達還早（到得早、走得早）→ 至少留 5 分，不會出現負的停留
+  c.replanStops[1].expectedLeaveMin = startOf(base, 'b') - 30;
+  sch = build();
+  check('離開時間早於抵達時至少保留 5 分', endOf(sch, 'b') === startOf(sch, 'b') + 5);
+
+  // AGENTS.md 的時間規則：後站手動時間已晚於前站就不動；早於或等於才順延
+  c.replanStops = mk();
+  const cOrig = startOf(base, 'c');
+  c.replanStops[2].manualStartMin = cOrig + 60;           // 都蘭手動排在較晚
+  c.replanStops[1].expectedLeaveMin = endOf(base, 'b') + 30;
+  sch = build();
+  check('後站手動時間仍晚於前站 → 不動', startOf(sch, 'c') === cOrig + 60);
+  c.replanStops[1].expectedLeaveMin = endOf(base, 'b') + 60; // 前站抵達剛好等於手動時間
+  sch = build();
+  check('後站手動時間等於前站抵達 → 維持在該時間', startOf(sch, 'c') === cOrig + 60);
+  c.replanStops[1].expectedLeaveMin = endOf(base, 'b') + 90; // 超過手動時間
+  sch = build();
+  check('後站手動時間早於前站抵達 → 順延', startOf(sch, 'c') === cOrig + 90);
+
+  // 真實時鐘換算
+  const clock = (h, m, day, anchor) => vm.runInContext('clockToScheduleMinutes', c)(new Date(2026, 8, 27, h, m), day, anchor);
+  check('第 1 天 14:30 → 870', clock(14, 30, 1, 600) === 870);
+  check('第 2 天 10:00 → 1440+600', clock(10, 0, 2, 1440 + 540) === 2040);
+  check('過午夜仍在同一站 → 視為隔天', clock(0, 30, 1, 21 * 60) === 1440 + 30, '夜市 21:00 開始、00:30 還在');
+
+  // 衝突判斷
+  const assess = (...a) => vm.runInContext('assessLeaveImpact', c)(...a);
+  const warn = (row) => (row.closeAt != null && row.start >= row.closeAt ? '⚠️ 可能在非營業時間' : '');
+  const before = [
+    { id: 'b', start: 600, end: 660, dayIndex: 1 },
+    { id: 'c', name: '都蘭', start: 675, end: 720, closeAt: 700, dayIndex: 1 },
+    { id: 'x', name: '原本就打烊的店', start: 735, end: 760, closeAt: 700, dayIndex: 1 },
+    { id: 'e', type: 'end', start: 775, end: 775, dayIndex: 1 }
+  ];
+  const shifted = before.map((r, i) => (i === 0 ? { ...r, end: r.end + 30 } : { ...r, start: r.start + 30, end: r.end + 30 }));
+  let r = assess(before, shifted, 0, { hoursWarning: warn, dayEnds: [790] });
+  check('回報順延分鐘與受影響站數', r.shift === 30 && r.affected === 3, JSON.stringify(r));
+  check('新出現的營業時間衝突要報', r.conflicts.some((x) => x.kind === 'hours' && x.stopId === 'c'));
+  check('原本就有的衝突不算在這次頭上', !r.conflicts.some((x) => x.stopId === 'x'));
+  check('當天結束時間超出要報', r.conflicts.some((x) => x.kind === 'day-end' && x.over === 15), JSON.stringify(r.conflicts));
+  r = assess(before, before, 0, { hoursWarning: warn, dayEnds: [790] });
+  check('沒變化就沒有衝突', r.conflicts.length === 0 && r.shift === 0);
+  r = assess(before, shifted, 0, { hoursWarning: warn, dayEnds: null });
+  check('沒設定行程時長就不判斷結束時間', !r.conflicts.some((x) => x.kind === 'day-end'));
+
+  // 欄位同步（stops 多處同步的規矩）與縮短範圍
+  check('expectedLeaveMin 在存檔／兩處載入／共編快照／簽章／欄位白名單都有',
+    (P.match(/expectedLeaveMin: Number\.isFinite\((?:s|stop)\.expectedLeaveMin\)/g) || []).length === 4
+    && /'plannerNote', 'expectedLeaveMin'/.test(P)
+    && /s\.plannerNote \|\| '', Number\.isFinite\(s\.expectedLeaveMin\)/.test(P));
+  check('縮短後面停留只動目前站之後、且不動已定預計離開的站',
+    /const eligible = i >= minIndex && [\s\S]{0,160}?s\.expectedLeaveMin == null;/.test(P));
+  check('重設進度時清掉預計離開時間', /s\.checkedInAt = null; s\.expectedLeaveMin = null;/.test(P));
+
+  // 行程進行中不在背景自動壓縮
+  // 註：不用 extractFunction——預設參數 `options = {}` 的大括號會讓它截錯函式本體
+  check('行程開始後只有使用者主動要求才壓縮',
+    /function fitScheduleToTimeLimit\(options = \{\}\) \{[\s\S]{0,600}?if \(currentTripStatus !== 'planning' && options\.userInitiated !== true\) \{\s*return \{ changed: false/.test(P),
+    '實測：延長停留後其他成員一開頁，後面景點被背景壓到 5 分，兩人看到的結束時間不同');
+  check('「縮短後面景點的停留」帶 userInitiated 且只縮到 35% 下限',
+    /fitScheduleToTimeLimit\(\{ minIndex: index \+ 1, userInitiated: true, floorOnly: true \}\)/.test(P)
+    && /guard = options\.floorOnly \? 4000 : 0;/.test(P),
+    '實測：沒有下限時後面 4 個景點被壓到只剩 5 分');
+}
+section20();
+
 section19().catch((e) => check('第 19 節執行', false, e && e.stack)).then(() => {
   console.log('\n══════════════════════════════════════');
   console.log('通過 ' + pass + '，失敗 ' + fail);

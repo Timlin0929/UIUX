@@ -2261,6 +2261,18 @@ body.prototype-mode .prototype-id-chip {
 .stay-opt-btn{padding:10px 0;border-radius:12px;border:1.5px solid var(--border);background:var(--surface2);color:var(--ink2);font-size:13px;font-weight:600;cursor:pointer;text-align:center;}
 .stay-opt-btn.active{border-color:var(--accent);background:var(--accent-light);color:var(--accent-dark);}
 .stay-opt-btn:hover:not(.active){background:var(--surface);border-color:var(--accent);}
+/* 行程中：預計離開時間 */
+.leave-time-row{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.leave-time-row span{font-size:13px;color:var(--ink2);white-space:nowrap;}
+.leave-time-row input[type="time"]{flex:1;min-width:110px;padding:9px 10px;border-radius:12px;border:1.5px solid var(--border);background:var(--surface);color:var(--ink);font-size:14px;}
+.leave-time-row .stay-opt-btn{padding:10px 14px;white-space:nowrap;}
+.leave-opt-btn{white-space:nowrap;padding-left:4px;padding-right:4px;}
+.leave-reset-btn{color:var(--ink3);}
+.leave-impact-list{grid-column:1/-1;margin:0;padding-left:18px;font-size:13px;line-height:1.6;color:var(--ink2);text-wrap:pretty;}
+.leave-impact-list li{margin-bottom:4px;}
+.leave-impact-action{grid-column:1/-1;padding:12px 10px;white-space:nowrap;}
+.leave-time-btn,.leave-time-tag{white-space:nowrap;}
+.time-est{font-size:10px;line-height:1;color:var(--ink3);margin-bottom:2px;white-space:nowrap;}
 #replanGenOverlay{position:fixed;top:auto;left:auto;bottom:24px;right:24px;z-index:9999;display:none;flex-direction:column;}
 /* 亮色化：原黑底 CLI 終端機風與品牌暖編輯調性衝突（explore 生成已改步驟進度條，這裡對齊） */
 .replan-gen-container{width:360px;max-width:calc(100vw - 48px);background:#fff;border:1px solid var(--border);border-radius:20px;overflow:hidden;box-shadow:0 16px 48px rgba(21,38,59,.18);animation:replanSlideIn .3s ease;}
@@ -3902,6 +3914,10 @@ body.prototype-mode .prototype-id-chip {
   background: #fcfbf9;
   border-color: var(--border);
 }
+/* 已打卡、但人還在這一站（可調整預計離開時間）：不淡化、不劃掉 */
+.timeline-item.visited-stop.staying-stop { opacity: 1; }
+.timeline-item.visited-stop.staying-stop .spot-name { text-decoration: none; color: var(--ink); }
+.timeline-item.visited-stop.staying-stop .spot-card { background: var(--surface); border-color: var(--accent); }
 
 .timeline-item.ongoing-active .spot-card {
   border: 2px solid var(--accent);

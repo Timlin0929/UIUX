@@ -2951,7 +2951,7 @@
     'mapPinId', 'manualStartMin', 'manualEndMin', 'placeId', 'businessHours',
     'coordVerified', 'desc', 'isMergedAttraction', 'mergedSubSpots',
     'mergedRadiusMeters', 'mergedMemberCoords', 'checkedInAt', 'isOutdoor', 'altNearby', 'dayIndex', 'dayIndexLocked',
-    'collabStopId', 'durationLocked', 'plannerNote'
+    'collabStopId', 'durationLocked', 'plannerNote', 'expectedLeaveMin'
   ]);
   function extractAppStopExtras(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -3226,6 +3226,7 @@
                     lat: safePos.lat, lng: safePos.lng, nearbyToiletLocations: [],
                     manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動調整的時間必須跟著載入，否則重載後時刻歸零、共編成員間不一致
                     durationLocked: s.durationLocked === true,
+                    expectedLeaveMin: Number.isFinite(s.expectedLeaveMin) ? s.expectedLeaveMin : null,
                     checkedInAt: s.checkedInAt || null,
                     isOutdoor: typeof s.isOutdoor === 'boolean' ? s.isOutdoor : classifyIndoorOutdoor(s.name, s.desc), altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
                     dayIndex: clampDayIndex(s.dayIndex, 1),
@@ -3322,6 +3323,7 @@
                 nearbyToiletLocations: s.nearbyToiletLocations || [],
                 manualStartMin: s.manualStartMin ?? null, manualEndMin: s.manualEndMin ?? null, // 手動時間跟著載入，否則重載歸零、成員時刻不一致
                 durationLocked: s.durationLocked === true,
+                expectedLeaveMin: Number.isFinite(s.expectedLeaveMin) ? s.expectedLeaveMin : null,
                 checkedInAt: s.checkedInAt || null,
                 isOutdoor: typeof s.isOutdoor === 'boolean' ? s.isOutdoor : classifyIndoorOutdoor(s.name, s.desc), altNearby: s.altNearby || null, // Plan B 替代景點跟著載入
                 dayIndex: clampDayIndex(s.dayIndex, 1),
@@ -7786,7 +7788,14 @@
 
   // 行程超出設定時長時，把需縮短的時間「平均分攤」到各景點（餐廳/用餐站例外，不扣），
   // 每站最多只縮原本的 35%（保底 65%），以水位填平方式反覆均攤直到符合或已無可縮空間。
-  function fitScheduleToTimeLimit() {
+  function fitScheduleToTimeLimit(options = {}) {
+    const minIndex = Number.isInteger(options.minIndex) ? options.minIndex : 0;
+    // 行程開始後只接受使用者主動要求的壓縮（「縮短後面景點的停留」）。
+    // 背景呼叫（載入、路線回填、停車步行回填）原本會在延長停留後把後面景點一路壓到 5 分：
+    // 使用者沒同意就被改掉，而且每位成員各自壓、看到的結束時間都不一樣。
+    if (currentTripStatus !== 'planning' && options.userInitiated !== true) {
+      return { changed: false, fits: true, limitEndMin: null };
+    }
     const prefs = currentTripPreferences || {};
     if (!prefs.days) return { changed: false, fits: true, limitEndMin: null };
     const startMin = getReplanStartMinutes();
@@ -7827,7 +7836,8 @@
     const MIN_RATIO = 0.65;
     const info = replanStops.map((s, i) => {
       // 使用者手動調整過的停留時間是明確決策，背景壓縮不可再改寫。
-      const eligible = !(s.type === 'start' || s.type === 'end') && !isFoodStop(s) && s.durationLocked !== true;
+      const eligible = i >= minIndex && !(s.type === 'start' || s.type === 'end') && !isFoodStop(s)
+        && s.durationLocked !== true && s.expectedLeaveMin == null;
       const orig = Math.max(0, curStayOf(sch, i, s));
       return { stop: s, i, eligible, orig, floor: Math.ceil(orig * MIN_RATIO) };
     });
@@ -7860,8 +7870,10 @@
 
     // 殘量收尾（精準落點優先）：主迴圈守 35% 後若某日仍超出（額度用罄），從該超時日「停留最久」的
     // 景點再多扣（可略超過 35%，但每站至少保留 HARD_MIN 分），扣到剛好落在該日視窗。餐廳仍不扣。
+    // floorOnly（行程中使用者按「縮短」）不做這段：實測會把後面 4 個景點壓到只剩 5 分，
+    // 停 5 分等於沒去——這時該讓使用者決定跳過哪一站，而不是替他把每站都擠爛。
     const HARD_MIN = 5;
-    guard = 0;
+    guard = options.floorOnly ? 4000 : 0;
     while (guard++ < 4000) {
       const r = scheduleEnd(); sch = r.sch; ov = measureOverflow(sch);
       if (ov.total <= 0) break;
@@ -7879,7 +7891,8 @@
     }
 
     const finalSch = scheduleEnd();
-    return { changed, fits: measureOverflow(finalSch.sch).total <= 0, limitEndMin };
+    const finalOverflow = measureOverflow(finalSch.sch).total;
+    return { changed, fits: finalOverflow <= 0, limitEndMin, overflowMin: Math.max(0, finalOverflow) };
   }
 
   // 套用匯出前壓縮並同步畫面/儲存/提示（回傳 fit 結果，無變動時為 no-op）
@@ -8255,7 +8268,10 @@
       if (multiDay && stopDay > 1 && preferredEnd < dayOffset) preferredEnd += dayOffset;
       const preferredDuration = Math.max(5, preferredEnd - preferredStart);
       const start = Math.max(preferredStart, cursor);
-      const end = start + preferredDuration;
+      // 行程中調整過「預計離開時間」→ 以它為準（至少留 5 分）。原訂停留 stayMin 不動：
+      // 延長停留是這一次的預測，不是改寫原本的規劃；後面各站由 cursor 自然順延。
+      const leave = (currentTripStatus !== 'planning' && stop.expectedLeaveMin != null) ? Number(stop.expectedLeaveMin) : NaN;
+      const end = Number.isFinite(leave) ? Math.max(start + 5, leave) : start + preferredDuration;
       const normalizedTransitMin = normalizeTransitMinutesValue(stop.transitMin);
       stop.transitMin = normalizedTransitMin;
 
@@ -9752,7 +9768,7 @@
       Math.round(Number(s.parkWalkMin) || 0),
       s.manualStartMin ?? null, s.manualEndMin ?? null,
       s.checkedInAt ?? null, Number(s.dayIndex) || 1, s.durationLocked === true,
-      s.plannerNote || ''
+      s.plannerNote || '', Number.isFinite(s.expectedLeaveMin) ? s.expectedLeaveMin : null
     ]));
   }
 
@@ -9787,6 +9803,7 @@
         manualStartMin: s.manualStartMin ?? null,
         manualEndMin: s.manualEndMin ?? null,
         durationLocked: s.durationLocked === true,
+        expectedLeaveMin: Number.isFinite(s.expectedLeaveMin) ? s.expectedLeaveMin : null,
         isMergedAttraction: s.isMergedAttraction || false,
         mergedSubSpots: s.mergedSubSpots || null,
         mergedRadiusMeters: s.mergedRadiusMeters || null,
@@ -9966,6 +9983,7 @@
       stayMin: stop.stayMin,
       duration: stop.stayMin ?? null,
       durationLocked: stop.durationLocked === true,
+      expectedLeaveMin: Number.isFinite(stop.expectedLeaveMin) ? stop.expectedLeaveMin : null,
       transitMin: stop.transitMin,
       transitMode: stop.transitMode,
       transitModeManual: stop.transitModeManual === true,
@@ -10620,7 +10638,7 @@
     clearRouteProgress(false);
     routeStageCache.forEach((stage) => { if (stage) stage.maxProgress = 0; });
     refreshRouteProgressRender();
-    (replanStops || []).forEach(s => { s.checkedInAt = null; });
+    (replanStops || []).forEach(s => { s.checkedInAt = null; s.expectedLeaveMin = null; });
 
     updateLocalTripField(currentItineraryId, 'status', 'planning');
     updateLocalTripField(currentItineraryId, 'currentStopIndex', -1);
@@ -10713,6 +10731,8 @@
   }
   function closeStayModal() {
     document.getElementById('stayModal').style.display = 'none';
+    const cancel = document.querySelector('#stayModal .stay-modal-cancel');
+    if (cancel) cancel.textContent = '取消';   // 預計離開時間的影響提示會改成「先保持這樣」
   }
 
   function updateStopStayTime(stopId, minutes) {
@@ -10729,6 +10749,195 @@
     if (isReplanning) renderReplanBoard();
     refreshRouteDirections();
     schedulePersistTrip();
+  }
+
+  // ── 行程中：調整目前景點的「預計離開時間」 ──────────────────────────
+  // 旅途中很難照表走：想多待一下時，後面每一站的預計抵達要馬上跟著順延；
+  // 因此趕不上的（營業時間、當天結束時間）要講出來，但不擅自刪站或重排——由使用者決定。
+  // 存在 stop.expectedLeaveMin（行程時間軸上的分鐘，與 start/end 同一套）；原訂 stayMin 不動。
+
+  // 正在停留的站：打卡後 currentStopIndex 會跳到下一站，所以是它的前一站（起點/終點除外）。
+  function getStayingStopIndex() {
+    if (currentTripStatus !== 'ongoing') return -1;
+    const index = currentStopIndex - 1;
+    const stop = replanStops[index];
+    if (!stop || stop.type === 'start' || stop.type === 'end') return -1;
+    return index;
+  }
+
+  // 真實時鐘 → 行程時間軸：第 N 天加 (N−1)×1440（與 buildReplanSchedule 同口徑）。
+  // 過了午夜還在同一站（例如夜市），時鐘會比表定早很多 → 視為隔天。
+  function clockToScheduleMinutes(date, dayIndex, anchorMin) {
+    const clock = date.getHours() * 60 + date.getMinutes();
+    let minutes = (Math.max(1, Math.round(Number(dayIndex)) || 1) - 1) * 1440 + clock;
+    if (Number.isFinite(anchorMin) && minutes < anchorMin - 12 * 60) minutes += 1440;
+    return minutes;
+  }
+
+  function formatStayMinutes(m) {
+    const v = Math.max(0, Math.round(Number(m) || 0));
+    return v < 60 ? `${v} 分` : (v % 60 === 0 ? `${v / 60} 小時` : `${Math.floor(v / 60)} 小時 ${v % 60} 分`);
+  }
+
+  // 各天的結束時刻（行程時間軸）；沒有設定行程時長時回 null。與 fitScheduleToTimeLimit 同口徑。
+  function getTripDayEndMinutes() {
+    const prefs = currentTripPreferences || {};
+    if (!prefs.days) return null;
+    if (isMultiDayTrip(prefs.days)) return getMultiDayWindow(prefs).days.map((d) => d.endMin);
+    const limit = parseDurationMinutes(prefs.days);
+    if (!Number.isFinite(limit) || limit <= 0) return null;
+    return [getReplanStartMinutes() + limit];
+  }
+
+  // 純函式：比較調整前後的排程，列出後面受影響的站與「新出現」的衝突。
+  // 只報新出現的——原本就超出營業時間的站，不是這次延長造成的，不該算在這次頭上。
+  function assessLeaveImpact(before, after, fromIndex, opts) {
+    const o = opts || {};
+    const dayOf = (row) => Math.max(1, Math.round(Number(row && row.dayIndex)) || 1);
+    const later = after.slice(fromIndex + 1);
+    const prevOf = (k) => before[fromIndex + 1 + k];
+    const shift = later.length && prevOf(0) ? later[0].start - prevOf(0).start : 0;
+    const affected = later.filter((row, k) => prevOf(k) && row.start !== prevOf(k).start).length;
+    const conflicts = [];
+    if (typeof o.hoursWarning === 'function') {
+      later.forEach((row, k) => {
+        if (row.type === 'start' || row.type === 'end') return;
+        const now = o.hoursWarning(row);
+        if (now && !(prevOf(k) && o.hoursWarning(prevOf(k)))) {
+          conflicts.push({ kind: 'hours', stopId: row.id, name: row.name, arrive: row.start, text: String(now).replace(/^⚠️\s*/, '') });
+        }
+      });
+    }
+    if (Array.isArray(o.dayEnds) && o.dayEnds.length) {
+      const lastEnd = (rows) => rows.reduce((m, r) => { m[dayOf(r)] = Math.max(m[dayOf(r)] ?? -Infinity, r.end); return m; }, {});
+      const a = lastEnd(after);
+      const b = lastEnd(before);
+      const days = new Set(later.map(dayOf).concat(after[fromIndex] ? [dayOf(after[fromIndex])] : []));
+      Array.from(days).sort((x, y) => x - y).forEach((d) => {
+        const limit = o.dayEnds[Math.min(d, o.dayEnds.length) - 1];
+        if (Number.isFinite(limit) && a[d] > limit && a[d] > (b[d] ?? -Infinity)) {
+          conflicts.push({ kind: 'day-end', day: d, end: a[d], limit, over: a[d] - limit });
+        }
+      });
+    }
+    return { shift, affected, conflicts };
+  }
+
+  window.openLeaveTimeAdjuster = function (stopId) {
+    if (collabReadOnly) return feedbackToast('訪客或唯讀成員無法調整時間', 'orange');
+    const index = replanStops.findIndex((s) => s.id === stopId);
+    if (index < 0 || index !== getStayingStopIndex()) return;
+    const stop = replanStops[index];
+    const row = buildReplanSchedule()[index];
+    const now = clockToScheduleMinutes(new Date(), row.dayIndex, row.start);
+    document.getElementById('stayModalTitle').textContent = '🕒 預計什麼時候離開？';
+    document.getElementById('stayModalSub').textContent =
+      `${stop.name || ''} · 原訂停留 ${formatStayMinutes(stop.stayMin)} · 目前預計 ${minutesToClock(row.end)} 離開`;
+    const grid = document.getElementById('stayModalGrid');
+    grid.innerHTML = '';
+    const addBtn = (label, leaveMin, extraClass = '') => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'stay-opt-btn leave-opt-btn' + extraClass;
+      btn.textContent = label;
+      btn.onclick = () => applyExpectedLeave(stopId, leaveMin);
+      grid.appendChild(btn);
+    };
+    addBtn('現在就走', now);
+    [15, 30, 45, 60, 90].forEach((m) => addBtn(`再待 ${m} 分`, now + m));
+    if (stop.expectedLeaveMin != null) addBtn('照原訂', null, ' leave-reset-btn');
+
+    // 指定時間：直接輸入預計離開的時刻
+    const custom = document.createElement('div');
+    custom.className = 'leave-time-row';
+    const input = document.createElement('input');
+    input.type = 'time';
+    const preset = Math.max(now, row.end) % 1440;   // time 欄位只收 HH:MM，不能帶「次日」
+    input.value = `${String(Math.floor(preset / 60)).padStart(2, '0')}:${String(preset % 60).padStart(2, '0')}`;
+    input.setAttribute('aria-label', '預計離開時間');
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'stay-opt-btn';
+    ok.textContent = '用這個時間';
+    ok.onclick = () => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(input.value || '');
+      if (!m) return feedbackToast('請選擇時間', 'orange');
+      let target = clockToScheduleMinutes(new Date(2000, 0, 1, Number(m[1]), Number(m[2])), row.dayIndex, row.start);
+      if (target < now - 12 * 60) target += 1440;
+      if (target < now) return feedbackToast('離開時間要晚於現在', 'orange');
+      applyExpectedLeave(stopId, target);
+    };
+    const label = document.createElement('span');
+    label.textContent = '指定時間';
+    custom.append(label, input, ok);
+    grid.appendChild(custom);
+    document.getElementById('stayModal').style.display = 'flex';
+  };
+
+  function applyExpectedLeave(stopId, leaveMin) {
+    const index = replanStops.findIndex((s) => s.id === stopId);
+    if (index < 0 || index !== getStayingStopIndex() || collabReadOnly) return;
+    const before = buildReplanSchedule();
+    replanStops[index].expectedLeaveMin = Number.isFinite(leaveMin) ? Math.round(leaveMin) : null;
+    const after = buildReplanSchedule();
+    closeStayModal();
+    renderItineraryDisplay();
+    schedulePersistTrip();
+    const impact = assessLeaveImpact(before, after, index, {
+      dayEnds: getTripDayEndMinutes(),
+      hoursWarning: (row) => getBusinessHoursWarning(row)
+    });
+    showLeaveImpact(stopId, impact);
+  }
+
+  function showLeaveImpact(stopId, impact) {
+    const { shift, affected, conflicts } = impact;
+    const moved = affected > 0 && shift !== 0
+      ? `後面 ${affected} 站預計${shift > 0 ? '順延' : '提早'} ${formatStayMinutes(Math.abs(shift))}`
+      : '後面行程的時間不受影響';
+    if (!conflicts.length) {
+      feedbackToast(`🕒 已更新預計離開時間，${moved}`, 'blue');
+      return;
+    }
+    document.getElementById('stayModalTitle').textContent = '⚠️ 後面可能趕不上';
+    document.getElementById('stayModalSub').textContent = `${moved}。時間是預測，可以先保持，路上再調整。`;
+    const grid = document.getElementById('stayModalGrid');
+    grid.innerHTML = '';
+    const list = document.createElement('ul');
+    list.className = 'leave-impact-list';
+    conflicts.forEach((c) => {
+      const li = document.createElement('li');
+      li.textContent = c.kind === 'hours'
+        ? `${c.name}：預計 ${minutesToClock(c.arrive)} 抵達，${c.text}`
+        : `${c.day > 1 ? `第 ${c.day} 天` : '今天'}預計 ${minutesToClock(c.end)} 結束，比原訂 ${minutesToClock(c.limit)} 晚 ${formatStayMinutes(c.over)}`;
+      list.appendChild(li);
+    });
+    grid.appendChild(list);
+    const index = replanStops.findIndex((s) => s.id === stopId);
+    const action = (label, handler) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'stay-opt-btn leave-impact-action';
+      btn.textContent = label;
+      btn.onclick = handler;
+      grid.appendChild(btn);
+    };
+    if (conflicts.some((c) => c.kind === 'day-end')) {
+      action('縮短後面景點的停留', () => {
+        closeStayModal();
+        const fit = fitScheduleToTimeLimit({ minIndex: index + 1, userInitiated: true, floorOnly: true });
+        if (!fit.changed) return feedbackToast('後面沒有可以再縮短的景點（用餐站與手動設定過的停留不會動），可以考慮跳過一站', 'orange');
+        renderItineraryDisplay();
+        schedulePersistTrip();
+        feedbackToast(fit.fits
+          ? `⏱ 已縮短後面景點的停留，預計 ${minutesToClock(fit.limitEndMin)} 前結束`
+          : `⏱ 每站最多縮 35%，仍會超過 ${minutesToClock(fit.limitEndMin)} 約 ${formatStayMinutes(fit.overflowMin)}，可以考慮跳過一站`, fit.fits ? 'green' : 'orange');
+      });
+    }
+    action('調整順序或跳過景點', () => { closeStayModal(); enterReplanMode(); });
+    const cancel = document.querySelector('#stayModal .stay-modal-cancel');
+    if (cancel) cancel.textContent = '先保持這樣';
+    document.getElementById('stayModal').style.display = 'flex';
   }
 
   function enterReplanMode() {
@@ -10823,8 +11032,11 @@
       <div class="stay-suggestion-note">選取景點可查看詳細資訊與調整安排；儲存後系統會即時重新計算後續行程。</div>
     `;
 
+    const stayingStopIndex = getStayingStopIndex();
     schedule.forEach((stop, index) => {
       const timeStr = minutesToClock(stop.start);
+      // 行程中，還沒到的站時間只是預測（路況、停留都會變），不要看起來像固定排程
+      const isEstimate = currentTripStatus === 'ongoing' && index >= currentStopIndex;
       const tag = tagMap[stop.id] || { text: '', style: '' };
       
       // 判断是否是最后一个停靠点
@@ -10871,14 +11083,20 @@
 
       let actionButtonsHtml = '';
       let itemClasses = 'timeline-item';
+      const isStayingStop = index === stayingStopIndex;
+      const leaveChipHtml = isStayingStop
+        ? (collabReadOnly
+          ? `<span class="tag leave-time-tag">🕒 預計 ${minutesToClock(stop.end)} 離開</span>`
+          : `<button class="stay-edit-btn leave-time-btn" onclick="event.stopPropagation(); openLeaveTimeAdjuster('${jsAttrStr(stop.id)}')">🕒 預計 ${minutesToClock(stop.end)} 離開 · 調整</button>`)
+        : '';
       if (currentTripStatus === 'ongoing') {
         // 進行中仍以唯讀方式顯示各站預計停留時間（不提供「調整」，專心執行）
         const stayTagHtml = (!isEndpointStop && stop.stayMin > 0)
-          ? `<span class="tag stay-time-tag">⏱ ${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>`
+          ? `<span class="tag stay-time-tag">⏱ ${isStayingStop && stop.expectedLeaveMin != null ? '原訂 ' : ''}${stop.stayMin < 60 ? stop.stayMin + '分' : (stop.stayMin % 60 === 0 ? (stop.stayMin/60) + '小時' : Math.floor(stop.stayMin/60) + '時' + (stop.stayMin%60) + '分')}</span>`
           : '';
         if (index < currentStopIndex) {
-          itemClasses += ' visited-stop';
-          actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#e0f2fe;color:#0369a1;">✓ 已打卡</span>`;
+          itemClasses += isStayingStop ? ' visited-stop staying-stop' : ' visited-stop';
+          actionButtonsHtml = stayTagHtml + `<span class="tag" style="background:#e0f2fe;color:#0369a1;">✓ 已打卡</span>` + leaveChipHtml;
         } else if (index === currentStopIndex) {
           itemClasses += ' ongoing-active';
           // C4 導航：跳轉 Google Maps 外部導航前往目前站（唯讀成員也可用——導航不改資料）
@@ -10915,7 +11133,7 @@
 
       html += `
         <div id="itinerary-stop-${escapeHtml(stop.id)}" class="${itemClasses}" role="button" tabindex="0" aria-label="${collabReadOnly ? '查看' : '編輯'}景點：${escapeHtml(stop.name)}" onclick="openItineraryStop('${jsAttrStr(stop.id)}')" onkeydown="activateItineraryStopFromKeyboard(event, '${jsAttrStr(stop.id)}')" onmouseenter="highlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')" onmouseleave="unhighlightPin('${stop.mapPinId || 'pin-' + (index + 1)}')">
-          <div class="time-box"><div class="time-val">${timeStr}</div></div>
+          <div class="time-box">${isEstimate ? '<div class="time-est">預計</div>' : ''}<div class="time-val">${timeStr}</div></div>
           <div class="node"><div class="node-dot" ${nodeDotStyle}></div></div>
           <div class="content-box">
             <div class="spot-card" ${spotCardStyle}>
