@@ -15142,6 +15142,15 @@
     const detail = hasMeaningfulSpotDescription(stop.desc) ? String(stop.desc).trim() : '此景點目前沒有額外介紹。';
 
     title.textContent = `${stop.emoji || '📍'} ${stop.name || '景點'}`;
+    const kicker = document.querySelector('#stopEditorDrawer .stop-editor-kicker');
+    // 行程中：不顯示「鎖起來的編輯表單」，換成旅途中用得到的內容（見 renderLiveStopPanel）
+    if (currentTripStatus === 'ongoing') {
+      if (kicker) kicker.textContent = '行程中';
+      summary.textContent = describeLiveStopStatus(stop, stopIndex, schedule);
+      body.innerHTML = renderLiveStopPanel(stop, stopIndex, schedule);
+      return true;
+    }
+    if (kicker) kicker.textContent = '單站設定';
     summary.textContent = readOnly
       ? '目前為唯讀狀態，可查看但不能變更這一站。'
       : '集中調整這一站的時間、停留、交通與備註。';
@@ -15198,6 +15207,71 @@
       `}
     `;
     return true;
+  }
+
+  // ── 行程中的單站面板 ─────────────────────────────────────────────
+  // 規劃用的編輯表單在行程中全部唯讀，只剩點不動的欄位和鎖頭提示。這裡改成旅途中
+  // 真正會用到的：目前狀態、這一站能做的事、景點資訊、規劃時寫的備註。
+  function formatClockOfEpoch(ts) {
+    const d = new Date(Number(ts));
+    if (!Number.isFinite(d.getTime())) return '';
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+
+  function describeLiveStopStatus(stop, index, row) {
+    const start = row && Number.isFinite(row.start) ? minutesToClock(row.start) : '';
+    const arrived = stop.checkedInAt ? formatClockOfEpoch(stop.checkedInAt) : '';
+    if (index === getStayingStopIndex()) return `你在這裡${arrived ? ` · ${arrived} 抵達` : ''}`;
+    if (index < currentStopIndex) {
+      if (stop.type === 'start') return `✓ 已出發${arrived ? ` · ${arrived}` : ''}`;
+      return `✓ 已打卡${arrived ? ` · ${arrived}` : ''}`;
+    }
+    if (index === currentStopIndex) return `下一站${start ? ` · 預計 ${start} 抵達` : ''}`;
+    return start ? `預計 ${start} 抵達` : '還沒到';
+  }
+
+  function renderLiveStopPanel(stop, index, row) {
+    const isEndpoint = stop.type === 'start' || stop.type === 'end';
+    const id = jsAttrStr(stop.id);
+    const actions = [];
+    if (index === getStayingStopIndex() && row) {
+      actions.push(collabReadOnly
+        ? `<div class="stop-live-leave">🕒 預計 ${minutesToClock(row.end)} 離開</div>`
+        : `<button type="button" class="stop-editor-action stop-live-primary" onclick="closeStopEditor({ skipFocus: true }); openLeaveTimeAdjuster('${id}')">🕒 預計 ${minutesToClock(row.end)} 離開 · 調整</button>`);
+    }
+    if (index === currentStopIndex && !collabReadOnly) {
+      const label = stop.type === 'start' ? '🚗 出發' : stop.type === 'end' ? '🏁 抵達終點' : '✅ 到達打卡';
+      actions.push(`<button type="button" class="stop-editor-action stop-live-primary" onclick="closeStopEditor({ skipFocus: true }); checkInCurrentStop('${id}', event)">${label}</button>`);
+    }
+    if (index >= currentStopIndex && index > 0) {
+      actions.push(`<button type="button" class="stop-editor-action" onclick="openExternalNavigation('${id}')">🧭 導航</button>`);
+    }
+    if (index < currentStopIndex && !isEndpoint) {
+      actions.push(`<button type="button" class="stop-editor-action" onclick="closeStopEditor({ skipFocus: true }); addPhotoForVisitedPlace('${jsAttrStr(stop.name || '')}', '${jsAttrStr(String(currentItineraryId || ''))}')">📷 拍照</button>`);
+    }
+
+    const desc = hasMeaningfulSpotDescription(stop.desc) ? String(stop.desc).trim() : '';
+    const hours = !isEndpoint && stop.businessHours ? formatDayBusinessHours(stop.businessHours, getStopServiceDate(stop)) : '';
+    const notice = isEndpoint ? '' : buildSpotNotice(stop.name || '', stop.desc || '', stop.notice || '');
+    const access = isEndpoint ? '' : formatAccessNote(stop);
+    const note = String(stop.plannerNote || '').trim();
+
+    return `
+      ${actions.length ? `<section class="stop-editor-section stop-live-actions" aria-label="這一站可以做的事">${actions.join('')}</section>` : ''}
+      ${(desc || hours || notice || access) ? `
+        <section class="stop-editor-section stop-live-info" aria-labelledby="stopLiveInfoHeading">
+          <h3 id="stopLiveInfoHeading">景點資訊</h3>
+          ${desc ? `<p>${escapeHtml(desc)}</p>` : ''}
+          ${hours ? `<p class="stop-live-hours">${hours}</p>` : ''}
+          ${access}
+          ${notice ? `<p class="stop-live-notice">⚠️ ${escapeHtml(notice)}</p>` : ''}
+        </section>` : ''}
+      ${note ? `
+        <section class="stop-editor-section" aria-labelledby="stopLiveNoteHeading">
+          <h3 id="stopLiveNoteHeading">📝 行程備註</h3>
+          <p class="stop-live-note">${escapeHtml(note)}</p>
+        </section>` : ''}
+    `;
   }
 
   function openStopEditor(stopId) {

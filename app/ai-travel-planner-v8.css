@@ -7191,6 +7191,16 @@ button.notif-item { cursor: pointer; }
 }
 .stop-editor-action { flex: 1; border: 1px solid var(--border); background: var(--surface); color: var(--ink2); }
 .stop-editor-action.danger { border-color: #f3c5c5; color: #b42318; }
+/* 行程中的單站面板 */
+.stop-live-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.stop-live-actions .stop-editor-action { flex: 1 1 140px; }
+.stop-editor-action.stop-live-primary { flex-basis: 100%; border-color: var(--accent); background: var(--accent); color: #fff; }
+.stop-live-leave { flex-basis: 100%; color: var(--ink); font-size: 14px; font-weight: 800; white-space: nowrap; }
+.stop-live-info p { margin: 0 0 8px; color: var(--ink2); font-size: 13px; line-height: 1.7; text-wrap: pretty; }
+.stop-live-info p:last-child { margin-bottom: 0; }
+.stop-live-hours { font-weight: 700; }
+.stop-live-notice { color: var(--ink2); }
+.stop-live-note { margin: 0; color: var(--ink); font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .stop-editor-footer { position: sticky; bottom: -1px; padding-top: 12px; background: var(--surface); }
 .stop-editor-cancel { flex: 1; border: 1px solid var(--border); background: var(--surface2); color: var(--ink2); }
 .stop-editor-save { flex: 2; border: 1px solid var(--accent); background: var(--accent); color: #fff; }

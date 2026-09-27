@@ -1301,6 +1301,41 @@ function section20() {
     /const eligible = i >= minIndex && [\s\S]{0,160}?s\.expectedLeaveMin == null;/.test(P));
   check('重設進度時清掉預計離開時間', /s\.checkedInAt = null; s\.expectedLeaveMin = null;/.test(P));
 
+  // 行程中點開景點：換成行程中面板，不再是整份鎖住的編輯表單
+  const lc = {
+    Math, Number, String, Date, currentStopIndex: 3, collabReadOnly: false, currentItineraryId: 'my_trip',
+    getStayingStopIndex: () => 2, minutesToClock: (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`,
+    jsAttrStr: (v) => String(v).replace(/'/g, "\\'"), escapeHtml: (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    hasMeaningfulSpotDescription: (d) => !!String(d || '').trim(), formatDayBusinessHours: () => '🕐 09:00–17:00',
+    getStopServiceDate: () => '2026-09-28', buildSpotNotice: () => '注意落石', formatAccessNote: () => ''
+  };
+  vm.createContext(lc);
+  ['formatClockOfEpoch', 'describeLiveStopStatus', 'renderLiveStopPanel'].forEach((n) => vm.runInContext(extractFunction(P, n), lc));
+  const panel = (stop, i, row) => vm.runInContext('renderLiveStopPanel', lc)(stop, i, row);
+  const status = (stop, i, row) => vm.runInContext('describeLiveStopStatus', lc)(stop, i, row);
+  const spot = { id: 's', name: '三仙台', desc: '跨海步橋', businessHours: '全天', plannerNote: '集合在<南側>停車場' };
+  const row = { start: 600, end: 660 };
+  let html = panel(spot, 2, row);
+  check('正在停留的站：預計離開＋調整', /預計 11:00 離開 · 調整/.test(html) && /openLeaveTimeAdjuster\('s'\)/.test(html));
+  check('正在停留的站：可以拍照、不顯示導航', /📷 拍照/.test(html) && !/🧭 導航/.test(html));
+  check('面板沒有唯讀表單欄位', !/<(input|select|textarea)\b/.test(html) && !/disabled/.test(html),
+    '使用者回報：行程中點開景點只看到點不動的欄位和鎖頭，很怪');
+  check('景點資訊直接顯示（介紹、營業時間、注意事項）', /跨海步橋/.test(html) && /09:00–17:00/.test(html) && /注意落石/.test(html));
+  check('行程備註以文字顯示且有跳脫', /集合在&lt;南側&gt;停車場/.test(html));
+  html = panel(spot, 3, row);
+  check('下一站：到達打卡＋導航', /✅ 到達打卡/.test(html) && /checkInCurrentStop\('s', event\)/.test(html) && /🧭 導航/.test(html));
+  lc.collabReadOnly = true;
+  html = panel(spot, 3, row);
+  check('唯讀成員：可導航但不能打卡', /🧭 導航/.test(html) && !/到達打卡/.test(html));
+  html = panel(spot, 2, row);
+  check('唯讀成員：只看預計離開，不能調整', /預計 11:00 離開/.test(html) && !/openLeaveTimeAdjuster/.test(html));
+  lc.collabReadOnly = false;
+  check('沒寫備註就不顯示備註區塊', !/行程備註/.test(panel({ ...spot, plannerNote: '' }, 5, row)));
+  check('狀態文字', status(spot, 3, row) === '下一站 · 預計 10:00 抵達' && status(spot, 5, row) === '預計 10:00 抵達'
+    && /^你在這裡/.test(status(spot, 2, row)) && /^✓ 已打卡/.test(status(spot, 1, row)));
+  check('行程中改走面板、不再輸出鎖住的表單',
+    /if \(currentTripStatus === 'ongoing'\) \{\s*if \(kicker\) kicker\.textContent = '行程中';[\s\S]{0,200}?body\.innerHTML = renderLiveStopPanel\(stop, stopIndex, schedule\);\s*return true;/.test(P));
+
   // 行程進行中不在背景自動壓縮
   // 註：不用 extractFunction——預設參數 `options = {}` 的大括號會讓它截錯函式本體
   check('行程開始後只有使用者主動要求才壓縮',
