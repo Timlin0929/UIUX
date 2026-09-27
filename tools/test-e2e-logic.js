@@ -969,12 +969,53 @@ section('16. EXIF 時區偏移與 capturedTimezone（與 Android 對齊）');
     '兩端都只讀 stopId 欄位，重算會讓同一張照片在兩端落到不同站');
 })();
 
+// ══════════════════════════════════════════════════════════════
+section('17. 照片刪除政策：方案 B（owner/editor 可協助管理）');
+(() => {
+  const G = require(path.join(APP, 'trip-photo-gallery.js'));
+  const canUI = G.utils.defaultCan;
+  const mine = { id: 'p1', ownerUid: 'me', url: 'x' };
+  const theirs = { id: 'p2', ownerUid: 'other', url: 'x' };
+  const ro = { id: 'p3', ownerUid: 'other', url: 'x', readOnly: true };
+  const as = (role) => ({ uid: 'me', role: role });
 
+  // 三個角色 × 自己／他人
+  check('行程 owner 可刪他人照片', canUI('delete', theirs, as('owner')) === true);
+  check('editor 可刪他人照片', canUI('delete', theirs, as('editor')) === true,
+    '方案 B：owner/editor 可協助管理');
+  check('一般成員不可刪他人照片', canUI('delete', theirs, as('member')) === false);
+  check('一般成員可刪自己的照片', canUI('delete', mine, as('member')) === true);
+  check('viewer 不可刪任何照片',
+    canUI('delete', mine, as('viewer')) === false && canUI('delete', theirs, as('viewer')) === false);
 
+  // 舊版 memories 併進來的唯讀資料仍然擋住
+  check('唯讀（舊 memories）照片一律不可刪', canUI('delete', ro, as('editor')) === false,
+    '那是 memories 併進來的顯示用資料，不在 photos 集合裡，刪不掉也不該給按鈕');
 
+  // 三層政策必須一致，否則又會回到「owner 可以、editor 不行」
+  const M = fs.readFileSync(path.join(APP, 'trip-photo-manager.js'), 'utf8');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const R = fs.readFileSync(path.join(APP, '..', 'firestore.rules'), 'utf8');
+  check('層級 A：TripPhotoManager.can 允許 editor 刪他人',
+    /if \(action === 'delete'\) return role === 'editor' \|\| \(ownsPhoto && role === 'member'\);/.test(M));
+  check('層級 B：sync 的 authorize 允許 owner\/editor remove',
+    /\['overwrite', 'remove'\]\.includes\(action\) && \(role === 'owner' \|\| role === 'editor'\)/.test(P));
+  // 刪除要真的刪到遠端——這是方案 B 才浮現的既有問題
+  check('遠端刪除的判斷不依賴 photo.remote',
+    /var hasRemoteCopy = !!\(photo\.remote \|\| photo\.storagePath \|\| photo\.url\);/.test(M)
+    && /if \(hasRemoteCopy && typeof config\.removeRemote === 'function'\)/.test(M),
+    'photo.remote 只有「這台裝置上傳過」的照片才有；別人的或自己他機傳的都沒有，遠端會刪不掉');
 
+  // 別人刪掉的照片要從本機快取消失，否則會變成只有自己看得到的幽靈
+  check('ingestRemote 會修剪遠端已消失的紀錄',
+    /options\.tripId && options\.prune !== false/.test(M)
+    && /if \(!isPrunableWhenMissing\(candidate, now\)\) continue;/.test(M)
+    && /emit\('remote-removed'/.test(M),
+    '哪些可清交給 isPrunableWhenMissing（第 19 節有行為測試）');
 
-
+  check('層級 C：Rules 允許 editor 刪他人',
+    /allow delete: if isTripMemberOrOwner\(tripId\)[\s\S]{0,160}?isEditor\(get\(/.test(R));
+})();
 
 // ══════════════════════════════════════════════════════════════
 // 18. photos 的 storagePath 防護（Cloud Function 以管理員權限依此路徑刪檔）
@@ -1017,10 +1058,154 @@ section('16. EXIF 時區偏移與 capturedTimezone（與 Android 對齊）');
 
 
 // ══════════════════════════════════════════════════════════════
-console.log('\n══════════════════════════════════════');
-console.log('通過 ' + pass + '，失敗 ' + fail);
-if (failures.length) {
-  console.log('\n失敗項目：');
-  failures.forEach((f, i) => console.log('  ' + (i + 1) + '. ' + f));
+// 19. 照片被刪後：本機快取、旅記紀錄、Storage 檔案都要跟著走
+// ══════════════════════════════════════════════════════════════
+async function section19() {
+  console.log('\n── 19. 刪除後的清理 ──');
+  const M = fs.readFileSync(path.join(APP, 'trip-photo-manager.js'), 'utf8');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+
+  // (a) 相簿快取：哪些「遠端已消失」的紀錄可以清
+  const mctx = { STATUS: { SYNCED: 'synced' } };
+  vm.createContext(mctx);
+  vm.runInContext((M.match(/var LOCAL_PRUNE_GRACE_MS = [^;]+;/) || [''])[0], mctx);
+  vm.runInContext(extractFunction(M, 'isPrunableWhenMissing'), mctx);
+  const prunable = (photo, now) => vm.runInContext('isPrunableWhenMissing', mctx)(photo, now);
+  const NOW = 10 * 60 * 1000;
+  check('遠端下載、已同步的 → 清', prunable({ source: 'remote', status: 'synced' }, NOW) === true);
+  check('自己上傳、同步完成超過一分鐘 → 清', prunable({ source: 'local', status: 'synced', syncedAt: NOW - 61000 }, NOW) === true,
+    '上傳後這台沒看過任何快照、別人就把它刪了——原本永遠清不掉');
+  check('自己上傳、剛同步完成 → 不清', prunable({ source: 'local', status: 'synced', syncedAt: NOW - 5000 }, NOW) === false,
+    '那份快照可能是發布前抓的，還沒有這張');
+  ['queued', 'uploading', 'publishing', 'failed', 'local-only'].forEach((st) => {
+    check('待上傳（' + st + '）→ 不清', prunable({ source: 'local', status: st, syncedAt: 0 }, NOW) === false,
+      '清掉就弄丟使用者還沒傳上去的照片');
+  });
+
+  // (b) 旅記紀錄對齊
+  const pctx = {};
+  vm.createContext(pctx);
+  ['visitedPlaceNameKey', 'visitedPlaceMatches', 'reconcileVisitedTripPhotos'].forEach((n) => vm.runInContext(extractFunction(P, n), pctx));
+  const reconcile = (...a) => vm.runInContext('reconcileVisitedTripPhotos', pctx)(...a);
+  const T = 'my_trip';
+  const START = 1800000000000;
+  const U = (n) => 'https://firebasestorage.googleapis.com/v0/b/x/o/' + n + '?alt=media&token=t';
+  const fresh = () => [{
+    name: '三仙台', tripId: T, photos: [
+      { url: U('mine-old'), path: 'trip-photos/me/my_trip/old.jpg', ts: 1 },                                     // 正式 photos 出現前的舊照片
+      { url: U('mine-new'), path: 'trip-photos/me/my_trip/p1.jpg', photoId: 'p1', uploadedAt: START - 3600e3 },  // 自己上傳、已發布
+      { url: U('mine-just'), path: 'trip-photos/me/my_trip/p2.jpg', photoId: 'p2', uploadedAt: START - 10e3 },   // 剛上傳
+      { url: U('friend'), ts: 5, foreign: true, owner: '小美' }                                                   // 旅伴的
+    ]
+  }, { name: '別趟的景點', tripId: 'other', photos: [{ url: U('other-trip'), photoId: 'zz', uploadedAt: 1 }] }];
+  const optsFor = (complete) => ({ myUid: 'me', nameByStopId: { s1: '三仙台' }, complete, startedAt: START, newRecord: (name) => ({ name, tripId: T, photos: [] }) });
+  const urlsOf = (places, name) => (places.find((p) => p.name === name) || { photos: [] }).photos.map((p) => p.url);
+
+  // editor 刪掉「自己上傳的 p1」與「旅伴那張」之後的雲端清單
+  let places = fresh();
+  let r = reconcile(places, T, [{ photoId: 'p2', url: U('mine-just'), storagePath: 'trip-photos/me/my_trip/p2.jpg', stopId: 's1', ownerUid: 'me' }], optsFor(true));
+  let kept = urlsOf(places, '三仙台');
+  check('被刪的自己照片（有 photoId）從旅記移除', !kept.includes(U('mine-new')));
+  check('被刪的旅伴照片從旅記移除', !kept.includes(U('friend')));
+  check('舊照片（沒 photoId、雲端無從比對）保留', kept.includes(U('mine-old')), '清掉會讓只存在本機的舊照片消失');
+  check('剛上傳的照片保留', kept.includes(U('mine-just')));
+  check('別趟行程不受影響', urlsOf(places, '別趟的景點').includes(U('other-trip')));
+  check('回報刪除數', r.removed === 2 && r.added === 0, JSON.stringify(r));
+
+  // 剛上傳、清單還沒有它 → 寬限期內保留
+  places = fresh();
+  reconcile(places, T, [{ photoId: 'p1', url: U('mine-new'), stopId: 's1', ownerUid: 'me' }, { url: U('friend'), stopName: '三仙台', ownerUid: 'f' }], optsFor(true));
+  check('寬限期內的新照片不因清單較舊而被刪', urlsOf(places, '三仙台').includes(U('mine-just')));
+
+  // 讀取不完整（舊版 memories 讀失敗）→ 只併不刪
+  places = fresh();
+  r = reconcile(places, T, [], optsFor(false));
+  check('資料不完整時不刪任何東西', r.removed === 0 && urlsOf(places, '三仙台').length === 4);
+
+  // 新增：旅伴在正式 photos 新傳的照片（網頁原本只讀 memories，看不到）
+  places = fresh();
+  r = reconcile(places, T, [
+    { photoId: 'p1', url: U('mine-new'), stopId: 's1', ownerUid: 'me' },
+    { photoId: 'p2', url: U('mine-just'), stopId: 's1', ownerUid: 'me' },
+    { url: U('friend'), stopName: '三仙台', ownerUid: 'f' },
+    { photoId: 'f9', url: U('friend-formal'), storagePath: 'trip-photos/f/my_trip/f9.jpg', stopId: 's1', ownerUid: 'f', ownerName: '小美' },
+    { photoId: 'f10', url: U('new-stop'), stopName: '鹿野高台', ownerUid: 'f', ownerName: '小美' },
+    { photoId: 'f11', url: U('unsorted'), stopId: '', stopName: '', ownerUid: 'f' },
+    { photoId: 'm5', url: U('mine-other-device'), stopId: 's1', ownerUid: 'me' }
+  ], optsFor(true));
+  const sanxian = places.find((p) => p.name === '三仙台').photos;
+  const added = sanxian.find((p) => p.url === U('friend-formal'));
+  check('旅伴的正式照片併進旅記', !!added && added.foreign === true && added.owner === '小美');
+  check('併進來的照片帶 photoId/path，之後刪除才對得到', !!added && added.photoId === 'f9' && added.path === 'trip-photos/f/my_trip/f9.jpg');
+  check('沒有造訪紀錄的景點會補一筆', urlsOf(places, '鹿野高台').includes(U('new-stop')));
+  check('未分類照片不進旅記', !places.some((p) => (p.photos || []).some((ph) => ph.url === U('unsorted'))));
+  const otherDevice = sanxian.find((p) => p.url === U('mine-other-device'));
+  check('自己他機的照片 owner 為 null', !!otherDevice && otherDevice.owner === null);
+  check('已存在的不重複加', urlsOf(places, '三仙台').filter((u) => u === U('mine-new')).length === 1 && r.added === 3, JSON.stringify(r));
+
+  // Cloud Function 沒跑到：正式文件已刪，但自己 memories 裡的網址還在（sync.list 會把它當舊版照片回傳）
+  places = fresh();
+  r = reconcile(places, T, [
+    { photoId: 'p2', url: U('mine-just'), stopId: 's1', ownerUid: 'me', source: 'formal' },
+    { photoId: 'legacy_x', url: U('mine-new'), stopId: 's1', ownerUid: 'me', source: 'legacy-memory' },
+    { photoId: 'legacy_y', url: U('friend'), stopId: 's1', ownerUid: 'f', source: 'legacy-memory' }
+  ], optsFor(true));
+  kept = urlsOf(places, '三仙台');
+  check('自己的照片以正式 photos 為準：memories 殘留的網址不算「還在」', !kept.includes(U('mine-new')),
+    '實測 2026-09-27：Function 沒動作時，照片會以舊版 memories 的身分一直回來');
+  check('回報要從自己 memories 清掉的網址', r.removedOwn.length === 1 && r.removedOwn[0].url === U('mine-new'), JSON.stringify(r.removedOwn));
+  check('旅伴只存在 memories 的照片（App 舊資料）照樣保留', kept.includes(U('friend')));
+  const mergeSrc = extractFunction(P, 'mergeTripMemoriesIntoLocal');
+  check('有自己的照片被刪時清自己的 memories', /if \(result\.removedOwn\.length && uid\) await dropFromOwnMemory\(/.test(mergeSrc));
+  const dropSrc = extractFunction(P, 'dropFromOwnMemory');
+  check('清 memories 用 merge 寫入（不覆蓋 migratedPhotoKeys 等 App 欄位）', /await ref\.set\(update, \{ merge: true \}\)/.test(dropSrc));
+
+  // 相簿：舊版 memories 的照片唯讀；名稱以正式照片為準
+  check('相簿把舊版 memories 照片標成唯讀', /p\.source === 'legacy-memory' \? \{ \.\.\.p, readOnly: true \}/.test(P),
+    '實測：B 看得到「移除」，按了只會在下一次快照回來');
+  const Gm = require(path.join(APP, 'trip-photo-gallery.js'));
+  const names = Object.fromEntries(Gm.utils.memberOptions([
+    { id: 'l1', ownerUid: 'uA', ownerName: 'travelowner090141b1', url: 'x', capturedAt: 1, readOnly: true },
+    { id: 'f1', ownerUid: 'uA', ownerName: 'Codex測試擁有者A', url: 'y', capturedAt: 2 }
+  ]).map((m) => [m.uid, m.name]));
+  check('同一人的名稱以正式照片為準（不被 memories 的 email 開頭蓋掉）', names.uA === 'Codex測試擁有者A', JSON.stringify(names));
+
+  // 存檔前先對齊，否則會把已刪的照片寫回 memories
+  const save = extractFunction(P, 'saveMyTripMemory');
+  check('saveMyTripMemory 先對齊再聯集',
+    /await mergeTripMemoriesIntoLocal\(tripId\)/.test(save)
+    && save.indexOf('mergeTripMemoriesIntoLocal') < save.indexOf('getVisitedPlaces()'));
+  const merge = extractFunction(P, 'mergeTripMemoriesIntoLocal');
+  check('有刪除時連雲端備份一起存', /if \(result\.removed\) saveVisitedPlaces\(places\)/.test(merge),
+    '只寫 localStorage 的話，下次登入會從 users/{uid}.visitedSpots 還原回來');
+
+  // (c) Storage：只刪自己的檔案
+  const Sync = require(path.join(APP, 'trip-photo-sync.js'));
+  const run = async (actorUid, ownerUid) => {
+    const deleted = { doc: 0, file: [] };
+    const doc = {
+      get: async () => ({ exists: true, data: () => ({ photoId: 'x1', tripId: T, ownerUid, url: 'https://a/b', storagePath: 'trip-photos/' + ownerUid + '/' + T + '/x1.jpg', stopId: 's1', stopName: '三仙台' }) }),
+      delete: async () => { deleted.doc += 1; }
+    };
+    const db = { collection: () => ({ doc: () => ({ collection: () => ({ doc: () => doc }) }) }) };
+    const storage = { ref: (p) => ({ delete: async () => { deleted.file.push(p); } }) };
+    Sync.configure({ db, storage, auth: { currentUser: { uid: actorUid } }, authorize: () => true, logger: () => {} });
+    await Sync.remove(T, 'x1', { actor: { uid: actorUid, name: 'n' } });
+    return deleted;
+  };
+  let d = await run('me', 'me');
+  check('刪自己的照片：文件＋檔案都刪', d.doc === 1 && d.file.length === 1, JSON.stringify(d));
+  d = await run('editor', 'me');
+  check('editor 刪別人的照片：只刪文件，檔案交給 Cloud Function', d.doc === 1 && d.file.length === 0,
+    'storage.rules 只准本人刪檔，照刪只會得到 403 紅字');
 }
-process.exit(fail ? 1 : 0);
+
+section19().catch((e) => check('第 19 節執行', false, e && e.stack)).then(() => {
+  console.log('\n══════════════════════════════════════');
+  console.log('通過 ' + pass + '，失敗 ' + fail);
+  if (failures.length) {
+    console.log('\n失敗項目：');
+    failures.forEach((f, i) => console.log('  ' + (i + 1) + '. ' + f));
+  }
+  process.exit(fail ? 1 : 0);
+});

@@ -212,12 +212,19 @@
   function buildOwnerLabels(photos) {
     var byName = {};
     var names = {};
-    (photos || []).forEach(function (photo) {
+    // 名稱以正式照片為準：舊版 memories（readOnly）的 ownerName 可能是另一套來源，
+    // 先看到它的話，同一個人會被標成另一個名字。
+    var ordered = (photos || []).filter(function (p) { return p && !p.readOnly; })
+      .concat((photos || []).filter(function (p) { return p && p.readOnly; }));
+    ordered.forEach(function (photo) {
       var owner = ownerOf(photo);
       if (!owner.uid || names[owner.uid]) return;
       names[owner.uid] = owner.name;
-      if (!byName[owner.name]) byName[owner.name] = [];
-      byName[owner.name].push(owner.uid);
+    });
+    Object.keys(names).forEach(function (uid) {
+      var name = names[uid];
+      if (!byName[name]) byName[name] = [];
+      byName[name].push(uid);
     });
     var labels = {};
     Object.keys(names).forEach(function (uid) {
@@ -253,7 +260,9 @@
     if (action === 'view') return true;
     if (action === 'classify') return !photo.readOnly && (role === 'editor' || owns);
     if (action === 'retry') return owns && (role === 'editor' || role === 'member');
-    if (action === 'delete') return !photo.readOnly && owns && (role === 'editor' || role === 'member');
+    // 方案 B：owner/editor 可協助管理（與 TripPhotoManager.can 及 Firestore Rules 一致）。
+    // readOnly 仍然擋——那是舊版 memories 併進來的唯讀資料，本來就不該從相簿刪。
+    if (action === 'delete') return !photo.readOnly && (role === 'editor' || (owns && role === 'member'));
     return false;
   }
   function formatDay(dayKey) {

@@ -513,7 +513,11 @@
     // Delete metadata first. Storage rules can differ from Firestore rules; doing
     // this in the opposite order could destroy a file before Firestore rejects us.
     await reference.delete();
-    var warning = await removeStorageObject(photo.storagePath);
+    // 只刪自己的檔案。storage.rules 只准上傳者本人刪 trip-photos；owner/editor 刪別人的
+    // 照片時，檔案由 Cloud Function（cleanup_deleted_trip_photo，文件刪除時觸發）用管理員
+    // 權限清掉。這裡若照刪，只會換來一個 403（F12 紅字），檔案也刪不掉。
+    var ownsFile = !!actor.uid && actor.uid === string(photo.ownerUid);
+    var warning = ownsFile ? await removeStorageObject(photo.storagePath) : null;
     if (warning) {
       log('warn', warning.message, warning);
       if (options.strictStorage) throw warning;

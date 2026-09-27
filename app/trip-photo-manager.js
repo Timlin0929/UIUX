@@ -834,7 +834,11 @@ window.TripPhotoManager = (function () {
     if (action === 'upload') return role === 'editor' || role === 'member';
     if (action === 'classify') return role === 'editor' || ownsPhoto;
     if (action === 'edit') return ownsPhoto && (role === 'editor' || role === 'member');
-    if (action === 'delete') return ownsPhoto && (role === 'editor' || role === 'member');
+    // 刪除採「方案 B：owner/editor 可協助管理」（2026-09-25 與 Android 端共同決定）。
+    // 先前這裡是 ownsPhoto && (editor || member)，但 TripPhotoSync.remove() 與
+    // Firestore Rules 都已允許 editor 刪他人照片——三層政策不一致，結果是
+    // 「行程 owner 可以刪、editor 不行」，兩個方案都不是。現在三層對齊。
+    if (action === 'delete') return role === 'editor' || (ownsPhoto && role === 'member');
     return false;
   }
 
@@ -842,12 +846,38 @@ window.TripPhotoManager = (function () {
     var photo = await get(id);
     if (!photo) return false;
     if (!can('delete', photo, actor)) throw new Error('你沒有權限刪除這張照片。');
-    if (photo.remote && typeof config.removeRemote === 'function') {
+    // 判斷「這張在遠端有沒有實體」不能只看 photo.remote——那個欄位是 retryPending 在
+    // 本機上傳成功後才寫的，只有「這台裝置傳過」的照片才有。從 ingestRemote 併進來的
+    // （別人傳的、或自己在另一台裝置傳的）都沒有這個欄位，於是遠端永遠刪不掉，
+    // 只有本機快取被清掉——下一次同步又整張回來。
+    // 改看「有沒有遠端身分」：storagePath / url 任一存在即代表它在 Firestore 有文件。
+    // 純 local-only 的照片三個都沒有，不會誤觸。
+    var hasRemoteCopy = !!(photo.remote || photo.storagePath || photo.url);
+    if (hasRemoteCopy && typeof config.removeRemote === 'function') {
+      // 這裡刻意不 try/catch：遠端刪失敗就讓例外往上拋，本機那份保留，
+      // 使用者會看到錯誤而不是「刪掉了但下次又出現」。
       await config.removeRemote(serializablePhoto(photo));
     }
     await deleteLocal(photo.id);
     emit('removed', { photo: publicPhoto(photo), actor: normalizeOwner(actor) });
     return true;
+  }
+
+  // 本機上傳的照片剛同步完成時，手上的快照可能是「發布前」取得的（還沒有這張），
+  // 這段時間內不修剪，避免把剛傳上去的照片當成被別人刪掉。
+  var LOCAL_PRUNE_GRACE_MS = 60 * 1000;
+
+  // 完整快照裡已經沒有這張時，本機紀錄可不可以清掉。
+  // - 從遠端下載的（source 'remote'）：已同步就清。
+  // - 這台上傳的（source 'local'）：同步完成超過寬限期才清。它在收到第一份含有
+  //   自己的快照後會轉成 'remote'；會卡在 'local' 的，是「上傳後這台還沒看過任何快照，
+  //   別人就把它刪了」——原本這種永遠清不掉，只有自己看得到。
+  // - 還沒傳完的（queued/uploading/publishing/failed/local-only）一律不動，否則會弄丟待上傳的照片。
+  function isPrunableWhenMissing(photo, now) {
+    if (!photo || photo.status !== STATUS.SYNCED) return false;
+    if (photo.source === 'remote') return true;
+    if (photo.source !== 'local') return false;
+    return Number(now) - Number(photo.syncedAt || 0) >= LOCAL_PRUNE_GRACE_MS;
   }
 
   async function ingestRemote(photos, options) {
@@ -870,6 +900,25 @@ window.TripPhotoManager = (function () {
       });
       await put(merged);
       changed.push(publicPhoto(merged));
+    }
+    // 遠端已消失的要一起清掉。ingestRemote 原本只做新增／更新，於是別人刪掉的照片
+    // 會永遠留在其他成員的本機快取裡（status 仍是 synced，畫面照樣顯示），
+    // 下次開啟還在——只有清網站資料才會消失。editor 可以刪他人照片之後這件事更明顯。
+    //
+    // 只在「拿到某趟行程的完整快照」時修剪（subscribe 與 list 都是完整快照）；
+    // 哪些紀錄可以清見 isPrunableWhenMissing。
+    if (options.tripId && options.prune !== false) {
+      var keep = Object.create(null);
+      incoming.forEach(function (photo) { if (photo && photo.id) keep[String(photo.id)] = true; });
+      var locals = await list({ tripId: options.tripId });
+      var now = Date.now();
+      for (var j = 0; j < locals.length; j++) {
+        var candidate = locals[j];
+        if (keep[String(candidate.id)]) continue;
+        if (!isPrunableWhenMissing(candidate, now)) continue;
+        await deleteLocal(candidate.id);
+        emit('remote-removed', { tripId: options.tripId, photoId: candidate.id });
+      }
     }
     if (changed.length) emit('remote-changed', { tripId: options.tripId, photos: changed });
     return changed;

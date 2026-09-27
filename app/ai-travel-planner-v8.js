@@ -4695,6 +4695,11 @@
       if (!tripPhotoManagerEventUnsubscribe) {
         tripPhotoManagerEventUnsubscribe = manager.subscribe((event) => {
           if (event.type === 'synced' && document.getElementById('travellog-list')) renderTravelLog();
+          // 別人新增／刪除照片（即時快照）→ 旅記開著就重新對齊本機紀錄再重繪
+          const travelLogView = document.getElementById('view-travellog');
+          if ((event.type === 'remote-removed' || event.type === 'remote-changed') && travelLogView && travelLogView.classList.contains('active')) {
+            scheduleTravelLogPhotoRefresh(event.tripId);
+          }
           if (event.type === 'sync-error') {
             feedbackToast('照片已保存在此裝置，連線恢復後可重試同步', 'orange');
           }
@@ -4712,6 +4717,19 @@
       throw error;
     });
     return tripPhotoManagerSetupPromise;
+  }
+
+  // 一次快照可能連發多個 remote-removed，合併成一次對齊＋重繪。
+  let travelLogPhotoRefreshTimer = null;
+  function scheduleTravelLogPhotoRefresh(tripId) {
+    const id = String(tripId || currentItineraryId || '');
+    if (!id || id !== String(currentItineraryId || '')) return;
+    clearTimeout(travelLogPhotoRefreshTimer);
+    travelLogPhotoRefreshTimer = setTimeout(() => {
+      mergeTripMemoriesIntoLocal(id).then(() => {
+        if (document.getElementById('travellog-list')) renderTravelLog();
+      }).catch(() => {});
+    }, 400);
   }
 
   async function renderTripPhotoGallery() {
@@ -4740,7 +4758,9 @@
           await manager.ingestRemote(remote, { tripId });
         }
         const local = await manager.list({ tripId });
-        return { photos: sync.mergePhotos(remote, local) };
+        // 舊版 memories 併進來的照片不在正式 photos 裡：刪了也只會在下一次快照回來，
+        // 所以一律唯讀（本機快取會把 source 改成 remote，只能看 remote 清單上的標記）。
+        return { photos: sync.mergePhotos(remote, local).map((p) => (p && p.source === 'legacy-memory' ? { ...p, readOnly: true } : p)) };
       };
       if (tripPhotoGalleryMountKey === mountKey) {
         await window.TripPhotoGallery.refresh();
@@ -13070,23 +13090,14 @@
   function memoryOwnerName() {
     const u = firebaseAuth && firebaseAuth.currentUser;
     if (!u) return '旅伴';
-    return String(u.displayName || (u.email ? u.email.split('@')[0] : '') || '旅伴').slice(0, 100);
+    // 與正式 photos 的 ownerName 同一個來源（個人檔案暱稱優先），否則同一個人在相簿裡
+    // 會一下顯示暱稱、一下顯示 email 開頭。
+    return String(currentPhotoDisplayName(u) || '旅伴').slice(0, 100);
   }
   async function fetchTripStops(tripId) {
     if (!firebaseDb || !tripId) return [];
     try { const t = await firebaseDb.collection('micro_trips').doc(tripId).get();
       return (t.exists && Array.isArray(t.data().stops)) ? t.data().stops : []; } catch (e) { return []; }
-  }
-  // 讀整個 memories 子集合 → 自己＋旅伴
-  async function readTripMemories(tripId) {
-    if (!firebaseDb || !tripId) return { mine: null, others: [] };
-    const uid = firebaseAuth && firebaseAuth.currentUser ? firebaseAuth.currentUser.uid : null;
-    try {
-      const snap = await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').get();
-      let mine = null; const others = [];
-      snap.forEach((d) => { const data = d.data() || {}; if (uid && d.id === uid) mine = data; else others.push(Object.assign({ uid: d.id }, data)); });
-      return { mine: mine, others: others };
-    } catch (e) { return { mine: null, others: [] }; }
   }
   // 把本端這趟的照片/備註「合併」進 memories/{uid}。
   // ★關鍵：先讀既有雲端那份，照片以 URL 聯集——否則同帳號在 App 上傳、
@@ -13096,6 +13107,9 @@
     if (!firebaseEnabled || !firebaseDb || !firebaseAuth || !firebaseAuth.currentUser) return;
     if (!tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
     const uid = firebaseAuth.currentUser.uid;
+    // 先跟雲端對齊：已被刪掉的照片要先從本機移除，下面的「照片聯集」才不會把它寫回 memories
+    //（Cloud Function 刪照片時會清 memories，若這裡又寫回去就白清了）。
+    try { await mergeTripMemoriesIntoLocal(tripId); } catch (_e) {}
     const stops = await fetchTripStops(tripId);
     if (!stops.length) return;
     const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === String(tripId));
@@ -13141,43 +13155,168 @@
     } catch (e) { console.warn('Firestore 寫入回憶失敗:', e && e.message); }
   }
 
-  // 載入時把 memories（自己雲端＋旅伴）併進本機造訪紀錄，讓所有畫面（旅記/九宮格/短片）都看得到。
-  // 併進來的照片標 foreign:true（不可刪、不回寫），owner=作者名（自己他機為 null）。
+  // 旅記／九宮格／回顧短片都讀本機造訪紀錄（visitedSpots），這裡把雲端照片對齊進來：
+  //   來源＝正式 photos ＋ 舊版 memories（sync.list 已合併去重，所有成員、App 與網頁都含）。
+  //   1. 雲端有、本機沒有 → 併進來，標 foreign:true（不可刪、不回寫），owner=作者名（自己他機為 null）。
+  //   2. 本機有、雲端已沒有 → 移除。原本只會加不會減：別人（owner/editor）刪掉的照片
+  //      會永遠留在每個人的本機，Storage 檔案被清掉後就成了破圖；而且下一次
+  //      saveMyTripMemory 會把它再寫回 memories，照片「刪了又跑回來」。
+  // 只有拿到完整資料時才移除（舊版 memories 讀取失敗就只併不刪），詳見 reconcileVisitedTripPhotos。
   async function mergeTripMemoriesIntoLocal(tripId) {
     if (!firebaseDb || !tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
-    const mem = await readTripMemories(tripId);
-    const docs = [];
-    if (mem.mine) docs.push({ doc: mem.mine, isMine: true });
-    (mem.others || []).forEach((o) => docs.push({ doc: o, isMine: false }));
-    if (!docs.length) return;
+    const sync = ensureTripPhotoSyncConfigured();
+    if (!sync) return;
+    const startedAt = Date.now();
+    let remote;
+    try { remote = await sync.list(String(tripId)); } catch (_e) { return; }   // 讀不到就不動本機
     const stops = await fetchTripStops(tripId);
-    const nameBySid = {};
-    stops.forEach((s, i) => { nameBySid[memoryStableStopId(s, i)] = String(s.name || ''); });
-    const places = getVisitedPlaces();
-    let changed = false;
-    const ensureRecord = (name) => {
-      let r = places.find((p) => visitedPlaceMatches(p, name, tripId));
-      if (!r) { r = { name: name, region: currentTripRegion || '', visitDate: '', tripId: String(tripId), tripTitle: currentTripTitle || '', emoji: '📍', gpsVerified: null, photos: [], note: '' }; places.push(r); changed = true; }
-      return r;
-    };
-    docs.forEach((entry) => {
-      const spots = (entry.doc && entry.doc.spots) ? entry.doc.spots : {};
-      const owner = entry.doc && entry.doc.ownerName ? entry.doc.ownerName : '旅伴';
-      Object.keys(spots).forEach((sid) => {
-        const sp = spots[sid] || {};
-        const name = nameBySid[sid] || sp.spotName;
-        if (!name) return;
-        const rec = ensureRecord(name);
-        rec.photos = rec.photos || [];
-        const seen = new Set(rec.photos.map((p) => p && p.url).filter(Boolean));
-        (Array.isArray(sp.photos) ? sp.photos : []).forEach((u) => {
-          if (!u || !/^https?:\/\//i.test(String(u)) || seen.has(u)) return;
-          rec.photos.push({ url: String(u), ts: Number(sp.updatedAt) || 0, foreign: true, owner: entry.isMine ? null : owner });
-          seen.add(u); changed = true;
-        });
-      });
+    const nameByStopId = {};
+    stops.forEach((s, i) => {
+      const name = String((s && s.name) || '');
+      if (!name) return;
+      nameByStopId[memoryStableStopId(s, i)] = name;                        // 舊版 memories 的 key
+      if (s.collabStopId) nameByStopId[String(s.collabStopId)] = name;      // 正式 photos 的 stopId
+      if (s.id != null) nameByStopId[String(s.id)] = name;
     });
-    if (changed) { try { localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places)); } catch (e) {} }
+    const uid = firebaseAuth && firebaseAuth.currentUser ? firebaseAuth.currentUser.uid : '';
+    const places = getVisitedPlaces();
+    const result = reconcileVisitedTripPhotos(places, String(tripId), remote, {
+      myUid: uid,
+      nameByStopId,
+      complete: !remote.warning,
+      startedAt,
+      newRecord: (name) => ({ name: name, region: currentTripRegion || '', visitDate: '', tripId: String(tripId), tripTitle: currentTripTitle || '', emoji: '📍', gpsVerified: null, photos: [], note: '' })
+    });
+    if (result.removed) saveVisitedPlaces(places);   // 有刪除要連 users/{uid}.visitedSpots 一起更新，否則下次登入會從雲端備份還原回來
+    else if (result.added) { try { localStorage.setItem(VISITED_PLACES_KEY, JSON.stringify(places)); } catch (e) {} }
+    if (result.removedOwn.length && uid) await dropFromOwnMemory(String(tripId), uid, result.removedOwn);
+  }
+
+  // 自己的照片被別人（owner/editor）刪掉後，把它從自己那份 memories 移除。
+  // Cloud Function 也會做同一件事；這裡是它沒跑到（未部署、失敗、延遲）時的補救，
+  // 否則旅伴那邊會把 memories 裡殘留的網址當成舊版照片再顯示出來。
+  // memories 只准本人寫，所以只能清自己的；merge 寫入只換掉 photos 陣列與封面，其餘欄位不動。
+  async function dropFromOwnMemory(tripId, uid, removedList) {
+    try {
+      const ref = firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid);
+      const snap = await ref.get();
+      if (!snap.exists) return;
+      const data = snap.data() || {};
+      const urls = new Set(removedList.map((r) => r.url).filter(Boolean));
+      const paths = new Set(removedList.map((r) => r.path).filter(Boolean));
+      const pathOf = (url) => {
+        const m = /\/o\/([^?]+)/.exec(String(url || ''));
+        try { return m ? decodeURIComponent(m[1]) : ''; } catch (_e) { return ''; }
+      };
+      const gone = (item) => {
+        const url = typeof item === 'string' ? item : (item && item.url) || '';
+        return urls.has(url) || paths.has(pathOf(url));
+      };
+      const spots = data.spots || {};
+      const patch = {};
+      let changed = false;
+      Object.keys(spots).forEach((key) => {
+        const photos = Array.isArray(spots[key] && spots[key].photos) ? spots[key].photos : null;
+        if (!photos) return;
+        const kept = photos.filter((item) => !gone(item));
+        if (kept.length !== photos.length) { patch[key] = { photos: kept }; changed = true; }
+      });
+      if (!changed) return;
+      const update = { spots: patch };
+      if (data.coverUrl && gone(data.coverUrl)) update.coverUrl = '';
+      await ref.set(update, { merge: true });
+    } catch (e) {
+      console.warn('[memories] 清除已刪照片失敗：', e && e.message);
+    }
+  }
+
+  // 純函式（會就地修改 places）：把雲端照片清單對齊進某趟行程的造訪紀錄。回傳 { added, removed }。
+  // 移除規則（只在 opts.complete 時執行）：
+  //   - foreign（從雲端併進來的）：雲端已沒有就移除。
+  //   - 自己在這台上傳、有 photoId 的：它一定發布過正式 photos，雲端沒有＝被刪了，移除。
+  //     但 opts.startedAt 前一分鐘內才上傳的保留——那時抓到的清單可能還沒有它。
+  //   - 自己的舊照片（沒有 photoId，正式 photos 出現前上傳的）：雲端沒有對照紀錄，一律不動，
+  //     否則會把只存在本機的舊照片清掉。
+  function reconcileVisitedTripPhotos(places, tripId, remote, opts) {
+    const o = opts || {};
+    const list = Array.isArray(remote) ? remote : [];
+    const ids = new Set(), paths = new Set(), urls = new Set();
+    const formalIds = new Set();
+    list.forEach((p) => {
+      if (!p) return;
+      if (p.photoId) ids.add(String(p.photoId));
+      if (p.storagePath) paths.add(String(p.storagePath));
+      if (p.url) urls.add(String(p.url));
+      if (p.photoId && p.source !== 'legacy-memory') formalIds.add(String(p.photoId));
+    });
+    const inCloud = (ph) => (ph.photoId && ids.has(String(ph.photoId)))
+      || (ph.path && paths.has(String(ph.path)))
+      || (ph.url && urls.has(String(ph.url)));
+    const tripRecords = () => places.filter((p) => String((p && p.tripId) || '') === String(tripId));
+    let added = 0, removed = 0;
+    const removedOwn = [];
+
+    if (o.complete) {
+      const graceFrom = Number(o.startedAt || 0) - 60 * 1000;
+      tripRecords().forEach((rec) => {
+        if (!Array.isArray(rec.photos)) return;
+        const kept = rec.photos.filter((ph) => {
+          if (!ph || !ph.url) return true;
+          // 自己在這台上傳、有 photoId 的：一定發布過正式 photos，只看正式那份。
+          // 不能拿舊版 memories 當「還在」的證據——memories 裡的網址正是本機存檔時寫進去的，
+          // 正式文件被刪後它還留著（要等 Cloud Function 清），拿它當證據照片就永遠刪不掉。
+          if (!ph.foreign && ph.photoId) {
+            if (formalIds.has(String(ph.photoId)) || Number(ph.uploadedAt || 0) >= graceFrom) return true;
+            removedOwn.push({ url: String(ph.url), path: String(ph.path || '') });
+            return false;
+          }
+          if (inCloud(ph)) return true;
+          return !ph.foreign;   // 從雲端併進來的，雲端沒了就移除；自己的舊照片（沒 photoId）不動
+        });
+        removed += rec.photos.length - kept.length;
+        rec.photos = kept;
+      });
+    }
+
+    const localKey = new Set();
+    tripRecords().forEach((rec) => (rec.photos || []).forEach((ph) => {
+      if (!ph) return;
+      if (ph.photoId) localKey.add('id:' + ph.photoId);
+      if (ph.path) localKey.add('path:' + ph.path);
+      if (ph.url) localKey.add('url:' + ph.url);
+    }));
+    // 剛判定被刪的自己照片：memories 殘留的網址還在清單裡，不可再當成「別台的照片」加回來
+    const droppedUrls = new Set(removedOwn.map((d) => d.url));
+    const droppedPaths = new Set(removedOwn.map((d) => d.path).filter(Boolean));
+    list.forEach((p) => {
+      if (!p || !p.url || !/^https?:\/\//i.test(String(p.url))) return;
+      if (droppedUrls.has(String(p.url)) || (p.storagePath && droppedPaths.has(String(p.storagePath)))) return;
+      if ((p.photoId && localKey.has('id:' + p.photoId)) || (p.storagePath && localKey.has('path:' + p.storagePath))
+        || localKey.has('url:' + p.url)) return;
+      const name = (o.nameByStopId && o.nameByStopId[p.stopId]) || p.stopName;
+      if (!name) return;                           // 還沒分到景點的照片只在共同相簿出現
+      let rec = places.find((r) => visitedPlaceMatches(r, name, tripId));
+      if (!rec) {
+        if (typeof o.newRecord !== 'function') return;
+        rec = o.newRecord(name);
+        places.push(rec);
+      }
+      rec.photos = Array.isArray(rec.photos) ? rec.photos : [];
+      const mine = !!o.myUid && String(p.ownerUid || '') === String(o.myUid);
+      rec.photos.push({
+        url: String(p.url),
+        path: String(p.storagePath || ''),
+        photoId: String(p.photoId || ''),
+        ts: Number(p.capturedAt || p.uploadedAt || p.updatedAt) || 0,
+        foreign: true,
+        owner: mine ? null : (p.ownerName || '旅伴')
+      });
+      if (p.photoId) localKey.add('id:' + p.photoId);
+      if (p.storagePath) localKey.add('path:' + p.storagePath);
+      localKey.add('url:' + p.url);
+      added += 1;
+    });
+    return { added, removed, removedOwn };
   }
 
   function toggleVisitedPlace(stop, extras = {}) {

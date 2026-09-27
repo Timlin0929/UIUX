@@ -14,7 +14,7 @@
 | 類別 | 內容 |
 |---|---|
 | 🔴 最優先確認 | App 存共編行程時，是否會覆寫 `memberEmails`（會讓成員被踢出相簿，且無法升為 editor） |
-| 🟠 要先決定政策 | 照片刪除權限：目前三個層級互相不一致（§2.3） |
+| ✅ 已決定 | 照片刪除權限採方案 B（owner/editor 可協助管理），網頁端已實作（§2.3） |
 | 🟠 要決定方向 | 照片是單向相容——App 寫的網頁看得到，網頁寫的 App 看不到（§2.1b） |
 | 📋 要對齊的規格 | `micro_trips/{tripId}/photos/{photoId}` 的 18 欄白名單、Storage 路徑與限制 |
 | 📦 要索取的檔案 | `scripts/export_explore_templates.mjs`、`scripts/upload_explore_templates.py`（本 repo 沒有） |
@@ -120,7 +120,7 @@ Rules 用 `hasOnly` + `hasAll` 鎖死欄位，**多寫一個欄位會讓整筆�
 trip-photos/{uid}/{tripId}/{檔名}
 
 建立：僅 uid 本人、檔案 < 5 MB、contentType 必須是 image/jpeg
-刪除：僅 uid 本人
+刪除：僅 uid 本人（owner/editor 刪他人照片時，檔案由 Cloud Function 清除，見 §2.3）
 讀取：任何登入者
 ```
 
@@ -153,28 +153,60 @@ trip-photos/{uid}/{tripId}/{photoId}.jpg
 | update | 成員 ＋（自己的照片 或 行程 owner/editor）＋ `ownerUid`/`tripId` 不可變 |
 | delete | 成員 ＋（自己的照片 或 行程 owner/editor） |
 
-⚠️ **刪除權限目前三個層級互相不一致，需要先共同決定政策。**
+**刪除政策：方案 B（owner/editor 可協助管理）**——2026-09-25 兩端共同決定，網頁端已實作。
 
-| 層級 | 行程 owner 刪他人照片 | editor 刪他人照片 |
+| 角色 | 刪自己的照片 | 刪他人的照片 |
 |---|:--:|:--:|
-| `TripPhotoManager.can('delete')`（相簿 UI 實際用的） | ✅ 允許 | ❌ 擋下 |
-| `TripPhotoSync.remove()`（底層同步層） | ✅ 允許 | ✅ 允許 |
-| Firestore Rules | ✅ 允許 | ✅ 允許 |
+| 行程 owner | ✅ | ✅ |
+| editor | ✅ | ✅ |
+| member | ✅ | ❌ |
+| viewer | ❌ | ❌ |
 
-實測（2026-09-24，雙帳號）：
+舊版 `memories` 併進來的唯讀照片（`readOnly`）一律不提供刪除——它們不在 `photos` 集合裡。
 
-- editor 在相簿裡看不到他人照片的「移除」鈕，直接呼叫 API 也會被擋
-  （`你沒有權限刪除這張照片。`）
-- 行程 owner 的相簿在他人照片上**確實有「移除」鈕**，可以刪
+三個層級現在一致：`TripPhotoManager.can('delete')`、`TripPhotoGallery` 的 `defaultCan`、
+底層 `TripPhotoSync` 的 `authorize('remove')`，以及 Firestore Rules。
+（決定前的狀態是「owner 可以、editor 不行」，是三層各自演化的結果。）
 
-分類權限則是另一套：`classify` 對 editor 開放，所以 **editor 可以重新分類他人照片、但不能刪除**。
+**實作時一併發現的三個問題**（方案 B 讓它們浮現）：
 
-**請兩端先選一個政策再各自對齊：**
+1. **遠端刪不掉**：`remove()` 原本只在 `photo.remote` 存在時才刪遠端，而那個欄位
+   只有「這台裝置上傳過」的照片才有。別人傳的、或自己在另一台裝置傳的照片，
+   按刪除只清掉本機快取，下次同步又整張回來。改為看 `storagePath` / `url` 判斷遠端身分。
+2. **刪除不會傳到其他成員**：`ingestRemote()` 只做新增／更新，從不移除遠端已消失的紀錄，
+   於是被刪的照片會永遠留在其他成員的本機快取裡。改為收到完整快照時修剪——
+   已同步的才清（這台自己上傳的，同步完成滿 1 分鐘才清，避免被發布前的舊快照誤判），
+   待上傳的本機照片一律不動。
 
-- **方案 A**：只有照片本人能刪 → 需要改 `can()` 拿掉 owner 早退、改 `authorize('remove')`、改 Rules
-- **方案 B**：owner/editor 可協助管理 → 需要改 `can()` 讓 editor 也能刪（Rules 已經允許）
+實測（2026-09-25，雙帳號）：editor B 刪 owner 的照片 → Firestore 5 → 4 筆；
+owner 端重新載入後本機快取也同步變 4 筆，照片從相簿消失。
 
-目前的實際行為是「owner 可以、editor 不行」，兩個方案都不是——這是三層規則各自演化的結果，不是設計決定。
+3. **圖檔變孤兒**：Firestore 的 `photos` 文件允許 owner/editor 刪他人照片，但
+   `storage.rules` 只允許本人刪 Storage 檔——於是文件刪得掉、圖檔刪不掉。
+   實測 editor 刪除後，那張圖檔仍存在（6140 bytes），**持有舊下載網址的人照樣看得到**。
+   **解法（2026-09-27 定案）：Cloud Function `cleanup_deleted_trip_photo`**
+   （`photos` 文件刪除時觸發）用管理員權限刪檔，並把同一張從 `memories/{ownerUid}` 移除。
+   `storage.rules` 維持「只准本人刪」不變；搭配 `firestore.rules` 的兩條限制
+  （建立時 `storagePath` 必須在自己的 `trip-photos/{uid}/` 底下、建立後 `storagePath`／`url`
+   不可改），Function 才不會被拿去刪別人的檔案。
+   網頁端：刪**自己的**照片仍會直接刪檔；刪**別人的**照片只刪文件，檔案交給 Function
+  （照刪只會換來 403）。
+
+4. **旅記／九宮格／回顧短片仍顯示已刪照片**：這三個功能讀的是本機造訪紀錄（`visitedSpots`），
+   原本只會從 `memories` 併入、從不移除，Function 清掉 `memories` 也沒用；而且下一次
+   `saveMyTripMemory` 會把本機那份再寫回 `memories`（照片「刪了又跑回來」，檔案已刪所以是破圖）。
+   已改為：對齊來源改成 `photos` ＋ `memories`（所以也看得到旅伴只存在 `photos` 的照片），
+   雲端已沒有的就從本機移除；`saveMyTripMemory` 寫入前先對齊。
+   沒有 `photoId` 的舊照片（`photos` 出現前上傳）沒有雲端紀錄可比對，一律保留。
+   **不依賴 Function 的補救**：自己上傳的照片只以正式 `photos` 判斷存不存在（`memories` 殘留的網址
+   不算），被刪時由上傳者本人開頁時把網址從自己的 `memories` 移除（merge 寫入，不動其他欄位）。
+   實測 2026-09-27：Function 沒有動作（刪除 6 分鐘後 Storage 檔案仍在），在這之前照片會以舊版
+   `memories` 的身分一直回來；加上補救後，上傳者開頁一次，兩端都乾淨了。
+   ⚠️ Storage 檔案仍要靠 Function 刪——網頁端沒有權限刪別人的檔案。
+
+**Android 端請比照**：刪除走 `photos/{photoId}` 文件（自己的照片可一併刪 Storage 物件）；
+收到 snapshot 時，本機快取裡已不存在於遠端的照片要一併移除；
+若 App 有「每次開啟就從 `memories` 搬移」的流程，要改成只搬一次，否則被刪的照片會被搬回來。
 
 ### 2.4 `ownerName` 與撞名
 
