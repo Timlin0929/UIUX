@@ -1403,6 +1403,14 @@ function section21() {
   check('面板寬度跟著地圖欄（最多 320px、40%）', /#directionsPanel \{ width: min\(320px, calc\(40% - 16px\)\) !important;/.test(C));
   check('把手是橫向標題列／膠囊，不再是直排方塊', /#directionsPanelHandle \{[\s\S]{0,300}?writing-mode: horizontal-tb;/.test(C)
     && /#directionsPanelHandle\.collapsed \{[\s\S]{0,260}?border-radius: 999px;/.test(C), '使用者回報：直排「階段」方塊很突兀');
+  check('替代路線收進「⋯ 路線選項」，與手機一致',
+    /class="route-stage-more" onclick="openRouteStageActions\(\$\{i\}, event\)"/.test(P) && !/class="route-alt-btn"/.test(P),
+    '使用者要求：桌機比照手機，把替代路線藏起來');
+  check('桌機的「路線選項」是置中小視窗', /@media \(min-width: 1025px\) \{\s*body \.route-stage-actions-modal \{ align-items: center; justify-content: center; \}/.test(C));
+  check('路線選項有明確標題與動作', /這段路線可以怎麼走？/.test(P)
+    && /在地圖上查看/.test(P) && /比較其他路線/.test(P));
+  check('沒有其他路線時顯示說明，不顯示灰色按鈕', /route-stage-actions-empty/.test(P)
+    && !/data-stage-alt \$\{canCompare \? '' : 'disabled'\}/.test(P));
   check('選取高亮只用 class，不再逐張寫 inline style', !/child\.style\.(borderColor|backgroundColor|boxShadow)/.test(P),
     '實測：舊的 inline style 讓每一行都多出外框');
   check('一行一段、細節預設收起', /\.route-stage-detail \{ display: none;/.test(C) && /\.route-stage-card\.is-expanded \.route-stage-detail \{ display: block; \}/.test(C));

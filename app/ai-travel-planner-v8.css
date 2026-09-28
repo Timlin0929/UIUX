@@ -3609,6 +3609,16 @@ body.prototype-mode .prototype-id-chip {
   .route-stage-origin { display: none; }   /* 窄的時候只留「→ 目的地」：被截掉的不該是這一段要去哪 */
 }
 .route-stage-dur { flex: 0 0 auto; color: var(--ink2); font-size: 12px; white-space: nowrap; }
+/* 與手機一致：路線選項收進「⋯」 */
+.route-stage-more { flex: 0 0 26px; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; margin-right: -2px; border: 1px solid transparent; border-radius: 50%; background: transparent; color: var(--ink2); font-size: 17px; font-weight: 800; line-height: 1; cursor: pointer; }
+.route-stage-more:hover, .route-stage-more:focus-visible { border-color: var(--border); background: var(--surface); color: var(--ink); }
+/* 桌機：路線選項使用畫面中間的小視窗，手機則由底部展開。 */
+/* 前面加 body 提高權重：手機版的底部面板樣式寫在檔案後段，同權重時會蓋過這裡 */
+@media (min-width: 1025px) {
+  body .route-stage-actions-modal { align-items: center; justify-content: center; }
+  body .route-stage-actions-panel { max-width: 420px; padding: 18px 18px 16px; border-radius: 20px; }
+  body .route-stage-actions-handle { display: none; }
+}
 .route-stage-detail { display: none; margin: 6px 0 2px 26px; }
 .route-stage-detail .stage-meta-text { display: block; }
 .route-stage-card.is-expanded { background: var(--surface); border-color: var(--border); margin: 4px 0 6px; }
@@ -7928,3 +7938,59 @@ button.notif-item { cursor: pointer; }
     grid-template-columns: 1fr 1.35fr;
   }
 }
+
+.mobile-route-item-wrap { position: relative; }
+.mobile-route-more {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.route-stage-actions-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 4100;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(15, 23, 20, .48);
+}
+.route-stage-actions-panel {
+  width: 100%;
+  padding: 12px max(14px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+  border-radius: 24px 24px 0 0;
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
+}
+.route-stage-actions-handle { width: 42px; height: 4px; margin: 0 auto 12px; border-radius: 999px; background: #d7d4cd; }
+.route-stage-actions-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.route-stage-actions-copy { min-width: 0; }
+.route-stage-actions-title { color: var(--ink); font-size: 16px; font-weight: 800; white-space: nowrap; }
+.route-stage-actions-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px; margin-top: 4px; color: var(--ink2); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
+.route-stage-actions-number { flex: 0 0 auto; white-space: nowrap; }
+.route-stage-actions-places { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; min-width: 0; }
+.route-stage-actions-places span:not(.route-stage-actions-arrow) { min-width: 0; text-wrap: pretty; }
+.route-stage-actions-arrow { flex: 0 0 auto; white-space: nowrap; }
+.route-stage-actions-close { flex: 0 0 36px; height: 36px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface2); cursor: pointer; }
+.route-stage-actions-list { display: flex; flex-direction: column; gap: 8px; }
+.route-stage-action { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; }
+.route-stage-action:disabled { opacity: .52; cursor: default; }
+.route-stage-action-icon { flex: 0 0 38px; font-size: 20px; text-align: center; }
+.route-stage-action span:last-child { min-width: 0; }
+.route-stage-action strong { display: block; font-size: 14px; white-space: nowrap; }
+.route-stage-action small { display: block; margin-top: 2px; color: var(--ink2); font-size: 12px; line-height: 1.45; text-wrap: pretty; }
+.route-stage-actions-empty { margin: 0; padding: 8px 12px 2px; color: var(--ink2); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
+

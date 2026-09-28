@@ -17752,6 +17752,62 @@
     if (m) m.remove();
   }
 
+  function closeRouteStageActions() {
+    const overlay = document.getElementById('routeStageActionsModal');
+    if (!overlay) return;
+    const returnFocus = overlay._returnFocus;
+    overlay.remove();
+    if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+  }
+
+  function openRouteStageActions(stageIndex, event) {
+    if (event) event.stopPropagation();
+    const stage = routeStageCache.find((item) => item && item.index === stageIndex);
+    if (!stage) return;
+    closeRouteStageActions();
+    const alternativeCount = Array.isArray(stage.alts) ? stage.alts.length : 0;
+    const canCompare = stage.altEligible && alternativeCount > 1;
+    const overlay = document.createElement('div');
+    overlay.id = 'routeStageActionsModal';
+    overlay.className = 'route-stage-actions-modal';
+    overlay._returnFocus = event && event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    overlay.innerHTML = `
+      <div class="route-stage-actions-panel" role="dialog" aria-modal="true" aria-labelledby="routeStageActionsTitle" aria-describedby="routeStageActionsContext">
+        <div class="route-stage-actions-handle" aria-hidden="true"></div>
+        <div class="route-stage-actions-head">
+          <div class="route-stage-actions-copy">
+            <div class="route-stage-actions-title" id="routeStageActionsTitle">這段路線可以怎麼走？</div>
+            <div class="route-stage-actions-sub" id="routeStageActionsContext"><span class="route-stage-actions-number">第 ${stageIndex + 1} 段</span><span class="route-stage-actions-places"><span>${escapeHtml(stage.origin.name || stage.origin.title || '上一站')}</span><span class="route-stage-actions-arrow" aria-hidden="true">→</span><span>${escapeHtml(stage.destination.name || stage.destination.title || '下一站')}</span></span></div>
+          </div>
+          <button type="button" class="route-stage-actions-close" aria-label="關閉路線選項">✕</button>
+        </div>
+        <div class="route-stage-actions-list">
+          <button type="button" class="route-stage-action" data-stage-focus><span class="route-stage-action-icon" aria-hidden="true">🗺️</span><span><strong>在地圖上查看</strong><small>放大這段路線與起終點</small></span></button>
+          ${canCompare
+            ? `<button type="button" class="route-stage-action" data-stage-alt><span class="route-stage-action-icon" aria-hidden="true">🔀</span><span><strong>比較其他路線</strong><small>另有 ${alternativeCount - 1} 條走法，可比較時間與距離</small></span></button>`
+            : '<p class="route-stage-actions-empty">目前沒有可比較的其他路線。</p>'}
+        </div>
+      </div>`;
+    overlay.addEventListener('click', (clickEvent) => { if (clickEvent.target === overlay) closeRouteStageActions(); });
+    overlay.addEventListener('keydown', (keyEvent) => { if (keyEvent.key === 'Escape') closeRouteStageActions(); });
+    overlay.querySelector('.route-stage-actions-close').addEventListener('click', closeRouteStageActions);
+    overlay.querySelector('[data-stage-focus]').addEventListener('click', () => {
+      closeRouteStageActions();
+      activeRouteStage = stageIndex;
+      activeItineraryStopId = null;
+      mobileRouteSheetState = 'collapsed';
+      updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
+      renderToiletMarkersForActiveRouteStage();
+      renderItineraryDisplay();
+    });
+    if (canCompare) overlay.querySelector('[data-stage-alt]').addEventListener('click', () => {
+      closeRouteStageActions();
+      openRouteAlternatives(stageIndex);
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('.route-stage-actions-close').focus();
+  }
+
   function openRouteAlternatives(stageIndex) {
     const stage = routeStageCache.find((item) => item && item.index === stageIndex);
     if (!stage || !Array.isArray(stage.alts) || stage.alts.length < 2) {
@@ -18041,7 +18097,7 @@
         </div>
         <div class="mobile-route-item-badge">${status.label}</div>
       </button>
-      ${stage.altEligible && stage.alts ? `<button type="button" class="route-alt-btn mobile" onclick="openRouteAlternatives(${stage.index})">🔀 替代路線 (${stage.alts.length})</button>` : ''}
+      <button type="button" class="mobile-route-more" onclick="openRouteStageActions(${stage.index}, event)" aria-label="查看第 ${stage.index + 1} 段路線選項" title="路線選項">⋯</button>
       </div>
     `; }).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
   }
@@ -18374,6 +18430,7 @@
                 <span class="route-stage-names" title="${escapeHtml(stageOriginName)} → ${escapeHtml(stageDestName)}"><span class="route-stage-origin">${escapeHtml(shortStopName(stageOriginName))} </span>→ ${escapeHtml(shortStopName(stageDestName))}</span>
                 ${noParkingFound ? '<span class="route-stage-flag" title="目的地附近查不到停車場資料"><span class="flag-long">無停車場</span><span class="flag-short" aria-hidden="true">P</span></span>' : ''}
                 <span class="route-stage-dur">${stageMeta.icon} ${formatStageMinutes(legEstimate.durationMinutes)}</span>
+                <button type="button" class="route-stage-more" onclick="openRouteStageActions(${i}, event)" aria-label="查看第 ${i + 1} 段路線選項" title="路線選項">⋯</button>
               </div>
               <div class="route-stage-detail">
               <div style="font-size: 12px; color: var(--ink2);">
@@ -18388,7 +18445,6 @@
                     : `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ ${who}：附近查不到停車場資料，請自行尋找路邊或付費停車</span>`;
                 })() : ''}
               </div>
-              ${altEligible ? `<button type="button" class="route-alt-btn" onclick="event.stopPropagation();openRouteAlternatives(${i})">🔀 替代路線 (${routeAlts.length})</button>` : ''}
               </div>
             `;
 
