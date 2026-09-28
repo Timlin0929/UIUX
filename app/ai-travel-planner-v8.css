@@ -228,6 +228,29 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
+/* 左側行程欄與地圖「階段」面板的捲軸：細、圓角、無上下箭頭、軌道透明；
+   平常淡淡的，滑鼠移到面板上才加深（原生捲軸的灰條加箭頭正好夾在行程欄與地圖之間，很搶眼）。
+   Chrome 121+ 只要設了標準 scrollbar-width/color 就會忽略 ::-webkit-scrollbar，
+   所以標準寫法只給不支援 ::-webkit-scrollbar 的瀏覽器（Firefox）。 */
+.left-panel::-webkit-scrollbar,
+#directionsPanel::-webkit-scrollbar { width: 8px; }
+.left-panel::-webkit-scrollbar-track,
+#directionsPanel::-webkit-scrollbar-track { background: transparent; }
+.left-panel::-webkit-scrollbar-button,
+#directionsPanel::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.left-panel::-webkit-scrollbar-thumb,
+#directionsPanel::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--ink3) 28%, transparent);
+  border: 2px solid transparent; border-radius: 999px; background-clip: padding-box;
+}
+.left-panel:hover::-webkit-scrollbar-thumb,
+#directionsPanel:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--ink3) 55%, transparent); }
+.left-panel::-webkit-scrollbar-thumb:active,
+#directionsPanel::-webkit-scrollbar-thumb:active { background-color: color-mix(in srgb, var(--ink3) 75%, transparent); }
+@supports not selector(::-webkit-scrollbar) {
+  .left-panel, #directionsPanel { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--ink3) 40%, transparent) transparent; }
+}
+
 /* =========================================
    景點詳情卡片（更新：更現代、空氣感、柔和陰影與動態按鈕）
    ========================================= */
