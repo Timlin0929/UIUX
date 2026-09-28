@@ -7928,3 +7928,296 @@ button.notif-item { cursor: pointer; }
     grid-template-columns: 1fr 1.35fr;
   }
 }
+
+/* 手機地圖／現在景點：由已驗證的獨立 DEMO 整合，避免網址列變動留下白區。 */
+@media (max-width: 1024px) {
+  html.mobile-map-active {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body.mobile-mode-map {
+    zoom: 1;
+    width: 100%;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    padding-top: 0 !important;
+    overflow: hidden !important;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+
+  body.mobile-mode-map > .glass-header,
+  body.mobile-mode-map > .collab-ro-banner { display: none !important; }
+
+  body.mobile-mode-map .map-panel {
+    position: fixed;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    overflow: hidden;
+  }
+
+  body.mobile-mode-map #googleMap,
+  body.mobile-mode-map #googleMap > div,
+  body.mobile-mode-map #googleMap .gm-style {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  body.mobile-mode-map .map-time-banner {
+    top: calc(max(12px, env(safe-area-inset-top)) + 4px);
+    right: 12px;
+  }
+
+  body.mobile-mode-map .mobile-route-sheet {
+    left: 10px;
+    right: auto;
+    bottom: calc(78px + max(10px, env(safe-area-inset-bottom)));
+    width: min(360px, calc(100vw - 20px));
+    max-height: min(55dvh, 460px);
+    z-index: 2900;
+    border-radius: 16px;
+  }
+
+  body.mobile-mode-map .mobile-route-sheet::before { display: none; }
+  body.mobile-mode-map .mobile-route-sheet[data-state="collapsed"] {
+    width: max-content;
+    max-width: calc(100vw - 20px);
+    border-radius: 999px;
+  }
+  body.mobile-mode-map .mobile-route-sheet[data-state="collapsed"] .mobile-route-toggle {
+    min-height: 48px;
+    width: auto;
+    padding: 6px 8px 6px 15px;
+  }
+  body.mobile-mode-map .mobile-route-sheet[data-state="collapsed"] .mobile-route-list,
+  body.mobile-mode-map .mobile-route-sheet[data-state="collapsed"] .mobile-route-sub { display: none !important; }
+  body.mobile-mode-map .mobile-route-sheet[data-state="expanded"] .mobile-route-list {
+    max-height: min(43dvh, 350px);
+    overscroll-behavior: contain;
+  }
+  body.mobile-mode-map .mobile-route-title,
+  body.mobile-mode-map .mobile-route-toggle-icon { white-space: nowrap; flex-shrink: 0; }
+  body.mobile-mode-map .mobile-route-item-wrap .mobile-route-item { padding-right: 50px; }
+
+  body.mobile-mode-map .map-info-card,
+  body.mobile-mode-map .map-info-card.show { display: none !important; }
+
+  body.mobile-mode-current-spot {
+    zoom: 1;
+    height: 100dvh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  body.mobile-mode-current-spot > .glass-header { flex: 0 0 auto; }
+  body.mobile-mode-current-spot .split-layout { flex: 1 1 auto; min-height: 0; height: auto; }
+  body.mobile-mode-current-spot .left-panel { height: 100%; overflow: hidden; }
+  body.mobile-mode-current-spot .map-panel,
+  body.mobile-mode-current-spot .map-time-banner { display: none !important; }
+  body.mobile-mode-current-spot #view-current-spot.active {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+  body.mobile-mode-current-spot #view-current-spot .spot-detail-image {
+    flex: 0 0 auto;
+    display: flex;
+    width: auto;
+    max-width: none;
+    height: clamp(112px, 17dvh, 150px);
+    margin: 6px 20px 4px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    font-size: 28px;
+  }
+  body.mobile-mode-current-spot .spot-detail-header { flex: 0 0 auto; padding: 12px 20px 8px; }
+  body.mobile-mode-current-spot .spot-detail-hero { flex: 0 0 auto; padding: 10px 20px 6px; }
+  body.mobile-mode-current-spot .spot-detail-title { margin-bottom: 3px; font-size: 21px; line-height: 1.35; text-wrap: pretty; }
+  body.mobile-mode-current-spot .spot-detail-distance { line-height: 1.45; text-wrap: pretty; }
+  body.mobile-mode-current-spot .spot-detail-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 8px 20px 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  body.mobile-mode-current-spot .spot-detail-card { padding: 14px 16px; margin-bottom: 8px; border-radius: 14px; }
+  body.mobile-mode-current-spot .spot-detail-card-desc { font-size: 14px; line-height: 1.55; text-wrap: pretty; }
+  body.mobile-mode-current-spot .spot-detail-actions { margin-top: 10px; gap: 8px; }
+  body.mobile-mode-current-spot .spot-action-btn { min-width: 0; flex: 1 1 calc(50% - 4px); gap: 9px; padding: 9px 10px; }
+  body.mobile-mode-current-spot .spot-action-label { white-space: nowrap; }
+}
+
+.mobile-route-item-wrap { position: relative; }
+.mobile-route-more {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.route-stage-actions-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 4100;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(15, 23, 20, .48);
+}
+.route-stage-actions-panel {
+  width: 100%;
+  padding: 12px max(14px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+  border-radius: 24px 24px 0 0;
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
+}
+.route-stage-actions-handle { width: 42px; height: 4px; margin: 0 auto 12px; border-radius: 999px; background: #d7d4cd; }
+.route-stage-actions-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.route-stage-actions-copy { min-width: 0; }
+.route-stage-actions-title { color: var(--ink); font-size: 16px; font-weight: 800; white-space: nowrap; }
+.route-stage-actions-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px; margin-top: 4px; color: var(--ink2); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
+.route-stage-actions-number { flex: 0 0 auto; white-space: nowrap; }
+.route-stage-actions-places { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; min-width: 0; }
+.route-stage-actions-places span:not(.route-stage-actions-arrow) { min-width: 0; text-wrap: pretty; }
+.route-stage-actions-arrow { flex: 0 0 auto; white-space: nowrap; }
+.route-stage-actions-close { flex: 0 0 36px; height: 36px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface2); cursor: pointer; }
+.route-stage-actions-list { display: flex; flex-direction: column; gap: 8px; }
+.route-stage-action { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; }
+.route-stage-action:disabled { opacity: .52; cursor: default; }
+.route-stage-action-icon { flex: 0 0 38px; font-size: 20px; text-align: center; }
+.route-stage-action span:last-child { min-width: 0; }
+.route-stage-action strong { display: block; font-size: 14px; white-space: nowrap; }
+.route-stage-action small { display: block; margin-top: 2px; color: var(--ink2); font-size: 12px; line-height: 1.45; text-wrap: pretty; }
+.route-stage-actions-empty { margin: 0; padding: 8px 12px 2px; color: var(--ink2); font-size: 12px; line-height: 1.5; text-wrap: pretty; }
+
+/* 展示模擬：可收合工具列與虛擬搖桿。 */
+#tripSimulationPanel {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 3000;
+  width: min(310px, calc(100vw - 24px));
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, .95);
+  color: #fff;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .35);
+  font: 600 13px/1.4 system-ui, sans-serif;
+}
+#tripSimulationPanel .sim-toolbar { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+#tripSimulationPanel .sim-toolbar-toggle {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 7px 9px;
+  background: #e6f3ee;
+  color: #193e35;
+  font-weight: 800;
+}
+#tripSimulationPanel .sim-toolbar-status {
+  min-width: 0;
+  flex: 1;
+  color: #ddd6fe;
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+#tripSimulationPanel .sim-control-body { padding-top: 8px; }
+#tripSimulationPanel.collapsed .sim-control-body,
+#tripSimulationPanel.collapsed .sim-toolbar-status { display: none; }
+#tripSimulationPanel .sim-joystick {
+  position: relative;
+  width: 124px;
+  height: 124px;
+  margin: 2px auto 10px;
+  border: 2px solid rgba(255, 255, 255, .3);
+  border-radius: 50%;
+  background: radial-gradient(circle, #475569 0%, #26344c 65%, #1a2539 100%);
+  box-shadow: inset 0 4px 12px rgba(0, 0, 0, .25);
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+#tripSimulationPanel .sim-joystick:active { cursor: grabbing; }
+#tripSimulationPanel .sim-joystick span:not(.sim-joystick-thumb) {
+  position: absolute;
+  color: #cbd5e1;
+  font-size: 11px;
+  pointer-events: none;
+}
+#tripSimulationPanel .sim-joystick-north { top: 5px; left: 50%; transform: translateX(-50%); }
+#tripSimulationPanel .sim-joystick-south { bottom: 5px; left: 50%; transform: translateX(-50%); }
+#tripSimulationPanel .sim-joystick-west { left: 8px; top: 50%; transform: translateY(-50%); }
+#tripSimulationPanel .sim-joystick-east { right: 8px; top: 50%; transform: translateY(-50%); }
+#tripSimulationPanel .sim-joystick-thumb {
+  position: absolute;
+  left: calc(50% - 25px);
+  top: calc(50% - 25px);
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  background: #72ccb6;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, .35);
+  pointer-events: none;
+}
+#tripSimulationPanel .sim-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#tripSimulationPanel button,
+#tripSimulationPanel select {
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  padding: 6px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#tripSimulationPanel [hidden] { display: none !important; }
+#tripSimulationPanel [data-sim-events] {
+  margin: 9px 0 0;
+  padding: 7px 7px 7px 25px;
+  max-height: 80px;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .08);
+  font-size: 11px;
+  font-weight: 500;
+}
+#tripSimulationPanel .sim-sandbox-note { margin: 7px 0 0; color: #cbd5e1; font-size: 11px; text-wrap: pretty; }
+@media (max-width: 1024px) {
+  #tripSimulationPanel {
+    right: 10px;
+    bottom: calc(140px + max(10px, env(safe-area-inset-bottom)));
+    max-height: calc(100dvh - 175px);
+    overflow-y: auto;
+  }
+  #tripSimulationPanel.collapsed {
+    bottom: calc(78px + max(10px, env(safe-area-inset-bottom)));
+    width: max-content;
+    max-width: calc(100vw - 24px);
+  }
+  body.mobile-mode-map:has(.mobile-route-sheet[data-state="expanded"]) #tripSimulationPanel {
+    visibility: hidden;
+    pointer-events: none;
+  }
+}

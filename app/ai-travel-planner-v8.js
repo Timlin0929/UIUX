@@ -11997,10 +11997,9 @@
       return;
     }
 
-    const header = document.querySelector('.glass-header');
-    const headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 0;
-    const availableHeight = Math.max(360, window.innerHeight - headerHeight);
-    mapPanel.style.setProperty('height', `${availableHeight}px`, 'important');
+    // 固定地圖高度交給 CSS 的 100dvh；舊的 inline innerHeight 在 iOS 網址列
+    // 展開／收合後會過期，讓地圖下方留下無法補繪的白色區域。
+    mapPanel.style.removeProperty('height');
   }
 
   function updateDriverPanelState() {
@@ -12043,9 +12042,10 @@
 
   let currentUserRole = 'passenger';
 
-  function setUserRole(role) {
+  function setUserRole(role, options = {}) {
     currentUserRole = role;
     const isDriver = role === 'driver';
+    const preserveMode = options.preserveMode === true;
 
     document.body.classList.toggle('mobile-role-driver', isDriver);
 
@@ -12066,7 +12066,7 @@
       driverBtn.classList.toggle('active', isDriver);
     }
 
-    if (isMobileLayout()) {
+    if (isMobileLayout() && !preserveMode) {
       if (isDriver) {
         setMobileMode('map');
       } else {
@@ -12094,6 +12094,9 @@
     const showMap = mode === 'map';
     const isCurrSpot = mode === 'current-spot';
 
+    // 手機已有獨立景點頁，切換主畫面時不保留地圖上的重複資訊卡。
+    if (isMobileLayout()) closePinInfo();
+
     // UIUX#5：離開地圖前先記住視角，回來時由 refreshMobileMapLayout 還原。
     // 判斷「原本在地圖模式」必須在下面 toggle class 之前做，否則狀態已經被覆蓋。
     const leavingMap = !showMap && !isCurrSpot
@@ -12120,6 +12123,8 @@
       document.body.classList.toggle('mobile-mode-map', showMap);
       document.body.classList.toggle('mobile-mode-functions', !showMap);
     }
+    document.body.classList.toggle('mobile-mode-current-spot', isCurrSpot);
+    document.documentElement.classList.toggle('mobile-map-active', showMap);
 
     const fnBtn = document.getElementById('mobileSwitchFunctions');
     const spotBtn = document.getElementById('mobileSwitchSpot');
@@ -12142,15 +12147,20 @@
   function syncMobileViewMode() {
     updateMobileViewportMetrics();
     if (isMobileLayout()) {
-      setUserRole(currentUserRole);
-      if (!document.body.classList.contains('mobile-mode-map') && !document.body.classList.contains('mobile-mode-functions')) {
+      // 螢幕旋轉／網址列變動不可把使用者強制送回「行程」。
+      setUserRole(currentUserRole, { preserveMode: true });
+      if (!document.body.classList.contains('mobile-mode-map')
+        && !document.body.classList.contains('mobile-mode-functions')
+        && !document.body.classList.contains('mobile-mode-current-spot')) {
         setMobileMode(currentUserRole === 'driver' ? 'map' : 'functions');
       }
     } else {
       applyMobileMapHeight();
       document.body.classList.remove('mobile-mode-map');
       document.body.classList.remove('mobile-mode-functions');
+      document.body.classList.remove('mobile-mode-current-spot');
       document.body.classList.remove('mobile-role-driver');
+      document.documentElement.classList.remove('mobile-map-active');
     }
     applyMobileMapHeight();
     updateMobileDriverPanelLayout();
@@ -15399,7 +15409,7 @@
     }
     renderToiletMarkersForActiveRouteStage();
 
-    if (stop.mapPinId && !useDesktopEditor) {
+    if (stop.mapPinId && !useDesktopEditor && !isMobileLayout()) {
       showPinInfo(stop.mapPinId);
     }
 
@@ -15866,7 +15876,7 @@
         : '<li>等待開始展示行程</li>';
     }
     const recap = panel.querySelector('[data-sim-recap]');
-    if (recap) recap.style.display = currentTripStatus === 'completed' ? '' : 'none';
+    if (recap) recap.hidden = currentTripStatus !== 'completed';
   }
 
   function createSimulationPanel() {
@@ -15874,28 +15884,29 @@
     const panel = document.createElement('section');
     panel.id = 'tripSimulationPanel';
     panel.setAttribute('aria-label', '行程展示模擬控制');
-    panel.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:3000;width:min(310px,calc(100vw - 24px));padding:14px;border-radius:16px;background:rgba(15,23,42,.94);color:#fff;box-shadow:0 18px 48px rgba(15,23,42,.35);font:600 13px/1.4 system-ui,sans-serif;';
     panel.innerHTML = `
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px;">
-        <strong style="white-space:nowrap;">🧪 展示模擬</strong><span data-sim-status style="font-size:12px;color:#C4B5FD;white-space:nowrap;"></span>
+      <div class="sim-toolbar">
+        <button type="button" class="sim-toolbar-toggle" data-sim-toggle aria-controls="simControlBody" aria-expanded="true" aria-label="收合展示模擬工具列">🧪 展示模擬 <span data-sim-chevron>⌄</span></button>
+        <span data-sim-status class="sim-toolbar-status"></span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,42px);justify-content:center;gap:5px;margin-bottom:10px;">
-        <span></span><button type="button" data-sim-move="0,1" aria-label="向前">▲</button><span></span>
-        <button type="button" data-sim-move="-1,0" aria-label="向左">◀</button><button type="button" data-sim-stop aria-label="停止移動">●</button><button type="button" data-sim-move="1,0" aria-label="向右">▶</button>
-        <span></span><button type="button" data-sim-move="0,-1" aria-label="向後">▼</button><span></span>
+      <div class="sim-control-body" id="simControlBody">
+      <div class="sim-joystick" data-sim-joystick role="application" tabindex="0" aria-label="虛擬搖桿：拖動圓點控制移動，鍵盤可使用方向鍵">
+        <span class="sim-joystick-north" aria-hidden="true">前</span><span class="sim-joystick-west" aria-hidden="true">左</span>
+        <span class="sim-joystick-east" aria-hidden="true">右</span><span class="sim-joystick-south" aria-hidden="true">後</span>
+        <span class="sim-joystick-thumb" data-sim-thumb aria-hidden="true"></span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+      <div class="sim-actions">
         <button type="button" data-sim-play style="white-space:nowrap;">▶ 播放</button>
         <button type="button" data-sim-snap style="white-space:nowrap;">🧲 路線吸附</button>
         <button type="button" data-sim-next style="white-space:nowrap;">⏭ 下一站</button>
         <button type="button" data-sim-reset style="white-space:nowrap;">↺ 重設</button>
         <select data-sim-speed aria-label="模擬速度"><option value="1">1×</option><option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option></select>
-        <button type="button" data-sim-recap style="display:none;white-space:nowrap;">🎞 展示回顧</button>
-        <button type="button" data-sim-close style="white-space:nowrap;">關閉</button>
+        <button type="button" data-sim-recap hidden>🎞 展示回顧</button>
+        <button type="button" data-sim-close>結束模擬</button>
       </div>
-      <ol data-sim-events aria-live="polite" style="margin:10px 0 0;padding:8px 8px 8px 26px;border-radius:10px;background:rgba(255,255,255,.08);font-size:12px;font-weight:500;max-height:104px;overflow:auto;"></ol>
-      <p style="margin:8px 0 0;color:#CBD5E1;font-size:11px;text-wrap:pretty;">Sandbox 展示：打卡、照片提示與完成事件只存在這個分頁，不會寫入正式紀錄。</p>`;
-    panel.querySelectorAll('button,select').forEach((el) => { el.style.minHeight = '36px'; el.style.borderRadius = '8px'; el.style.border = '0'; el.style.padding = '6px 9px'; el.style.cursor = 'pointer'; });
+      <ol data-sim-events aria-live="polite"></ol>
+      <p class="sim-sandbox-note">展示操作只存在此分頁，不會寫入正式行程。</p>
+      </div>`;
     panel.querySelector('[data-sim-play]').addEventListener('click', () => { tripSimulation.paused = !tripSimulation.paused; updateSimulationPanel(); });
     panel.querySelector('[data-sim-snap]').addEventListener('click', () => { tripSimulation.snapToRoute = !tripSimulation.snapToRoute; updateSimulationPanel(); });
     panel.querySelector('[data-sim-next]').addEventListener('click', () => advanceSimulationStage());
@@ -15907,14 +15918,55 @@
       feedbackToast(`🎞 展示回顧：完成 ${arrivals} 個景點、觸發 ${photos} 次照片提示（未儲存）`, 'green');
     });
     panel.querySelector('[data-sim-speed]').addEventListener('change', (event) => { tripSimulation.speedMultiplier = Number(event.target.value) || 1; });
-    panel.querySelectorAll('[data-sim-move]').forEach((button) => {
-      const parts = button.dataset.simMove.split(',').map(Number);
-      const start = (event) => { event.preventDefault(); tripSimulation.joystick = { x: parts[0], y: parts[1] }; tripSimulation.paused = false; updateSimulationPanel(); };
-      button.addEventListener('pointerdown', start);
-      button.addEventListener('pointerup', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
-      button.addEventListener('pointercancel', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
+    const joystick = panel.querySelector('[data-sim-joystick]');
+    const thumb = panel.querySelector('[data-sim-thumb]');
+    let joystickStartedPlayback = false;
+    const releaseJoystick = () => {
+      tripSimulation.joystick = { x: 0, y: 0 };
+      thumb.style.transform = '';
+      if (joystickStartedPlayback) {
+        tripSimulation.paused = true;
+        joystickStartedPlayback = false;
+        updateSimulationPanel();
+      }
+    };
+    const moveJoystick = (event) => {
+      const rect = joystick.getBoundingClientRect();
+      const radius = Math.min(rect.width, rect.height) * 0.35;
+      const dx = event.clientX - (rect.left + rect.width / 2);
+      const dy = event.clientY - (rect.top + rect.height / 2);
+      const scale = Math.min(1, radius / (Math.hypot(dx, dy) || 1));
+      const x = dx * scale / radius;
+      const y = -dy * scale / radius;
+      tripSimulation.joystick = Math.hypot(x, y) < 0.12 ? { x: 0, y: 0 } : { x, y };
+      thumb.style.transform = `translate(${dx * scale}px, ${dy * scale}px)`;
+      if (Math.hypot(x, y) >= 0.12 && tripSimulation.paused) {
+        joystickStartedPlayback = true;
+        tripSimulation.paused = false;
+      }
+      updateSimulationPanel();
+    };
+    joystick.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      joystick.setPointerCapture(event.pointerId);
+      moveJoystick(event);
     });
-    panel.querySelector('[data-sim-stop]').addEventListener('click', () => { tripSimulation.joystick = { x: 0, y: 0 }; tripSimulation.paused = true; updateSimulationPanel(); });
+    joystick.addEventListener('pointermove', (event) => {
+      if (joystick.hasPointerCapture(event.pointerId)) moveJoystick(event);
+    });
+    joystick.addEventListener('pointerup', releaseJoystick);
+    joystick.addEventListener('pointercancel', releaseJoystick);
+    joystick.addEventListener('lostpointercapture', releaseJoystick);
+    tripSimulation.abortController = new AbortController();
+    window.addEventListener('blur', releaseJoystick, { signal: tripSimulation.abortController.signal });
+    panel.querySelector('[data-sim-toggle]').addEventListener('click', () => {
+      const collapsed = panel.classList.toggle('collapsed');
+      if (!collapsed && isMobileLayout() && mobileRouteSheetState !== 'collapsed') toggleMobileRouteSheet(false);
+      panel.querySelector('[data-sim-toggle]').setAttribute('aria-expanded', String(!collapsed));
+      panel.querySelector('[data-sim-toggle]').setAttribute('aria-label', collapsed ? '展開展示模擬工具列' : '收合展示模擬工具列');
+      panel.querySelector('[data-sim-chevron]').textContent = collapsed ? '⌃' : '⌄';
+      if (collapsed) releaseJoystick();
+    });
     document.body.appendChild(panel);
     tripSimulation.panel = panel;
     updateSimulationPanel();
@@ -15974,6 +16026,10 @@
     stopUserLocationWatch();
     createSimulationPanel();
     resetSimulation();
+    if (isMobileLayout()) {
+      mobileRouteSheetState = 'collapsed';
+      setMobileMode('map');
+    }
     tripSimulation.lastTickAt = performance.now();
     tripSimulation.timer = window.setInterval(simulationTick, 100);
     feedbackToast('🧪 已進入展示模擬；所有進度只存在此分頁', 'blue');
@@ -15984,6 +16040,8 @@
     if (!tripSimulation.enabled) return false;
     if (tripSimulation.timer) window.clearInterval(tripSimulation.timer);
     tripSimulation.timer = null;
+    if (tripSimulation.abortController) tripSimulation.abortController.abort();
+    tripSimulation.abortController = null;
     const snapshot = tripSimulation.snapshot;
     tripSimulation.enabled = false;
     tripSimulation.paused = true;
@@ -17739,7 +17797,7 @@
 
     activeRouteStage = activeRouteStage === stageIndex ? null : stageIndex;
     activeItineraryStopId = null; // 清除行程階段選擇
-    mobileRouteSheetState = 'peek';
+    mobileRouteSheetState = 'collapsed';
     updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
     renderToiletMarkersForActiveRouteStage();
     renderItineraryDisplay();
@@ -17750,6 +17808,62 @@
   function closeRouteAlternatives() {
     const m = document.getElementById('routeAltModal');
     if (m) m.remove();
+  }
+
+  function closeRouteStageActions() {
+    const overlay = document.getElementById('routeStageActionsModal');
+    if (!overlay) return;
+    const returnFocus = overlay._returnFocus;
+    overlay.remove();
+    if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+  }
+
+  function openRouteStageActions(stageIndex, event) {
+    if (event) event.stopPropagation();
+    const stage = routeStageCache.find((item) => item && item.index === stageIndex);
+    if (!stage) return;
+    closeRouteStageActions();
+    const alternativeCount = Array.isArray(stage.alts) ? stage.alts.length : 0;
+    const canCompare = stage.altEligible && alternativeCount > 1;
+    const overlay = document.createElement('div');
+    overlay.id = 'routeStageActionsModal';
+    overlay.className = 'route-stage-actions-modal';
+    overlay._returnFocus = event && event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    overlay.innerHTML = `
+      <div class="route-stage-actions-panel" role="dialog" aria-modal="true" aria-labelledby="routeStageActionsTitle" aria-describedby="routeStageActionsContext">
+        <div class="route-stage-actions-handle" aria-hidden="true"></div>
+        <div class="route-stage-actions-head">
+          <div class="route-stage-actions-copy">
+            <div class="route-stage-actions-title" id="routeStageActionsTitle">這段路線可以怎麼走？</div>
+            <div class="route-stage-actions-sub" id="routeStageActionsContext"><span class="route-stage-actions-number">第 ${stageIndex + 1} 段</span><span class="route-stage-actions-places"><span>${escapeHtml(stage.origin.name || stage.origin.title || '上一站')}</span><span class="route-stage-actions-arrow" aria-hidden="true">→</span><span>${escapeHtml(stage.destination.name || stage.destination.title || '下一站')}</span></span></div>
+          </div>
+          <button type="button" class="route-stage-actions-close" aria-label="關閉路線選項">✕</button>
+        </div>
+        <div class="route-stage-actions-list">
+          <button type="button" class="route-stage-action" data-stage-focus><span class="route-stage-action-icon" aria-hidden="true">🗺️</span><span><strong>在地圖上查看</strong><small>放大這段路線與起終點</small></span></button>
+          ${canCompare
+            ? `<button type="button" class="route-stage-action" data-stage-alt><span class="route-stage-action-icon" aria-hidden="true">🔀</span><span><strong>比較其他路線</strong><small>另有 ${alternativeCount - 1} 條走法，可比較時間與距離</small></span></button>`
+            : '<p class="route-stage-actions-empty">目前沒有可比較的其他路線。</p>'}
+        </div>
+      </div>`;
+    overlay.addEventListener('click', (clickEvent) => { if (clickEvent.target === overlay) closeRouteStageActions(); });
+    overlay.addEventListener('keydown', (keyEvent) => { if (keyEvent.key === 'Escape') closeRouteStageActions(); });
+    overlay.querySelector('.route-stage-actions-close').addEventListener('click', closeRouteStageActions);
+    overlay.querySelector('[data-stage-focus]').addEventListener('click', () => {
+      closeRouteStageActions();
+      activeRouteStage = stageIndex;
+      activeItineraryStopId = null;
+      mobileRouteSheetState = 'collapsed';
+      updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
+      renderToiletMarkersForActiveRouteStage();
+      renderItineraryDisplay();
+    });
+    if (canCompare) overlay.querySelector('[data-stage-alt]').addEventListener('click', () => {
+      closeRouteStageActions();
+      openRouteAlternatives(stageIndex);
+    });
+    document.body.appendChild(overlay);
+    overlay.querySelector('.route-stage-actions-close').focus();
   }
 
   function openRouteAlternatives(stageIndex) {
@@ -17981,9 +18095,7 @@
     if (typeof forceExpanded === 'boolean') {
       mobileRouteSheetState = forceExpanded ? 'expanded' : 'collapsed';
     } else {
-      mobileRouteSheetState = mobileRouteSheetState === 'collapsed'
-        ? 'peek'
-        : (mobileRouteSheetState === 'peek' ? 'expanded' : 'collapsed');
+      mobileRouteSheetState = mobileRouteSheetState === 'collapsed' ? 'expanded' : 'collapsed';
     }
     const toggle = document.querySelector('#mobileRouteSheet .mobile-route-toggle');
     if (toggle) toggle.setAttribute('aria-expanded', mobileRouteSheetState === 'collapsed' ? 'false' : 'true');
@@ -18014,18 +18126,19 @@
       return;
     }
 
-    sheet.classList.toggle('peek', mobileRouteSheetState === 'peek');
+    sheet.classList.remove('peek');
     sheet.classList.toggle('expanded', mobileRouteSheetState === 'expanded');
     sheet.dataset.state = mobileRouteSheetState;
-    icon.textContent = mobileRouteSheetState === 'collapsed' ? '▴' : (mobileRouteSheetState === 'peek' ? '▴' : '▾');
+    icon.textContent = mobileRouteSheetState === 'collapsed' ? '⌃' : '×';
 
     const stages = routeStageCache.filter(Boolean);
     const activeStage = stages.find((stage) => stage.index === activeRouteStage);
     const nextStage = activeStage || stages.find((stage) => inferredStageProgress(stage) < 1) || stages[stages.length - 1];
     const visibleStages = mobileRouteSheetState === 'collapsed' && nextStage ? [nextStage] : stages;
-    summary.textContent = activeStage
-      ? `目前聚焦第 ${activeStage.index + 1} 段 · ${activeStage.origin.name || activeStage.origin.title} → ${activeStage.destination.name || activeStage.destination.title}`
-      : `${stages.length} 段路徑 · ${mobileRouteSheetState === 'collapsed' ? '點開看前三段' : (mobileRouteSheetState === 'peek' ? '再點看完整路線' : '再點收合')}`;
+    const summaryStage = activeStage || nextStage;
+    summary.textContent = mobileRouteSheetState === 'collapsed' && summaryStage
+      ? `${stages.length} 段 · ${shortStopName(summaryStage.origin.name || summaryStage.origin.title || '上一站')} → ${shortStopName(summaryStage.destination.name || summaryStage.destination.title || '下一站')}`
+      : `${stages.length} 段路徑 · 點一下即可收合`;
 
     list.innerHTML = visibleStages.length ? visibleStages.map((stage) => {
       const status = getMobileRouteStageStatus(stage);
@@ -18041,7 +18154,7 @@
         </div>
         <div class="mobile-route-item-badge">${status.label}</div>
       </button>
-      ${stage.altEligible && stage.alts ? `<button type="button" class="route-alt-btn mobile" onclick="openRouteAlternatives(${stage.index})">🔀 替代路線 (${stage.alts.length})</button>` : ''}
+      <button type="button" class="mobile-route-more" onclick="openRouteStageActions(${stage.index}, event)" aria-label="查看第 ${stage.index + 1} 段路線選項" title="路線選項">⋯</button>
       </div>
     `; }).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
   }
@@ -18605,6 +18718,12 @@
         selectedModifySpotId = mappedSpot.id;
         renderModifyWindowBody();
       }
+    }
+
+    // 手機地圖只顯示路線與標記；詳細內容已有獨立的「現在景點」頁。
+    if (isMobileLayout()) {
+      closePinInfo();
+      return;
     }
     
     // 替換卡片內容
