@@ -1172,9 +1172,28 @@ async function section19() {
 
   // 存檔前先對齊，否則會把已刪的照片寫回 memories
   const save = extractFunction(P, 'saveMyTripMemory');
-  check('saveMyTripMemory 先對齊再聯集',
-    /await mergeTripMemoriesIntoLocal\(tripId\)/.test(save)
-    && save.indexOf('mergeTripMemoriesIntoLocal') < save.indexOf('getVisitedPlaces()'));
+  check('saveMyTripMemory 不再寫照片網址／封面', !/photos|coverUrl/.test(save.replace(/\/\/.*$/gm, '')),
+    '寫回 memories 會跟 Cloud Function 清理打架，刪掉的照片又跑回來');
+  check('saveMyTripMemory 用 merge 寫入（保留 App 的 photos、migratedPhotoKeys、spotAliases）',
+    /\{ merge: true \}/.test(save) && !/\.set\(\{[^}]*\}\);/.test(save));
+  vm.runInContext('var MEMO_FIELD_UNSAFE = /[.~*/\\[\\]]/g;', pctx);
+  ['memoryStableStopId', 'buildMemoryNotePatch'].forEach((n) => vm.runInContext(extractFunction(P, n), pctx));
+  const notePatch = (...a) => vm.runInContext('buildMemoryNotePatch', pctx)(...a);
+  const nStops = [{ name: '三仙台', stopId: 's1' }, { name: '鹿野高台', order: 1 }, { name: '池上' }];
+  const byNm = (recs) => Object.fromEntries(recs.map((r) => [vm.runInContext('visitedPlaceNameKey', pctx)(r.name), r]));
+  let np = notePatch(nStops, byNm([{ name: '三仙台', note: '看日出', noteUpdatedAt: 500 }]), { s1: { note: 'App 舊的', updatedAt: 100, photos: ['x'] } }, 999);
+  check('本機較新的備註蓋過雲端，只帶備註欄位', np.s1 && np.s1.note === '看日出' && np.s1.updatedAt === 500 && !('photos' in np.s1), JSON.stringify(np));
+  np = notePatch(nStops, byNm([{ name: '三仙台', note: '看日出', noteUpdatedAt: 50 }]), { s1: { note: 'App 新寫的', updatedAt: 100 } }, 999);
+  check('雲端（App）較新就不蓋', !np.s1, JSON.stringify(np));
+  np = notePatch(nStops, byNm([{ name: '三仙台', note: '', noteUpdatedAt: 500 }]), { s1: { note: '要刪掉', updatedAt: 100 } }, 999);
+  check('網頁清空備註 → 雲端也清空（旅伴那邊跟著消失）', np.s1 && np.s1.note === '', JSON.stringify(np));
+  np = notePatch(nStops, byNm([{ name: '鹿野高台', note: '舊備註' }, { name: '池上', note: '便當' }]), { web_1_鹿野高台: { note: 'App 寫的', updatedAt: 1 } }, 999);
+  check('舊資料沒有 noteUpdatedAt：只補雲端空的，不蓋 App 的', !np['web_1_鹿野高台'] && np['web_2_池上'] && np['web_2_池上'].note === '便當', JSON.stringify(np));
+  check('key 與 App stableStopId 同算法，並帶 spotName 供 reconcileSpotKeys 接回', np['web_2_池上'].stopId === 'web_2_池上' && np['web_2_池上'].spotName === '池上');
+  check('沒有備註的站不寫', Object.keys(notePatch(nStops, byNm([{ name: '三仙台', note: '' }]), {}, 999)).length === 0);
+  check('儲存備註時記下 noteUpdatedAt', /p\.note = val; p\.noteUpdatedAt = Date\.now\(\);/.test(P));
+  check('備註視窗說明旅伴看得到', /同行旅伴也看得到/.test(fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.html'), 'utf8'))
+    && !/只有你看得到/.test(fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.html'), 'utf8')));
   const merge = extractFunction(P, 'mergeTripMemoriesIntoLocal');
   check('有刪除時連雲端備份一起存', /if \(result\.removed\) saveVisitedPlaces\(places\)/.test(merge),
     '只寫 localStorage 的話，下次登入會從 users/{uid}.visitedSpots 還原回來');

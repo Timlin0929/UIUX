@@ -5101,7 +5101,8 @@
     if (!noteModalTargetName) return closeNoteModal();
     const textarea = document.getElementById('noteModalText');
     const val = textarea ? String(textarea.value).trim().slice(0, 500) : '';
-    const ok = updateVisitedPlaceByName(noteModalTargetName, (p) => { p.note = val; }, noteModalTargetTripId);
+    // noteUpdatedAt：saveMyTripMemory 靠它判斷本機備註比雲端新（含清空），才會寫進旅伴看得到的 memories
+    const ok = updateVisitedPlaceByName(noteModalTargetName, (p) => { p.note = val; p.noteUpdatedAt = Date.now(); }, noteModalTargetTripId);
     closeNoteModal();
     if (!ok) return feedbackToast('備註儲存失敗：找不到造訪紀錄', 'orange');
     renderTravelLog();
@@ -13318,60 +13319,59 @@
     try { const t = await firebaseDb.collection('micro_trips').doc(tripId).get();
       return (t.exists && Array.isArray(t.data().stops)) ? t.data().stops : []; } catch (e) { return []; }
   }
-  // 把本端這趟的照片/備註「合併」進 memories/{uid}。
-  // ★關鍵：先讀既有雲端那份，照片以 URL 聯集——否則同帳號在 App 上傳、
-  //   換到網頁一開就用本機（沒有那張）整份覆蓋，會把 App 的照片洗掉（組員回報的 bug）。
-  //   本機標了 foreign 的照片（＝載入時從別人/他機併進來顯示的）不回寫，避免據為己有。
+  // 把本端這趟的景點備註寫進 memories/{uid}（App 旅記每站會列出全部旅伴的 note）。
+  // 只寫備註，不再寫照片網址：照片已改走正式 photos（trip-photo-sync），memories 裡的舊照片
+  // 只剩相容讀取；網頁再寫回去會跟 Cloud Function 的清理互相打架，刪掉的照片又跑回來。
+  // 一律 merge 寫入：spots.{stopId} 只動 stopId/spotName/note/updatedAt，App 寫的 photos、
+  // migratedPhotoKeys、spotAliases、coverUrl 都保留（原本 .set() 整份覆蓋會把它們清掉）。
+  // 何時寫某站的 note（網頁不會把雲端 note 讀回本機，本機的可能比雲端舊）：
+  //   - 本機改過（noteUpdatedAt）且比雲端那站新 → 照本機寫，清空也寫（旅伴那邊跟著消失）
+  //   - 舊資料沒有 noteUpdatedAt → 只補雲端空著的，不蓋掉 App 寫的
   async function saveMyTripMemory(tripId) {
     if (!firebaseEnabled || !firebaseDb || !firebaseAuth || !firebaseAuth.currentUser) return;
     if (!tripId || tripId === 'TRIP-EMPTY' || !/^[A-Za-z0-9_-]+$/.test(String(tripId))) return;
     const uid = firebaseAuth.currentUser.uid;
-    // 先跟雲端對齊：已被刪掉的照片要先從本機移除，下面的「照片聯集」才不會把它寫回 memories
-    //（Cloud Function 刪照片時會清 memories，若這裡又寫回去就白清了）。
-    try { await mergeTripMemoriesIntoLocal(tripId); } catch (_e) {}
-    const stops = await fetchTripStops(tripId);
-    if (!stops.length) return;
     const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === String(tripId));
     if (!records.length) return;   // 本端沒內容就不動雲端
+    const stops = await fetchTripStops(tripId);
+    if (!stops.length) return;
     const byName = {};
     records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
-    // 先帶入既有雲端所有站（含 App 上傳、本機沒有的）
+    const ref = firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid);
     let existing = {};
     try {
-      const d = await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid).get();
+      const d = await ref.get();
       if (d.exists && d.data() && d.data().spots) existing = d.data().spots;
-    } catch (e) {}
-    const spots = {};
-    Object.keys(existing).forEach((sid) => {
-      const e = existing[sid] || {};
-      const ph = (Array.isArray(e.photos) ? e.photos : []).filter((u) => u && /^https?:\/\//i.test(String(u)));
-      spots[sid] = { stopId: sid, spotName: String(e.spotName || ''), note: String(e.note || '').slice(0, 500), photos: ph.slice(), updatedAt: Number(e.updatedAt) || 0 };
-    });
-    // 併入本機 local（排除 foreign），照片 URL 聯集
+    } catch (e) { return; }   // 讀不到雲端就不寫，免得拿舊備註蓋掉 App 的
+    const patch = buildMemoryNotePatch(stops, byName, existing, Date.now());
+    if (!Object.keys(patch).length) return;
+    try {
+      await ref.set({
+        tripId: tripId, tripTitle: currentTripTitle || '', region: currentTripRegion || '',
+        updatedAt: Date.now(), ownerUid: uid, ownerName: memoryOwnerName(), spots: patch
+      }, { merge: true });
+    } catch (e) { console.warn('Firestore 寫入回憶失敗:', e && e.message); }
+  }
+
+  // 純函式：算出 memories.spots 要 merge 的備註欄位 { [stopId]: { stopId, spotName, note, updatedAt } }。
+  // stopId 與 App stableStopId 同算法；spotName 一併寫，App 的 reconcileSpotKeys 在 key 對不上時靠它接回。
+  function buildMemoryNotePatch(stops, byName, existing, now) {
+    const patch = {};
     stops.forEach((s, i) => {
       const rec = byName[visitedPlaceNameKey(s.name)];
       if (!rec) return;
-      const localPhotos = (Array.isArray(rec.photos) ? rec.photos : []).filter((p) => p && p.url && !p.foreign).map((p) => p.url);
-      const note = String(rec.note || '').slice(0, 500);
-      if (!localPhotos.length && !note) return;
       const sid = memoryStableStopId(s, i);
-      const cur = spots[sid] || { stopId: sid, spotName: String(s.name || ''), note: '', photos: [], updatedAt: 0 };
-      const seen = new Set(cur.photos);
-      localPhotos.forEach((u) => { if (!seen.has(u)) { seen.add(u); cur.photos.push(u); } });
-      if (note) cur.note = note;
-      if (!cur.spotName) cur.spotName = String(s.name || '');
-      cur.updatedAt = Date.now();
-      spots[sid] = cur;
+      const cloud = (existing && existing[sid]) || {};
+      const cloudNote = String(cloud.note || '');
+      const note = String(rec.note || '').trim().slice(0, 500);
+      const localTs = Number(rec.noteUpdatedAt) || 0;
+      const write = localTs
+        ? localTs > (Number(cloud.updatedAt) || 0) && note !== cloudNote
+        : !!note && !cloudNote;
+      if (!write) return;
+      patch[sid] = { stopId: sid, spotName: String(cloud.spotName || s.name || ''), note: note, updatedAt: localTs || now };
     });
-    if (!Object.keys(spots).length) return;
-    let coverUrl = '';
-    Object.keys(spots).forEach((sid) => { if (!coverUrl && spots[sid].photos.length) coverUrl = spots[sid].photos[0]; });
-    try {
-      await firebaseDb.collection('micro_trips').doc(tripId).collection('memories').doc(uid).set({
-        tripId: tripId, tripTitle: currentTripTitle || '', region: currentTripRegion || '',
-        coverUrl: coverUrl, updatedAt: Date.now(), ownerUid: uid, ownerName: memoryOwnerName(), spots: spots
-      });
-    } catch (e) { console.warn('Firestore 寫入回憶失敗:', e && e.message); }
+    return patch;
   }
 
   // 旅記／九宮格／回顧短片都讀本機造訪紀錄（visitedSpots），這裡把雲端照片對齊進來：
