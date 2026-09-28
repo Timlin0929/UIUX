@@ -10960,6 +10960,7 @@
     if (!plannedBlock) return;
 
     syncTripPrimaryVehicleSelect();
+    try { syncDirectionsPanelStages(); } catch (_e) {}   // 打卡、重設進度都會走到這裡：階段面板跟著換「正在前往的段」（載入初期變數未就緒時略過）
 
     const schedule = buildReplanSchedule();
     if (!schedule || schedule.length === 0) {
@@ -17636,7 +17637,7 @@
       // Stage selection mode: always use fitBounds to ensure both endpoints are visible
       // and the map never pans to the midpoint (which may be offshore for coastal routes)
       bumpMapFocus(); // 使用者選了某個路段：這是新的焦點意圖，切分頁前的舊視角不該再蓋回來
-      map.fitBounds(bounds, { padding: 80 });
+      map.fitBounds(bounds, routeFitPadding(80));
       google.maps.event.addListenerOnce(map, 'idle', () => {
         if (animationToken !== routeViewportAnimationToken) return;
         if (map.getZoom() > maxZoom) map.setZoom(maxZoom);
@@ -17651,7 +17652,7 @@
     window.setTimeout(() => {
       if (animationToken !== routeViewportAnimationToken) return;
       bumpMapFocus();
-      map.fitBounds(bounds);
+      map.fitBounds(bounds, routeFitPadding(40));
     }, center ? 260 : 0);
   }
 
@@ -17724,22 +17725,9 @@
       (arr || []).forEach((m) => { if (m && m.setMap) m.setMap(activeRouteStage === null || idx === activeRouteStage ? map : null); });
     });
 
-    const panel = document.getElementById('directionsPanel');
-    if (panel) {
-      Array.from(panel.children).forEach((child) => {
-        if (activeRouteStage !== null && parseInt(child.dataset.index, 10) === activeRouteStage) {
-          child.style.borderColor = 'var(--accent)';
-          child.style.backgroundColor = 'var(--accent-light)';
-          child.style.boxShadow = '0 10px 24px rgba(46, 125, 109, 0.14)';
-          child.style.transform = 'translateY(-2px)';
-        } else {
-          child.style.borderColor = 'var(--border)';
-          child.style.backgroundColor = 'transparent';
-          child.style.boxShadow = 'none';
-          child.style.transform = 'translateY(0)';
-        }
-      });
-    }
+    // 選取高亮改由 class 控制（syncDirectionsPanelStages）；原本在這裡逐張寫 inline style，
+    // 會蓋掉一行式卡片的樣式，每一行都多出外框。
+    syncDirectionsPanelStages();
 
     renderMobileRouteSheet();
     renderToiletMarkersForActiveRouteStage();
@@ -17755,6 +17743,7 @@
     updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
     renderToiletMarkersForActiveRouteStage();
     renderItineraryDisplay();
+    syncDirectionsPanelStages();
   }
 
   // ── D6：替代路線比較面板＋套用（真實 Directions 替代路線，車/機車段） ──
@@ -17859,26 +17848,131 @@
   }
 
   // 桌機「路線階段」面板的邊緣收合把手（slide-to-edge）
-  function toggleDirectionsPanel() {
+  // 地圖欄窄於這個寬度時預設收合：面板最寬 320px，地圖只剩 400px 左右時會蓋掉九成（實測回報）。
+  const DIRECTIONS_PANEL_AUTO_COLLAPSE_BELOW = 720;
+  let directionsPanelUserChoice = null;   // 使用者按過把手就照他的（'open' | 'closed'），不再自動切換
+
+  // 把手＝面板的標題列（展開時）／地圖左上角的膠囊按鈕（收合時）。
+  // 原本是貼在面板右邊的直排「階段 ◂」方塊，跟面板中間有縫、高度也對不齊，看起來像多黏了一塊。
+  function renderDirectionsPanelHandle(collapsed) {
+    const handle = document.getElementById('directionsPanelHandle');
+    if (!handle) return;
+    const count = Array.isArray(routeStageCache) ? routeStageCache.filter(Boolean).length : 0;
+    const title = `路線${count ? ` · ${count} 段` : ''}`;
+    handle.innerHTML = collapsed
+      ? `<span class="dph-title">${title}</span><span class="dph-icon" aria-hidden="true">›</span>`
+      : `<span class="dph-title">${title}</span><span class="dph-action">收合<span aria-hidden="true"> ‹</span></span>`;
+    handle.setAttribute('aria-expanded', String(!collapsed));
+    handle.setAttribute('aria-label', collapsed ? `展開路線階段（${count} 段）` : '收合路線階段');
+  }
+
+  function setDirectionsPanelCollapsed(collapsed) {
     const panel = document.getElementById('directionsPanel');
     const handle = document.getElementById('directionsPanelHandle');
     if (!panel || !handle) return;
-    const collapsed = panel.classList.toggle('collapsed');
+    panel.classList.toggle('collapsed', collapsed);
     handle.classList.toggle('collapsed', collapsed);
-    handle.textContent = collapsed ? '階段 ▸' : '階段 ◂';
+    renderDirectionsPanelHandle(collapsed);
   }
+
+  function toggleDirectionsPanel() {
+    const panel = document.getElementById('directionsPanel');
+    if (!panel) return;
+    const collapsed = !panel.classList.contains('collapsed');
+    directionsPanelUserChoice = collapsed ? 'closed' : 'open';
+    setDirectionsPanelCollapsed(collapsed);
+    refitRouteForPanel();
+  }
+
+  function applyDirectionsPanelAutoLayout() {
+    if (isMobileLayout()) return;
+    const panel = document.getElementById('directionsPanel');
+    const handle = document.getElementById('directionsPanelHandle');
+    if (!panel || !handle || handle.hidden) return;
+    // 使用者按過就照他的：路線重畫（打卡、改交通）時面板會先被還原成展開，這裡要收回去
+    if (directionsPanelUserChoice) {
+      setDirectionsPanelCollapsed(directionsPanelUserChoice === 'closed');
+      return;
+    }
+    const width = panel.parentElement ? panel.parentElement.clientWidth : 0;
+    setDirectionsPanelCollapsed(width > 0 && width < DIRECTIONS_PANEL_AUTO_COLLAPSE_BELOW);
+  }
+
+  // fitBounds 的留白：面板展開時左側多留面板寬度，路線才不會畫在面板底下。
+  // 地圖窄到扣掉面板後放不下路線時就不讓——寧可被蓋一點，也不要縮成一個點。
+  function routeFitPadding(base) {
+    const pad = { top: base, right: base, bottom: base, left: base };
+    const panel = document.getElementById('directionsPanel');
+    if (!panel || isMobileLayout() || panel.style.display === 'none' || panel.classList.contains('collapsed')) return pad;
+    const mapWidth = map && map.getDiv ? map.getDiv().clientWidth : 0;
+    const left = base + panel.offsetWidth + 16;
+    if (mapWidth && left + base > mapWidth * 0.75) return pad;
+    pad.left = left;
+    return pad;
+  }
+
+  function refitRouteForPanel() {
+    const bounds = currentRouteFocusBounds || currentRouteBounds;
+    if (!map || !bounds) return;
+    bumpMapFocus();
+    map.fitBounds(bounds, routeFitPadding(activeRouteStage === null ? 40 : 80));
+  }
+
+  // ── C／D：階段卡一行一段；展開「選取中的段」，行程中沒選時展開「正在前往的段」 ──
+  let lastScrolledLiveRouteStage = null;
+  function getLiveRouteStageIndex() {
+    if (currentTripStatus !== 'ongoing') return null;
+    const stage = routeStageCache.find((item) => item && item.destinationStopIndex === currentStopIndex);
+    return stage ? stage.index : null;
+  }
+
+  function syncDirectionsPanelStages() {
+    const panel = document.getElementById('directionsPanel');
+    if (!panel) return;
+    const live = getLiveRouteStageIndex();
+    const expanded = activeRouteStage !== null && activeRouteStage !== undefined ? activeRouteStage : live;
+    let liveCard = null;
+    panel.querySelectorAll('.route-stage-card').forEach((card) => {
+      const idx = Number(card.dataset.index);
+      const stage = routeStageCache[idx];
+      card.classList.toggle('is-active', idx === activeRouteStage);
+      card.classList.toggle('is-live', idx === live);
+      card.classList.toggle('is-expanded', idx === expanded);
+      card.classList.toggle('is-done', currentTripStatus === 'ongoing' && !!stage && stage.destinationStopIndex < currentStopIndex);
+      card.setAttribute('aria-expanded', String(idx === expanded));
+      if (idx === live) liveCard = card;
+    });
+    // 前往下一段時捲到它（只在換段時捲一次，使用者自己捲過就不再搶）
+    if (liveCard && live !== lastScrolledLiveRouteStage && !panel.classList.contains('collapsed')) {
+      lastScrolledLiveRouteStage = live;
+      panel.scrollTo({ top: Math.max(0, liveCard.offsetTop - 8), behavior: 'smooth' });
+    }
+  }
+
+  function formatStageMinutes(minutes) {
+    const m = Math.max(1, Math.round(Number(minutes) || 0));
+    return m < 60 ? `${m} 分` : `${Math.floor(m / 60)} 時${m % 60 ? ` ${m % 60} 分` : ''}`;
+  }
+  let directionsPanelResizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(directionsPanelResizeTimer);
+    directionsPanelResizeTimer = setTimeout(applyDirectionsPanelAutoLayout, 200);
+  });
+
   function setDirectionsPanelHandleVisible(visible) {
     const handle = document.getElementById('directionsPanelHandle');
     if (!handle) return;
     if (visible) {
       handle.hidden = false;
+      const panel = document.getElementById('directionsPanel');
+      renderDirectionsPanelHandle(!!(panel && panel.classList.contains('collapsed')));
     } else {
       // 隱藏時還原為展開狀態，下次顯示是展開的
       handle.hidden = true;
       const panel = document.getElementById('directionsPanel');
       if (panel) panel.classList.remove('collapsed');
       handle.classList.remove('collapsed');
-      handle.textContent = '階段 ◂';
+      renderDirectionsPanelHandle(false);
     }
   }
 
@@ -17976,7 +18070,7 @@
         }
       } else if (!saved && (currentRouteFocusBounds || currentRouteBounds)) {
         try {
-          map.fitBounds(currentRouteFocusBounds || currentRouteBounds);
+          map.fitBounds(currentRouteFocusBounds || currentRouteBounds, routeFitPadding(40));
         } catch (error) {
           // ignore resize race conditions
         }
@@ -18096,6 +18190,7 @@
       panel.style.display = isMobileLayout() ? 'none' : 'block';
     }
     setDirectionsPanelHandleVisible(!isMobileLayout()); // 桌機有路線才顯示收合把手
+    applyDirectionsPanelAutoLayout();                    // 地圖窄就預設收合（要在 fitBounds 前，留白才算得對）
 
     const routeBounds = new google.maps.LatLngBounds();
     locations.forEach((location) => {
@@ -18103,7 +18198,7 @@
     });
     currentRouteBounds = routeBounds;
     bumpMapFocus(); // 重繪整條路線
-    map.fitBounds(routeBounds);
+    map.fitBounds(routeBounds, routeFitPadding(40));
     renderMobileRouteSheet();
 
     // 先解析各「開車類」目的地的停車點（TDX 優先 → Places 退回），再建線
@@ -18263,25 +18358,24 @@
             const stageTimeText = getRouteStageTimeText(routeStageCache[i]);
 
             const stageDiv = document.createElement('div');
-            stageDiv.style.marginBottom = '12px';
-            stageDiv.style.border = '1px solid var(--border)';
-            stageDiv.style.borderRadius = '12px';
-            stageDiv.style.padding = '12px';
-            stageDiv.style.cursor = 'pointer';
-            stageDiv.style.transition = 'transform 0.22s ease, border-color 0.22s ease, background-color 0.22s ease, box-shadow 0.22s ease';
-
-            if (i === activeRouteStage) {
-              stageDiv.style.borderColor = 'var(--accent)';
-              stageDiv.style.backgroundColor = 'var(--accent-light)';
-              stageDiv.style.boxShadow = '0 10px 24px rgba(46, 125, 109, 0.14)';
-              stageDiv.style.transform = 'translateY(-2px)';
-            }
+            stageDiv.className = 'route-stage-card';
+            stageDiv.setAttribute('role', 'button');
+            stageDiv.setAttribute('tabindex', '0');
+            const stageOriginName = origin.name || origin.title || '';
+            const stageDestName = destination.name || destination.title || '';
+            const noParkingFound = isParkingMode && !destParking && !_nearestFarParkingByStopIndex[destination.stopIndex];
 
             // 站名可能來自 AI 生成或共編夥伴輸入，進 innerHTML 前一律 escapeHtml（防 XSS／破版）
+            // 一行一段（原本每段 5～6 行，九段就蓋掉整張地圖）；細節收在 .route-stage-detail，
+            // 點選或行程中「正在前往的段」才展開（syncDirectionsPanelStages）。
             stageDiv.innerHTML = `
-              <div style="font-weight: 800; font-size: 14px; color: var(--ink); margin-bottom: 4px;">
-                階段 ${i + 1}：${escapeHtml(origin.name || origin.title || '')} ➔ ${escapeHtml(destination.name || destination.title || '')}
+              <div class="route-stage-row">
+                <span class="route-stage-num">${i + 1}</span>
+                <span class="route-stage-names" title="${escapeHtml(stageOriginName)} → ${escapeHtml(stageDestName)}"><span class="route-stage-origin">${escapeHtml(shortStopName(stageOriginName))} </span>→ ${escapeHtml(shortStopName(stageDestName))}</span>
+                ${noParkingFound ? '<span class="route-stage-flag" title="目的地附近查不到停車場資料"><span class="flag-long">無停車場</span><span class="flag-short" aria-hidden="true">P</span></span>' : ''}
+                <span class="route-stage-dur">${stageMeta.icon} ${formatStageMinutes(legEstimate.durationMinutes)}</span>
               </div>
+              <div class="route-stage-detail">
               <div style="font-size: 12px; color: var(--ink2);">
                 <span class="stage-meta-text">${stageMeta.icon} ${stageMeta.label} · ${stageTimeText || '時間計算中'}${legEstimate.distanceText && !isDistanceAbnormallySmall(legEstimate.distanceText) ? ' · 距離：' + legEstimate.distanceText : ''} · 預估 ${legEstimate.durationText}</span>
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
@@ -18295,9 +18389,16 @@
                 })() : ''}
               </div>
               ${altEligible ? `<button type="button" class="route-alt-btn" onclick="event.stopPropagation();openRouteAlternatives(${i})">🔀 替代路線 (${routeAlts.length})</button>` : ''}
+              </div>
             `;
 
             stageDiv.addEventListener('click', () => {
+              selectRouteStage(i);
+            });
+            stageDiv.addEventListener('keydown', (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              if (event.target && event.target.closest('button')) return;
+              event.preventDefault();
               selectRouteStage(i);
             });
 
@@ -18307,6 +18408,7 @@
               Array.from(panel.children)
                 .sort((a, b) => parseInt(a.dataset.index, 10) - parseInt(b.dataset.index, 10))
                 .forEach((node) => panel.appendChild(node));
+              syncDirectionsPanelStages();
             }
 
             // 停車樞紐：畫 🅿️ 停車點 + 停車點↔景點綠色虛線步行線

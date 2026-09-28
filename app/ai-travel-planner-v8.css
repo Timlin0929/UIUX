@@ -3546,6 +3546,57 @@ body.prototype-mode .prototype-id-chip {
 #directionsPanelHandle:hover { background: var(--accent-light); }
 #directionsPanelHandle.collapsed { left: 0; }
 @media (max-width: 1024px) { #directionsPanelHandle { display: none !important; } }
+/* 寬度跟著地圖欄：最多 320px、最多佔 40%（原本固定 320px，窄地圖會被蓋掉九成）。把手跟著面板右緣。 */
+#directionsPanel { width: min(320px, calc(40% - 16px)) !important; min-width: 220px; padding: 50px 8px 8px !important; }
+/* 把手＝面板標題列：與面板同寬、疊在面板頂端留白處（面板 padding-top 讓出位置） */
+#directionsPanelHandle {
+  top: 16px; left: 16px; width: max(220px, min(320px, 40% - 16px)); height: 44px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 0 14px 0 16px; writing-mode: horizontal-tb; text-orientation: mixed; letter-spacing: 0;
+  background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 16px 16px 0 0; box-shadow: none;
+  font-size: 13px; font-weight: 800; color: var(--ink);
+  transition: background-color .15s ease, border-color .15s ease;
+}
+#directionsPanelHandle:hover { background: transparent; }
+#directionsPanelHandle[hidden] { display: none; }
+#directionsPanelHandle .dph-title { white-space: nowrap; }
+#directionsPanelHandle .dph-action { color: var(--ink2); font-size: 12px; font-weight: 700; white-space: nowrap; padding: 4px 8px; border-radius: 999px; }
+#directionsPanelHandle:hover .dph-action { background: var(--surface2); color: var(--ink); }
+/* 收合：縮成地圖左上角的膠囊按鈕 */
+#directionsPanelHandle.collapsed {
+  left: 16px; width: auto; height: 38px; padding: 0 12px 0 14px;
+  background: rgba(255, 255, 255, 0.96); border: 1px solid var(--border); border-radius: 999px; box-shadow: var(--shadow-lg);
+}
+#directionsPanelHandle.collapsed:hover { background: var(--accent-light); }
+#directionsPanelHandle .dph-icon { color: var(--ink2); font-size: 16px; line-height: 1; }
+/* 一行一段；展開的段才顯示細節 */
+.route-stage-card { border: 1px solid transparent; border-radius: 10px; padding: 7px 8px; margin-bottom: 2px; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+.route-stage-card:hover { background: var(--surface2); }
+.route-stage-card:focus-visible { outline: 3px solid var(--accent-light); outline-offset: 1px; }
+.route-stage-row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; color: var(--ink); }
+.route-stage-num { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; background: var(--surface2); color: var(--ink2); font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; }
+.route-stage-names { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.route-stage-flag { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: #FEF3C7; color: #B45309; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.route-stage-flag .flag-short { display: none; text-decoration: line-through; text-decoration-thickness: 2px; }
+/* 面板窄時（地圖欄窄、使用者自己展開）站名比標籤重要：標籤縮成劃掉的 P */
+#directionsPanel { container-type: inline-size; }
+@container (max-width: 280px) {
+  .route-stage-flag .flag-long { display: none; }
+  .route-stage-flag .flag-short { display: inline; }
+  .route-stage-origin { display: none; }   /* 窄的時候只留「→ 目的地」：被截掉的不該是這一段要去哪 */
+}
+.route-stage-dur { flex: 0 0 auto; color: var(--ink2); font-size: 12px; white-space: nowrap; }
+.route-stage-detail { display: none; margin: 6px 0 2px 26px; }
+.route-stage-detail .stage-meta-text { display: block; }
+.route-stage-card.is-expanded { background: var(--surface); border-color: var(--border); margin: 4px 0 6px; }
+.route-stage-card.is-expanded .route-stage-detail { display: block; }
+.route-stage-card.is-active, .route-stage-card.is-live.is-expanded { border-color: var(--accent); background: var(--accent-light); }
+.route-stage-card.is-active .route-stage-num, .route-stage-card.is-live .route-stage-num { background: var(--accent); color: #fff; }
+.route-stage-card.is-done .route-stage-row { color: var(--ink3); }
+.route-stage-card.is-done .route-stage-names { font-weight: 500; }
+.route-stage-card.is-done .route-stage-num::after { content: '✓'; }
+.route-stage-card.is-done .route-stage-num { font-size: 0; }
+.route-stage-card.is-done .route-stage-num::after { font-size: 11px; }
 
 /* 停車資訊是完整句子，讓繁中在窄卡片中以詞組換行，不拆開關鍵詞。 */
 .stage-walk-note,

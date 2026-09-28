@@ -1348,6 +1348,67 @@ function section20() {
 }
 section20();
 
+// ══════════════════════════════════════════════════════════════
+// 21. 地圖「階段」面板：窄地圖預設收合、縮放避開面板、一行一段、行程中展開目前這段
+// ══════════════════════════════════════════════════════════════
+function section21() {
+  console.log('\n── 21. 階段面板 ──');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const C = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.css'), 'utf8');
+  const cls = () => { const s = new Set(); return { set: s, toggle: (n, on) => (on ? s.add(n) : s.delete(n)), contains: (n) => s.has(n) }; };
+  const mkCard = (i) => ({ dataset: { index: String(i) }, classList: cls(), attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, offsetTop: i * 40 });
+  const cards = [0, 1, 2, 3].map(mkCard);
+  const scrolls = [];
+  const panel = { classList: cls(), style: { display: 'block' }, offsetWidth: 240, parentElement: { clientWidth: 1000 },
+    querySelectorAll: () => cards, scrollTo: (o) => scrolls.push(o.top) };
+  const c = {
+    Math, Number, String, currentTripStatus: 'ongoing', currentStopIndex: 2, activeRouteStage: null, lastScrolledLiveRouteStage: null,
+    routeStageCache: [0, 1, 2, 3].map((i) => ({ index: i, destinationStopIndex: i + 1 })),
+    document: { getElementById: () => panel }, isMobileLayout: () => false, map: { getDiv: () => ({ clientWidth: 1000 }) }
+  };
+  vm.createContext(c);
+  ['getLiveRouteStageIndex', 'syncDirectionsPanelStages', 'routeFitPadding', 'formatStageMinutes'].forEach((n) => vm.runInContext(extractFunction(P, n), c));
+  const run = (code) => vm.runInContext(code, c);
+  const has = (i, n) => cards[i].classList.contains(n);
+
+  run('syncDirectionsPanelStages()');
+  check('行程中展開「正在前往的段」（前往第 2 站＝第 2 段）', has(1, 'is-expanded') && has(1, 'is-live') && !has(2, 'is-expanded'));
+  check('走過的段標成已完成', has(0, 'is-done') && !has(1, 'is-done') && !has(3, 'is-done'));
+  check('換段時捲到目前這段（只捲一次）', scrolls.length === 1 && scrolls[0] === 32);
+  run('syncDirectionsPanelStages()');
+  check('同一段不重複捲動', scrolls.length === 1, '使用者自己捲過就不該被搶回去');
+  c.activeRouteStage = 3;
+  run('syncDirectionsPanelStages()');
+  check('使用者點選的段優先展開', has(3, 'is-expanded') && has(3, 'is-active') && !has(1, 'is-expanded'));
+  c.activeRouteStage = null; c.currentTripStatus = 'planning';
+  run('syncDirectionsPanelStages()');
+  check('規劃中沒有點選就全部一行', cards.every((_, i) => !has(i, 'is-expanded') && !has(i, 'is-done')));
+
+  let pad = run('routeFitPadding(40)');
+  check('面板展開：左側留白＝面板寬＋間距', pad.left === 40 + 240 + 16 && pad.right === 40, JSON.stringify(pad));
+  panel.classList.toggle('collapsed', true);
+  pad = run('routeFitPadding(40)');
+  check('面板收合：四邊一樣', pad.left === 40);
+  panel.classList.toggle('collapsed', false);
+  c.map = { getDiv: () => ({ clientWidth: 380 }) };
+  pad = run('routeFitPadding(40)');
+  check('地圖太窄放不下就不讓（避免路線縮成一個點）', pad.left === 40);
+  check('時間格式', run('formatStageMinutes(7)') === '7 分' && run('formatStageMinutes(75)') === '1 時 15 分' && run('formatStageMinutes(120)') === '2 時');
+
+  check('窄地圖預設收合、使用者選過就尊重', /const DIRECTIONS_PANEL_AUTO_COLLAPSE_BELOW = 720;/.test(P)
+    && /if \(directionsPanelUserChoice\) \{\s*setDirectionsPanelCollapsed\(directionsPanelUserChoice === 'closed'\);\s*return;/.test(P)
+    && /directionsPanelUserChoice = collapsed \? 'closed' : 'open';/.test(P));
+  check('所有路線縮放都避開面板', (P.match(/map\.fitBounds\([^;]*routeFitPadding\(/g) || []).length === 5,
+    String((P.match(/map\.fitBounds\([^;]*routeFitPadding\(/g) || []).length));
+  check('面板寬度跟著地圖欄（最多 320px、40%）', /#directionsPanel \{ width: min\(320px, calc\(40% - 16px\)\) !important;/.test(C));
+  check('把手是橫向標題列／膠囊，不再是直排方塊', /#directionsPanelHandle \{[\s\S]{0,300}?writing-mode: horizontal-tb;/.test(C)
+    && /#directionsPanelHandle\.collapsed \{[\s\S]{0,260}?border-radius: 999px;/.test(C), '使用者回報：直排「階段」方塊很突兀');
+  check('選取高亮只用 class，不再逐張寫 inline style', !/child\.style\.(borderColor|backgroundColor|boxShadow)/.test(P),
+    '實測：舊的 inline style 讓每一行都多出外框');
+  check('一行一段、細節預設收起', /\.route-stage-detail \{ display: none;/.test(C) && /\.route-stage-card\.is-expanded \.route-stage-detail \{ display: block; \}/.test(C));
+}
+section21();
+
 section19().catch((e) => check('第 19 節執行', false, e && e.stack)).then(() => {
   console.log('\n══════════════════════════════════════');
   console.log('通過 ' + pass + '，失敗 ' + fail);
