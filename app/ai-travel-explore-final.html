@@ -24,7 +24,7 @@
 <script src="notifications.js?v=20260722-friends2"></script>
 <script src="wheel-picker.js?v=20260923-ux13"></script>
 <script src="qr-encode.js?v=20260923-qr2"></script>
-<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260923-qr1">
+<link rel="stylesheet" href="./ai-travel-explore-final.css?v=20260928-wizm1">
 <link rel="stylesheet" href="./design-tokens.css?v=20260727-fix3">
 <script src="./icons.js?v=20260727-fix3"></script>
 <script src="./ui-feedback.js?v=20260727-fix3"></script>
@@ -130,6 +130,7 @@
 <!-- ─── OVERLAY: NEW TRIP WIZARD ─── -->
 <div class="overlay" id="wizardOverlay" onclick="if(event.target===this)closeWizard()" style="z-index:250">
   <div class="wizard-modal">
+    <button class="lm-close wizard-close" onclick="closeWizard()" aria-label="關閉建立行程">✕</button>
     <div class="wizard-header">
       <div class="wizard-hero">
         <h1 class="wizard-title">建立微旅行</h1>
@@ -446,7 +447,7 @@
   <button class="mbn-item" id="mbnFriends" onclick="showMainView('friends')"><span class="mbn-ico" aria-hidden="true"><svg class="wai-icon lg" aria-hidden="true"><use href="#wai-users"></use></svg></span>好友</button>
 </nav>
 
-<script src="./ai-travel-explore-final.js?v=20260923-qr1"></script>
+<script src="./ai-travel-explore-final.js?v=20260928-wizm2"></script>
 <!-- 浮動小進度卡：建立行程視窗關閉後仍可看進度並點回 -->
 <div id="genMiniBar" hidden onclick="reopenWizGen()">
   <button class="gmb-close" onclick="event.stopPropagation();hideGenMiniBar()" aria-label="關閉">✕</button>

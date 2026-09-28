@@ -6702,6 +6702,9 @@ function showWizGenProgress() {
   hideGenMiniBar(); // 重開精靈時收起浮動卡
   const wrap = host.closest('.wizard-flow-wrap');
   if (wrap) wrap.scrollTop = wrap.scrollHeight;
+  // 手機是單欄、由整個 wizard-body 捲動：進度條在表單下方一千多 px，
+  // 只捲 wrap 的話畫面停在第 4 步表單、按鈕又被收掉，看起來像按了沒反應。
+  if (typeof host.scrollIntoView === 'function') host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 function setWizGenStep(index, subLabel) {
   _genMini.index = index;
@@ -6740,6 +6743,8 @@ function wizGenDone(tripId) {
       list.textContent = '前往我的行程列表';
       list.onclick = function () { closeWizard(); showMainView('mytrips'); };
       cta.appendChild(list);
+      // 按鈕是生成完才長出來的，手機上會落在可視範圍外：捲到「開始編輯行程」
+      if (typeof cta.scrollIntoView === 'function') cta.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
   }
   renderGenMini();

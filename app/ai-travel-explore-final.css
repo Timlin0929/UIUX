@@ -987,6 +987,22 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
   .wizard-btn{min-height:46px;font-size:16px;padding:12px 16px;}
   .wizard-flow-wrap{padding:16px;min-height:auto;}
   .wizard-flow-title{font-size:26px;}
+  /* 表單被壓扁：panel 的 overflow:hidden 讓 grid 列可縮到 0，表單區只剩 32px 高的捲動框，
+     第 1 步的目的地／人數／時間全被藏起來。改由整個 wizard-body 捲動，panel 用 clip
+     （保留圓角裁切、但不成為捲動容器，底下的 sticky「下一步」才黏得住 body 底部）。 */
+  .wizard-body{grid-auto-rows:max-content;}
+  .wizard-panel{overflow:clip;flex-shrink:0;}
+  .wizard-form{flex:none;overflow:visible;}
+  .wizard-nav{bottom:-12px;}   /* 抵掉 wizard-body 的 12px 下內距，免得內容從按鈕底下露出來 */
+  /* 視窗幾乎佔滿螢幕，點外面關不掉：補關閉鈕；標題下的長說明在手機上佔掉三行，收掉 */
+  .wizard-sub{display:none;}
+  .wizard-header{padding-right:64px;}
+}
+.wizard-modal{position:relative;}
+.wizard-close{z-index:6;}
+/* 底部主導覽（z-index 500）會蓋在各種彈窗上（建立行程 250 等）：有彈窗開著時先收起來 */
+@media (max-width:700px){
+  body:has(.overlay.open) #mobileBottomNav{display:none;}
 }
 
 /* ══════════ UIUX 優化（2026-07-18）══════════ */
