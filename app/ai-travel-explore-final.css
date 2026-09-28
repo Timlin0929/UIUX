@@ -881,13 +881,15 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
 
   /* TOPBAR（漢堡版）：僅保留 logo＋搜尋＋頭像/漢堡；導覽與動作按鈕收進下拉選單 */
   .topbar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 14px;gap:8px;}
-  .topbar-logo{order:0;font-size:22px;}
+  /* logo 吃掉剩餘空間，把通知鈴和頭像一起推到右邊並排（原本頭像 margin-left:auto，鈴留在 logo 旁） */
+  .topbar-logo{order:0;font-size:22px;margin-right:auto;}
+  .notif-wrap{order:1;}
   /* 頂列導覽與動作按鈕在手機隱藏，改由漢堡選單提供 */
   .topbar-nav{display:none;}
   .topbar-new-btn{display:none;}
   #journeyJoinBtn{display:none !important;} /* 覆蓋 JS 設的 inline display，改由選單內「流程碼進入」提供 */
   /* 頭像/漢堡靠右；position:static → 下拉以 .topbar 為基準靠右，穩定不溢出 */
-  .user-menu-wrap{order:1;margin-left:auto;position:static;}
+  .user-menu-wrap{order:1;position:static;}
   .user-avatar-btn{width:42px;height:42px;font-size:22px;}
   /* 登出時用漢堡取代「登入/註冊」按鈕（登入項移進選單） */
   .hamburger-btn{display:inline-flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--ink);width:42px;height:42px;border-radius:50%;font-size:22px;cursor:pointer;}

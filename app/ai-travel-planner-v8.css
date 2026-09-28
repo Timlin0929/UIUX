@@ -7380,6 +7380,13 @@ button.notif-item { cursor: pointer; }
     min-height: 44px;
   }
 
+  /* 通知鈴是 38px 正圓：只補 min-height 會變 38×44 的橢圓，寬度一起放到 44 維持正圓 */
+  .notif-bell {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+
   .hero-section {
     padding: 22px 16px 16px;
   }
