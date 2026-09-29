@@ -55,6 +55,10 @@
   let activeStopMenuId = null;
   let activeStopEditorId = null;
   let stopEditorReturnFocus = null;
+  // 多日行程的時間軸「第 N 天／全部」篩選：0＝全部，N＝只看第 N 天。
+  // 只影響行程頁的顯示，不動 replanStops、編輯中的內容或選取狀態。
+  let itineraryDayFilter = 0;
+  let itineraryDayFilterTripId = null; // 換一份行程就重新決定預設停在哪一天
   let isModifyWindowOpen = false;
   let modifyTargetStopId = null;
   let modifySource = 'wall';
@@ -2905,10 +2909,18 @@
 
   function derivePreferencesFromTrip(trip) {
     if (!trip || typeof trip !== 'object') return {};
-    if (trip.wizardData && typeof trip.wizardData === 'object') return trip.wizardData;
+    // 只有「完整」的 wizardData（有 days）才代表網頁建立的行程，可以整包沿用。
+    // App 建立的行程本來沒有 wizardData，但網頁存車輛偏好時會補出一個只有 transportMode 的
+    // 殘缺物件並寫進 Firestore（見下方 patch.wizardData 的兩處）。原本這裡只要是物件就回傳，
+    // 於是 days 永遠是空的 → getPrefsDayCount 回 1 → ensureStopDayIndexes 把兩天的站全設成第 1 天，
+    // App 端好好的兩天一夜到網頁上就變成單日、時間軸一路排到深夜。
+    const wiz = (trip.wizardData && typeof trip.wizardData === 'object') ? trip.wizardData : null;
+    if (wiz && wiz.days) return wiz;
     const prefs = {};
     // 交通工具：App 與網頁用同一套代碼（taxi/scooter/car/walk），直接沿用
     if (trip.transportMode) prefs.transportMode = String(trip.transportMode).trim().toLowerCase();
+    // 殘缺 wizardData 裡唯一該保留的就是車輛——那是使用者在網頁上真的改過的值
+    if (wiz && wiz.transportMode) prefs.transportMode = String(wiz.transportMode).trim().toLowerCase();
     const win = parseAppDaysWindow(trip.appDays);
     if (win) {
       prefs.startTime = win.startTime;
@@ -3455,8 +3467,9 @@
             await syncMapToCurrentTrip(false);
           }
 
-          // 載入後背景補各站「附近廁所」文字（地圖 pin 仍只在點選階段時顯示）
-          prefetchAllStopToiletData();
+          // 廁所資料改為使用者點選景點／路段時才查詢，避免每次開頁替整趟行程
+          // 批次送出 Places Nearby Search。既有快取仍會立即顯示。
+          updateToiletSectionsInDOM();
 
           // 載入 + enrichment 補上的 placeId / businessHours / 座標只留在記憶體，
           // 不在載入路徑回寫（只讀不寫）：開頁即整包 set stops 會把 App 端共編欄位
@@ -5377,6 +5390,59 @@
       return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     } catch (_e) { return false; }
   }
+
+  /* ── 本機每日 Maps 用量 ───────────────────────────────────────────────────
+     與上面的「API 用量估算」刻意分開：那個是「這一趟行程的生成成本」，只涵蓋
+     AI 生成的統計區間；這個是「這台瀏覽器每天總共打了幾次 Maps」，包含開啟既有
+     行程時查廁所／停車場／畫路線那些發生在區間外的呼叫——2026-09-27 帳單對不上
+     就是因為那一塊從來沒被記錄過。
+     ⚠ 只涵蓋這台瀏覽器。全站彙總要後端配合，不能在前端假裝做到。 */
+  function ensureDailyUsageHost() {
+    let host = document.getElementById('apiDailyUsageBlock');
+    if (host) return host;
+    const view = document.getElementById('view-budget');
+    if (!view) return null;
+    host = document.createElement('div');
+    host.id = 'apiDailyUsageBlock';
+    host.className = 'api-cost-block';
+    const costBlock = document.getElementById('apiCostBlock');
+    if (costBlock && costBlock.nextSibling) view.insertBefore(host, costBlock.nextSibling);
+    else if (costBlock) view.appendChild(host);
+    else view.appendChild(host);
+    return host;
+  }
+
+  function renderDailyMapsUsage() {
+    const host = ensureDailyUsageHost();
+    if (!host) return;
+    if (!window.WAI_COST || typeof WAI_COST.dailyUsage !== 'function') { host.style.display = 'none'; return; }
+    const all = WAI_COST.dailyUsage() || {};
+    const days = Object.keys(all).sort().reverse().slice(0, 14);
+    host.style.display = '';
+    if (!days.length) {
+      host.innerHTML = '<div class="api-cost-head">本機每日 Maps 用量</div>'
+        + '<div class="api-cost-empty">這台瀏覽器還沒有記錄到 Maps 呼叫。開啟行程或重新規劃後就會開始累計。</div>';
+      return;
+    }
+    const rows = days.map((d) => {
+      const v = all[d] || {};
+      const total = (v.directions || 0) + (v.geocoding || 0) + (v.placesLegacy || 0);
+      return `<div class="api-cost-row">
+        <span>${escapeHtml(d)}</span>
+        <span class="nowrap">共 ${total} 次<span class="daily-usage-detail">（Places ${v.placesLegacy || 0}・路線 ${v.directions || 0}・地理編碼 ${v.geocoding || 0}）</span></span>
+      </div>`;
+    }).join('');
+    const today = all[days[0]] || {};
+    const outOfRun = today.outOfRun || 0;
+    const inRun = today.inRun || 0;
+    host.innerHTML = '<div class="api-cost-head">本機每日 Maps 用量</div>'
+      + `<div class="api-cost-note">這台瀏覽器實際打出去的 Maps 呼叫次數（含瀏覽既有行程時的查詢，那部分不會出現在上面的「行程生成成本」裡）。最近 ${days.length} 天，保留 30 天。</div>`
+      + `<div class="api-cost-rows">${rows}</div>`
+      + `<div class="api-cost-note">今天有 ${inRun} 次發生在生成行程期間、${outOfRun} 次在那之外。`
+      + `${outOfRun > inRun ? '「之外」占多數是正常的——瀏覽行程本身就會查廁所與停車場。' : ''}</div>`
+      + '<div class="api-cost-note">⚠️ 只統計這台瀏覽器，不是全站總量；也不含 App 端與爬蟲。</div>';
+  }
+  window.renderDailyMapsUsage = renderDailyMapsUsage;
 
   async function renderApiCost() {
     const host = ensureApiCostHost();
@@ -7873,22 +7939,36 @@
     // 景點再多扣（可略超過 35%，但每站至少保留 HARD_MIN 分），扣到剛好落在該日視窗。餐廳仍不扣。
     // floorOnly（行程中使用者按「縮短」）不做這段：實測會把後面 4 個景點壓到只剩 5 分，
     // 停 5 分等於沒去——這時該讓使用者決定跳過哪一站，而不是替他把每站都擠爛。
-    const HARD_MIN = 5;
+    // 原本這裡是「挑當天停留最久的那一站，一次扣掉整個超量，扣到只剩 5 分」。
+    // 實測結果：切換交通工具讓車程變長後，其他站幾乎沒動，卻有一兩站被從 90 分直接壓到 5 分——
+    // 使用者看到的就是「某些景點時間分配很不合理」。停 5 分等於沒去。
+    // 改成：每輪每站最多扣 STEP 分、逐輪均攤，且硬下限拉到「還逛得到東西」的 20 分；
+    // 扣到下限仍塞不下就停手，回傳 fits:false 讓「超出規劃時間」警示去提醒使用者自己取捨。
+    const HARD_MIN = 20;
+    const STEP = 5;
     guard = options.floorOnly ? 4000 : 0;
     while (guard++ < 4000) {
       const r = scheduleEnd(); sch = r.sch; ov = measureOverflow(sch);
       if (ov.total <= 0) break;
       const cands = info.filter(t => t.eligible && ov.overDays.has(dayOf(t.stop)) && curStayOf(sch, t.i, t.stop) > HARD_MIN);
       if (!cands.length) break; // 連硬下限都到了，真的無法再扣
-      cands.sort((a, b) => curStayOf(sch, b.i, b.stop) - curStayOf(sch, a.i, a.stop));
-      const t = cands[0];
-      const curStay = curStayOf(sch, t.i, t.stop);
-      const cut = Math.min(curStay - HARD_MIN, ov.byDay[dayOf(t.stop)] || ov.total);
-      if (cut <= 0) break;
-      t.stop.stayMin = curStay - cut;
-      t.stop.manualStartMin = null;
-      t.stop.manualEndMin = null;
-      changed = true;
+      // 本輪各日還需要扣掉的量；邊扣邊遞減，避免同一輪內每站都照「全額超量」扣而過頭
+      const remaining = { ...ov.byDay };
+      let applied = 0;
+      for (const t of cands) {
+        const d = dayOf(t.stop);
+        if (!(remaining[d] > 0)) continue;
+        const curStay = curStayOf(sch, t.i, t.stop);
+        const cut = Math.min(curStay - HARD_MIN, STEP, remaining[d]);
+        if (cut <= 0) continue;
+        t.stop.stayMin = curStay - cut;
+        t.stop.manualStartMin = null;
+        t.stop.manualEndMin = null;
+        remaining[d] -= cut;
+        applied += cut;
+        changed = true;
+      }
+      if (applied <= 0) break;
     }
 
     const finalSch = scheduleEnd();
@@ -8044,7 +8124,11 @@
     if (!clockText || typeof clockText !== 'string') return null;
     let text = clockText.trim();
     let offset = 0;
+    // minutesToClock() 第 3 天起輸出的是「第 N 天 HH:MM」，這裡原本只認「次日 」，
+    // 於是三天以上的行程整條時間字串解析失敗（回 null），兩個函式並非互逆。
+    const dayPrefix = /^第\s*(\d+)\s*天\s*/.exec(text);
     if (text.startsWith('次日 ')) { offset = 24 * 60; text = text.slice(3); }
+    else if (dayPrefix) { offset = Math.max(0, Number(dayPrefix[1]) - 1) * 24 * 60; text = text.slice(dayPrefix[0].length); }
     if (!text.includes(':')) return null;
     const [hText, mText] = text.split(':');
     const h = parseInt(hText, 10);
@@ -8052,6 +8136,59 @@
     if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
     if (h < 0 || h > 23 || m < 0 || m > 59) return null;
     return offset + h * 60 + m;
+  }
+
+  // 多日行程的時間欄位轉換。
+  // 時間輸入元件（<input type="time">、WAIPicker 滾輪）只吃 HH:MM，直接餵 minutesToClock()
+  // 產出的「次日 09:30」會被整個丟棄 → 欄位空白、滾輪從 09:00 起跳、存檔被驗證擋下。
+  // 顯示走 toClockFieldValue（只取當日時刻），存回走 fromClockFieldValue（補回跨日偏移）。
+  function toClockFieldValue(absoluteMinutes) {
+    const n = Number(absoluteMinutes);
+    if (!Number.isFinite(n)) return '';
+    const within = ((n % 1440) + 1440) % 1440;
+    return `${String(Math.floor(within / 60)).padStart(2, '0')}:${String(within % 60).padStart(2, '0')}`;
+  }
+  // anchorMin＝這一站目前排定的絕對分鐘。單日行程玩過午夜時 dayIndex 仍是 1，
+  // 只靠 dayIndex 會把 01:00 拉回當天凌晨；用錨點所在的那一天兜底。
+  function fromClockFieldValue(clockText, dayIndex, anchorMin) {
+    const min = clockToMinutes(clockText);
+    if (!Number.isFinite(min)) return null;
+    const within = ((min % 1440) + 1440) % 1440;
+    const day = Math.max(1, Math.round(Number(dayIndex)) || 1);
+    let base = (day - 1) * 1440;
+    const anchor = Number(anchorMin);
+    if (Number.isFinite(anchor)) {
+      const anchorDay = Math.floor(anchor / 1440);
+      if (anchorDay > day - 1) base = anchorDay * 1440;
+    }
+    return base + within;
+  }
+
+  // 多日標籤：原本各處硬寫「兩天一夜」，三天以上的行程會顯示錯誤天數。
+  function getMultiDayLabel(prefs) {
+    const dayCount = Math.max(2, getPrefsDayCount(prefs || currentTripPreferences || {}));
+    return dayCount === 2 ? '兩天一夜' : `${dayCount} 天`;
+  }
+
+  // 多日行程的絕對時刻 →「第 N 天 HH:MM」。比 minutesToClock() 的「次日 HH:MM」一致，
+  // 也和時間軸上的「第 N 天」分隔線對得起來。
+  function formatDayClock(absoluteMinutes) {
+    const n = Number(absoluteMinutes);
+    if (!Number.isFinite(n)) return '';
+    return `第 ${Math.floor(Math.max(0, n) / 1440) + 1} 天 ${toClockFieldValue(n)}`;
+  }
+
+  // 目前只看哪一天（0＝全部；單日行程一律 0）。行程列表與路線面板共用同一個狀態，
+  // 切一次就兩邊一起過濾，不需要各自再放一排按鈕。
+  function getActiveDayFilter() {
+    return isMultiDayTrip(currentTripPreferences && currentTripPreferences.days) ? itineraryDayFilter : 0;
+  }
+  // 路線的某一段屬於第幾天＝該段「起點站」所在的天
+  function getRouteStageDayIndex(stage, scheduleRows) {
+    if (!stage) return 1;
+    const rows = scheduleRows || buildReplanSchedule();
+    const row = rows[stage.sourceStopIndex];
+    return clampDayIndex(row && row.dayIndex, 1);
   }
 
   function normalizeTransitMode(mode) {
@@ -8202,6 +8339,11 @@
 
   function formatStageTimeRange(startMin, endMin) {
     if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return '';
+    // 多日行程原本每段都印成「第 3 天 09:18 - 第 3 天 09:25」——同一列出現兩次天數，
+    // 手機上一段就佔掉兩三行。天數已由面板標題／切換鈕表達，這裡只留時刻。
+    if (isMultiDayTrip(currentTripPreferences && currentTripPreferences.days)) {
+      return `${toClockFieldValue(startMin)} - ${toClockFieldValue(endMin)}`;
+    }
     return `${minutesToClock(startMin)} - ${minutesToClock(endMin)}`;
   }
 
@@ -8452,8 +8594,10 @@
     const matched = modifySpotCatalog.find((spot) => spot.name === stop.name) || modifySpotCatalog.find((spot) => spot.pinId && spot.pinId === stop.mapPinId);
     selectedModifySpotId = matched ? matched.id : null;
     const baseStartMin = getReplanStartMinutes();
-    selectedModifyStartTime = targetSchedule ? minutesToClock(targetSchedule.start) : minutesToClock(baseStartMin);
-    selectedModifyEndTime = targetSchedule ? minutesToClock(targetSchedule.end) : minutesToClock(baseStartMin + Math.max(5, stop.stayMin || 15));
+    // 時間欄位與滾輪選擇器只認 HH:MM：第 2 天的站若種成「次日 09:30」，
+    // 選擇器比對失敗會從 09:00 起跳，套用時又會跟裸時刻互比而判成「結束早於開始」。
+    selectedModifyStartTime = toClockFieldValue(targetSchedule ? targetSchedule.start : baseStartMin);
+    selectedModifyEndTime = toClockFieldValue(targetSchedule ? targetSchedule.end : baseStartMin + Math.max(5, stop.stayMin || 15));
 
     const overlay = document.getElementById('modifyOverlay');
     if (overlay) {
@@ -8526,10 +8670,10 @@
     const targetStop = replanStops.find((item) => item.id === modifyTargetStopId);
     const selectedSpot = modifySpotCatalog.find((spot) => spot.id === selectedModifySpotId);
     const defaultStart = targetStop && Number.isFinite(targetStop.manualStartMin)
-      ? minutesToClock(targetStop.manualStartMin)
+      ? toClockFieldValue(targetStop.manualStartMin)
       : selectedModifyStartTime;
     const defaultEnd = targetStop && Number.isFinite(targetStop.manualEndMin)
-      ? minutesToClock(targetStop.manualEndMin)
+      ? toClockFieldValue(targetStop.manualEndMin)
       : selectedModifyEndTime;
 
     const candidateSpots = modifySpotCatalog.filter((spot) => spot.source === modifySource);
@@ -8603,8 +8747,16 @@
     if (!modifyTargetStopId) return;
     const stop = replanStops.find((item) => item.id === modifyTargetStopId);
     const selectedSpot = modifySpotCatalog.find((spot) => spot.id === selectedModifySpotId);
-    const startMin = clockToMinutes(selectedModifyStartTime);
-    const endMin = clockToMinutes(selectedModifyEndTime);
+    // 兩個欄位都是當日 HH:MM，必須用同一個基準日換回絕對分鐘再比大小；
+    // 以這一站目前排定的時刻當錨點，跨日的站不會被拉回第 1 天。
+    const modifyRow = buildReplanSchedule().find((item) => item.id === modifyTargetStopId);
+    const modifyDay = (modifyRow && modifyRow.dayIndex) || (stop && stop.dayIndex) || 1;
+    const startMin = fromClockFieldValue(selectedModifyStartTime, modifyDay, modifyRow && modifyRow.start);
+    let endMin = fromClockFieldValue(selectedModifyEndTime, modifyDay, modifyRow && modifyRow.end);
+    // 跨午夜的停留（例：夜市 22:00 → 00:30）補一天；補完仍超過 12 小時就當成填錯，交給下面的驗證擋下
+    if (Number.isFinite(startMin) && Number.isFinite(endMin) && endMin <= startMin && (endMin + 1440) - startMin <= 12 * 60) {
+      endMin += 1440;
+    }
 
     if (!stop || !selectedSpot) {
       window.alert('請先選擇一個景點。');
@@ -10112,7 +10264,9 @@
           currentStopIndex: currentStopIndex,
           startedAt: currentTripStartedAt
         };
-        if (hasVehiclePref) {
+        // 同上：App 行程（推導而來的偏好）不要補殘缺的 wizardData 到本機快取，
+        // 否則離線載入時一樣會把兩天一夜讀成單日。
+        if (hasVehiclePref && !(currentTripPreferences && currentTripPreferences.__appDerived)) {
           patch.wizardData = { ...(myTrips[tripIndex].wizardData || {}), transportMode: vehiclePref };
         }
         myTrips[tripIndex] = patch;
@@ -10217,7 +10371,12 @@
             const localChanged = hasVehiclePref && localVehicle && localVehicle !== baseVehicle;
             committedVehicle = localChanged ? localVehicle : remoteVehicle;
             if (['taxi', 'scooter', 'car'].includes(committedVehicle)) {
-              patch.wizardData = { ...(patch.wizardData || {}), transportMode: committedVehicle };
+              // App 建立的行程本來沒有 wizardData。這裡若替它補一個只有 transportMode 的物件，
+              // 下次載入 derivePreferencesFromTrip 會把它當成「網頁建立的完整設定」而忽略 appDays，
+              // 兩天一夜就變成單日。App 行程只寫頂層 transportMode（App 端本來就讀這個）。
+              if (!(currentTripPreferences && currentTripPreferences.__appDerived)) {
+                patch.wizardData = { ...(patch.wizardData || {}), transportMode: committedVehicle };
+              }
               patch.transportMode = committedVehicle; // App 端讀頂層，兩處一起寫才會雙向同步
             } else if (patch.wizardData) {
               delete patch.wizardData.transportMode; // 遠端與本地皆無有效車輛：不要覆寫
@@ -10388,7 +10547,7 @@
     if (totalEl) {
       totalEl.textContent = schedule.length
         ? (multiDaySchedule
-          ? `兩天一夜 · ${minutesToClock(schedule[schedule.length - 1].end)} 結束`
+          ? `${getMultiDayLabel()} · ${formatDayClock(schedule[schedule.length - 1].end)} 結束`
           : `${minutesToClock(schedule[0].start)} - ${minutesToClock(schedule[schedule.length - 1].end)}`)
         : '--';
     }
@@ -10956,6 +11115,19 @@
     updateItineraryStageUI();
   }
 
+  // 多日行程時間軸的「第 N 天／全部」切換。只重畫行程列表，不碰資料、不關閉站點編輯面板。
+  window.setItineraryDayFilter = function (day) {
+    let next = Math.max(0, Math.round(Number(day)) || 0);
+    // 再點一次目前選中的那一天 → 回到「全部」。（「全部」本身不 toggle，重複點沒有意義）
+    if (next > 0 && itineraryDayFilter === next) next = 0;
+    if (itineraryDayFilter === next) return;
+    itineraryDayFilter = next;
+    renderItineraryDisplay();
+    // 路線面板（桌機階段卡／手機路線表）共用同一個篩選狀態，要一起更新
+    try { syncDirectionsPanelStages(); } catch (_e) {}
+    try { renderMobileRouteSheet(); } catch (_e) {}
+  };
+
   function renderItineraryDisplay() {
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     if (!plannedBlock) return;
@@ -11003,7 +11175,7 @@
     updateMapTimeBanner(minutesToClock(startTime), minutesToClock(endTime), endTime);
     const heroTimeTag = document.querySelector('#view-itinerary .hero-meta .hero-tag');
     if (heroTimeTag) heroTimeTag.textContent = multiDaySchedule
-      ? `⏱️ 兩天一夜 · ${minutesToClock(endTime)} 結束`
+      ? `⏱️ ${getMultiDayLabel()} · ${formatDayClock(endTime)} 結束`
       : `⏱️ ${minutesToClock(startTime)} – ${minutesToClock(endTime)}`;
 
     // 本地門票對照表（依目前行程目的地），供卡片顯示真實票價。
@@ -11019,7 +11191,36 @@
       'return': { text: '行程收尾', style: 'background:var(--accent2-light);color:var(--accent2-dark)' }
     };
 
+    // 多日行程：整頁把兩天的站全部攤開會很長，給一排「第 N 天／全部」切換。
+    // 位置刻意排在最前面（語音導遊卡之前）並在手機上吸頂——原本擺在摘要下方，
+    // 使用者要往下捲才看得到，等於不知道有這個功能。
+    const tripDayCount = multiDaySchedule ? Math.max(2, getPrefsDayCount(currentTripPreferences || {})) : 1;
+    let dayTabsHtml = '';
+    if (!multiDaySchedule) {
+      itineraryDayFilter = 0;
+    } else {
+      if (itineraryDayFilterTripId !== currentItineraryId) {
+        itineraryDayFilterTripId = currentItineraryId;
+        // 首次開啟：行程進行中就停在目前站所在那天，否則停在第 1 天
+        const focusIndex = (currentTripStatus === 'ongoing' && currentStopIndex >= 0 && currentStopIndex < schedule.length)
+          ? currentStopIndex : 0;
+        itineraryDayFilter = clampDayIndex(schedule[focusIndex] && schedule[focusIndex].dayIndex, 1);
+      }
+      if (itineraryDayFilter > tripDayCount) itineraryDayFilter = 0;
+
+      const dayTab = (value, label) => `<button type="button" class="itinerary-day-tab${itineraryDayFilter === value ? ' active' : ''}"
+        aria-pressed="${itineraryDayFilter === value}"
+        title="${value > 0 && itineraryDayFilter === value ? '再點一次看全部' : ''}"
+        onclick="setItineraryDayFilter(${value})">${label}</button>`;
+      dayTabsHtml = `<div class="itinerary-day-tabs" role="group" aria-label="依天數篩選行程">
+        <span class="itinerary-day-tabs-label">看哪一天</span>
+        ${Array.from({ length: tripDayCount }, (_v, i) => dayTab(i + 1, `第 ${i + 1} 天`)).join('')}
+        ${dayTab(0, '全部')}
+      </div>`;
+    }
+
     let html = `
+      ${dayTabsHtml}
       <div class="voice-guide-card">
         <div class="voice-guide-meta">
           <div class="voice-guide-title">🎧 語音導遊</div>
@@ -11030,13 +11231,19 @@
           <button class="voice-btn stop" onclick="stopVoiceGuide()">停止</button>
         </div>
       </div>
-      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `${getPrefsDayCount(currentTripPreferences || {}) >= 3 ? '三天兩夜' : '兩天一夜'}・第 ${getPrefsDayCount(currentTripPreferences || {})} 天 ${minutesToClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
+      <div style="font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;"><span>⏱</span> ${multiDaySchedule ? `${getMultiDayLabel()}・${formatDayClock(endTime)} 結束` : `${minutesToClock(startTime)} – ${minutesToClock(endTime)}・共 ${durationHours} 小時${durationMins > 0 ? durationMins + '分鐘' : ''}`}</div>
       <div class="stay-suggestion-note">選取景點可查看詳細資訊與調整安排；儲存後系統會即時重新計算後續行程。</div>
     `;
 
     const stayingStopIndex = getStayingStopIndex();
     schedule.forEach((stop, index) => {
-      const timeStr = minutesToClock(stop.start);
+      // 篩掉不屬於目前檢視那天的站。刻意保留原本的 index 繼續跑迴圈——
+      // 底下的 currentStopIndex 比對、getRouteStageBySourceStopIndex(index)、
+      // schedule[index±1] 都是以完整行程的位置為準，改成走過濾後的陣列會全部錯位。
+      if (multiDaySchedule && itineraryDayFilter > 0 && clampDayIndex(stop.dayIndex, 1) !== itineraryDayFilter) return;
+      // 多日行程的天數已經由上方「第 N 天」分隔線表達，時間欄再印一次「次日 09:30」不只重複，
+      // 窄的 .time-box 也塞不下 8 個字 → 多日只印當日時刻。
+      const timeStr = multiDaySchedule ? toClockFieldValue(stop.start) : minutesToClock(stop.start);
       // 行程中，還沒到的站時間只是預測（路況、停留都會變），不要看起來像固定排程
       const isEstimate = currentTripStatus === 'ongoing' && index >= currentStopIndex;
       const tag = tagMap[stop.id] || { text: '', style: '' };
@@ -11149,7 +11356,7 @@
                 ${!isEndpointStop ? formatAccessNote(stop) : ''}
                 ${feeRowHtml}
                 <div class="nearby-toilets-row" id="toilet-section-${stop.mapPinId}">
-                  <span style="font-size:12px;color:var(--ink3);">🚻 搜尋附近廁所中…</span>
+                  <span class="nearby-toilets-hint">🚻 點選景點時查詢附近廁所</span>
                 </div>
               </div>
             </div>
@@ -11224,7 +11431,10 @@
         const systemWarnText = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
           ? (farParking
             ? `🅿️ 目的地停車：最近是「${farParking.name}」，停好後步行約 ${Math.max(1, Math.round(farParking.walkSeconds / 60))} 分鐘。`
-            : '⚠️ 目的地停車：附近查不到停車場資料，請預留路邊或付費停車的時間。')
+            // 「查不到資料」≠「沒有停車場」。台東鄉鎮景點多半有自己的停車空間，
+            // 只是沒被登錄成 Google 的停車場 POI、也不在縣府那 30 筆路外停車場名單裡。
+            // 原本的寫法等於替現場下結論，而且幾乎每一站都跳，久了使用者就整排略過。
+            : 'ℹ️ 目的地停車：尚未取得這一站的停車場資料（不代表沒有），建議預留找車位的時間。')
           : '';
         // 有人回報「我停好了」（found）就不顯示任何警告，即使系統自己找不到停車場
         const warnText = latestReport
@@ -11237,7 +11447,7 @@
           ? `<button type="button" class="parking-report-inline-btn" onclick="event.stopPropagation(); openParkingReportSheet('${nextStop.id}')">回報停車資訊</button>`
           : '';
         html += `<div class="transit-block">
-          <div class="transit-block-main">${primaryText}</div>
+          <div class="transit-block-main"><span class="transit-block-tag">移動</span>${primaryText}</div>
           ${subStepsHtml}
           ${arrivalHtml}
           <label class="transit-mode-wrap">交通工具
@@ -11251,16 +11461,27 @@
       }
     });
 
-    const endTimeStr = minutesToClock(schedule[schedule.length - 1].end);
-    html += `
+    // 結束標記在站點迴圈之外，原本不受「只看第 N 天」的篩選影響：
+    // 切到第 1 天時，整趟的結束時刻（次日 11:40）會被留在第一天的尾巴，看起來像第一天玩到隔天中午。
+    // 改成跟著目前檢視的那一天走——看某一天就顯示該天的最後一站結束時刻。
+    const visibleEndRow = (multiDaySchedule && itineraryDayFilter > 0)
+      ? [...schedule].reverse().find((row) => clampDayIndex(row.dayIndex, 1) === itineraryDayFilter)
+      : schedule[schedule.length - 1];
+    if (visibleEndRow) {
+      const isLastDayOfTrip = clampDayIndex(visibleEndRow.dayIndex, 1) === clampDayIndex(schedule[schedule.length - 1].dayIndex, 1);
+      const endLabel = isLastDayOfTrip ? '行程結束' : `第 ${clampDayIndex(visibleEndRow.dayIndex, 1)} 天結束`;
+      // 天數已由上方的分隔線／切換鈕表達，這裡不再印「次日」
+      const endTimeStr = multiDaySchedule ? toClockFieldValue(visibleEndRow.end) : minutesToClock(visibleEndRow.end);
+      html += `
       <div class="timeline-item" style="pointer-events:none;">
         <div class="time-box"><div class="time-val" style="color:var(--ink2);">${endTimeStr}</div></div>
         <div class="node"><div class="node-dot" style="background:var(--ink3);box-shadow:none;width:8px;height:8px;"></div></div>
         <div class="content-box" style="padding-bottom:0;">
-          <div style="font-size:13px;color:var(--ink2);padding:6px 0;">行程結束</div>
+          <div style="font-size:13px;color:var(--ink2);padding:6px 0;">${endLabel}</div>
         </div>
       </div>
     `;
+    }
 
     plannedBlock.innerHTML = html;
     renderActiveParkingUI();
@@ -11291,8 +11512,8 @@
     refreshRouteDirections();
     switchView('itinerary');
     updateItineraryStageUI();
-    // 套用新規劃後補各站「附近廁所」文字
-    prefetchAllStopToiletData();
+    // 套用後只還原既有廁所快取；新資料在使用者點選景點／路段時查詢。
+    updateToiletSectionsInDOM();
     // 套用後畫面會切回行程頁，使用者看不到「剛才那一步成功了」；沒有回饋時
     // 實測會反覆再按一次。這裡給一次性的明確結果。
     feedbackToast('✅ 已套用新規劃，行程時間已重算', 'green');
@@ -11428,6 +11649,7 @@
     if (viewId === 'budget') {
       renderBudgetTracker();
       renderApiCost();   // 必須在 renderBudgetTracker 之後：它會覆寫整個 #view-budget
+      renderDailyMapsUsage(); // 同理，而且它不依賴目前有沒有載入行程
     }
     if (viewId === 'members') renderMembersView();
     if (viewId === 'current-spot') renderCurrentSpotView();
@@ -11998,10 +12220,9 @@
       return;
     }
 
-    const header = document.querySelector('.glass-header');
-    const headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 0;
-    const availableHeight = Math.max(360, window.innerHeight - headerHeight);
-    mapPanel.style.setProperty('height', `${availableHeight}px`, 'important');
+    // 固定地圖高度交給 CSS 的 100dvh；舊的 inline innerHeight 在 iOS 網址列
+    // 展開／收合後會過期，讓地圖下方留下無法補繪的白色區域。
+    mapPanel.style.removeProperty('height');
   }
 
   function updateDriverPanelState() {
@@ -12044,9 +12265,10 @@
 
   let currentUserRole = 'passenger';
 
-  function setUserRole(role) {
+  function setUserRole(role, options = {}) {
     currentUserRole = role;
     const isDriver = role === 'driver';
+    const preserveMode = options.preserveMode === true;
 
     document.body.classList.toggle('mobile-role-driver', isDriver);
 
@@ -12067,7 +12289,7 @@
       driverBtn.classList.toggle('active', isDriver);
     }
 
-    if (isMobileLayout()) {
+    if (isMobileLayout() && !preserveMode) {
       if (isDriver) {
         setMobileMode('map');
       } else {
@@ -12095,6 +12317,9 @@
     const showMap = mode === 'map';
     const isCurrSpot = mode === 'current-spot';
 
+    // 手機已有獨立景點頁，切換主畫面時不保留地圖上的重複資訊卡。
+    if (isMobileLayout()) closePinInfo();
+
     // UIUX#5：離開地圖前先記住視角，回來時由 refreshMobileMapLayout 還原。
     // 判斷「原本在地圖模式」必須在下面 toggle class 之前做，否則狀態已經被覆蓋。
     const leavingMap = !showMap && !isCurrSpot
@@ -12121,6 +12346,8 @@
       document.body.classList.toggle('mobile-mode-map', showMap);
       document.body.classList.toggle('mobile-mode-functions', !showMap);
     }
+    document.body.classList.toggle('mobile-mode-current-spot', isCurrSpot);
+    document.documentElement.classList.toggle('mobile-map-active', showMap);
 
     const fnBtn = document.getElementById('mobileSwitchFunctions');
     const spotBtn = document.getElementById('mobileSwitchSpot');
@@ -12143,15 +12370,20 @@
   function syncMobileViewMode() {
     updateMobileViewportMetrics();
     if (isMobileLayout()) {
-      setUserRole(currentUserRole);
-      if (!document.body.classList.contains('mobile-mode-map') && !document.body.classList.contains('mobile-mode-functions')) {
+      // 螢幕旋轉／網址列變動不可把使用者強制送回「行程」。
+      setUserRole(currentUserRole, { preserveMode: true });
+      if (!document.body.classList.contains('mobile-mode-map')
+        && !document.body.classList.contains('mobile-mode-functions')
+        && !document.body.classList.contains('mobile-mode-current-spot')) {
         setMobileMode(currentUserRole === 'driver' ? 'map' : 'functions');
       }
     } else {
       applyMobileMapHeight();
       document.body.classList.remove('mobile-mode-map');
       document.body.classList.remove('mobile-mode-functions');
+      document.body.classList.remove('mobile-mode-current-spot');
       document.body.classList.remove('mobile-role-driver');
+      document.documentElement.classList.remove('mobile-map-active');
     }
     applyMobileMapHeight();
     updateMobileDriverPanelLayout();
@@ -13013,25 +13245,61 @@
   // F5 泛化：回 { startMin, dayCount, days:[{startMin,endMin}], activeMinutes }，
   // 並保留 day1EndMin / day2StartMin / day2EndMin 舊鍵（dayCount==2 時值完全不變）。
   // day2EndTime 語意＝「最後一天玩到幾點」；中間日（三天行程的第二天）約 8 小時。
+  // 第 2 天起的開始時刻：預設 09:00。使用者若把最後一天的結束時間設得比 10:00 早
+  // （例：玩到 09:30 就返程），09:00 開始只剩半小時 → 改成結束前一小時（最早 00:00）。
+  // 與建立端 ai-travel-explore-final.js 的 getTripDayWindows() 同一套規則，兩端口徑必須一致。
+  function getLaterDayStartClock(dayEndClockMin) {
+    const DEFAULT_START = 9 * 60;
+    if (!Number.isFinite(dayEndClockMin) || dayEndClockMin >= 10 * 60) return DEFAULT_START;
+    return Math.max(0, dayEndClockMin - 60);
+  }
+
   function getMultiDayWindow(prefs = {}) {
     const start = prefs.startTime || currentTripWindow.start || '09:00';
-    const startMin = clockToMinutes(start) || (9 * 60);
+    // `|| (9 * 60)` 會把合法的 00:00（回傳 0）當成沒設定而改寫成 09:00 —— 用 isFinite 判斷。
+    const parsedStartMin = clockToMinutes(start);
+    const startMin = Number.isFinite(parsedStartMin) ? parsedStartMin : (9 * 60);
     const dayCount = Math.max(2, getPrefsDayCount(prefs));
     const day1Hours = Math.min(12, Math.max(1, Math.round(Number(prefs.day1Hours) || 8)));
     const lastEndClock = prefs.day2EndTime || '12:00';
     let lastEndMin = clockToMinutes(lastEndClock);
     if (!Number.isFinite(lastEndMin)) lastEndMin = 12 * 60;
-    if (lastEndMin <= startMin) lastEndMin = startMin + 60;
+    // 原本第 2 天起直接沿用第一天的出發時刻，且用 `lastEndMin <= startMin → startMin + 60` 兜底。
+    // 下午出發（例 14:00）＋最後一天玩到 12:00 時，會算成 14:00–15:00：既是反向時段，
+    // 也把使用者設定的 12:00 丟掉。改成各天獨立決定起訖，最後一天的結束時刻一律尊重使用者設定。
     const days = [];
     let activeMinutes = 0;
+    let prevEnd = -Infinity;
     for (let i = 1; i <= dayCount; i++) {
-      const base = startMin + (i - 1) * 24 * 60;
-      let endMin;
-      if (i === 1) endMin = base + day1Hours * 60;
-      else if (i === dayCount) endMin = base + Math.max(60, lastEndMin - startMin);
-      else endMin = base + 8 * 60; // 中間日約 8 小時
-      days.push({ startMin: base, endMin });
-      activeMinutes += endMin - base;
+      const dayBase = (i - 1) * 24 * 60;
+      let dayStart;
+      let dayEnd;
+      if (i === 1) {
+        dayStart = dayBase + startMin;
+        dayEnd = dayStart + day1Hours * 60;
+      } else {
+        const isLastDay = (i === dayCount);
+        // 建立精靈新增了「第二天出發時間」→ 使用者若設過就以它為準；沒設才走 09:00 的預設規則。
+        // 設成晚於當天結束時刻時不採用（也不覆寫使用者設定的結束時刻），退回預設規則。
+        const explicitStartClock = clockToMinutes(prefs.day2StartTime);
+        const hasExplicitStart = Number.isFinite(explicitStartClock)
+          && (!isLastDay || explicitStartClock < lastEndMin);
+        const startClock = hasExplicitStart
+          ? explicitStartClock
+          : (isLastDay ? getLaterDayStartClock(lastEndMin) : getLaterDayStartClock(null));
+        dayStart = dayBase + startClock;
+        // 前一天跨午夜時（例：23:00 出發玩 12 小時 → 次日 11:00 才結束），
+        // 09:00 開始會和前一天重疊 → 以前一天的結束時刻為下限。
+        if (dayStart < prevEnd) dayStart = prevEnd;
+        // 最後一天的結束時刻一律照使用者設定；只有零/負長度（含前一天壓過來）才兜底 5 分鐘。
+        // 會走到 +5 代表使用者的設定與首日時段幾乎完全重疊——時間軸上的「超出規劃時間」警示會顯示出來。
+        dayEnd = isLastDay
+          ? Math.max(dayStart + 5, dayBase + lastEndMin)
+          : dayStart + 8 * 60; // 中間日約 8 小時
+      }
+      days.push({ startMin: dayStart, endMin: dayEnd });
+      activeMinutes += dayEnd - dayStart;
+      prevEnd = dayEnd;
     }
     return {
       startMin,
@@ -13730,7 +13998,9 @@
       '【規劃規則】',
       `1. 必須包含 ${min}–${max} 個主要景點`,
       multiDay
-        ? `2. 每個景點都必須提供 dayIndex（1 或 2 的整數），第一天在 ${minutesToClock(multiWindow.day1EndMin)} 前結束；第二天從 ${startTime} 重新開始，最後一站在 ${endTime} 前後 15 分鐘內結束`
+        // 第二天的開始時刻要取窗口算出來的值，不能沿用第一天的 startTime——
+        // 午後出發（14:00）的行程會讓 AI 以為第二天也從 14:00 開始，跟時間軸對不起來。
+        ? `2. 每個景點都必須提供 dayIndex（1 到 ${multiWindow.dayCount} 的整數），第一天在 ${minutesToClock(multiWindow.day1EndMin)} 前結束；第二天從 ${toClockFieldValue(multiWindow.day2StartMin)} 重新開始，最後一站在 ${endTime} 前後 15 分鐘內結束`
         : `2. 行程從 ${startTime} 開始，最後一站結束時間必須在 ${endTime} 前後 15 分鐘內，不可提前超過 15 分鐘`,
       `3. 每個景點必須是台灣 ${dest} 地區真實存在、能在 Google Maps 搜尋到的具體地點，使用正式名稱`,
       '4. 嚴禁使用「在地午餐」「當地早餐」「附近餐廳」等模糊飲食描述，餐飲景點必須填入具體店家名稱',
@@ -15134,7 +15404,11 @@
     const isEndpoint = stop.type === 'start' || stop.type === 'end';
     const isLast = stopIndex === replanStops.length - 1;
     const readOnly = collabReadOnly || currentTripStatus === 'ongoing';
-    const startValue = schedule && Number.isFinite(schedule.start) ? minutesToClock(schedule.start) : '';
+    // <input type="time"> 只接受 HH:MM：第 2 天的站點若填「次日 09:30」會被丟棄成空白欄位，
+    // 連帶 saveStopEditor() 解析不到抵達時間、整張表單存不了（連改停留/交通/備註都被擋）。
+    const startValue = schedule && Number.isFinite(schedule.start) ? toClockFieldValue(schedule.start) : '';
+    const stopDayIndex = Math.max(1, Math.round(Number((schedule && schedule.dayIndex) || stop.dayIndex)) || 1);
+    const showDayHint = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days);
     const duration = Number(stop.stayMin) || Number(stop.computedStayMin) || 30;
     const durationOptions = getSuggestedStayDurations(stop);
     const currentMode = normalizeTransitMode(stop.transitMode);
@@ -15162,7 +15436,7 @@
         <h3 id="stopEditorTimeHeading">時間安排</h3>
         <div class="stop-editor-field-grid">
           <label class="stop-editor-field">
-            <span>抵達時間</span>
+            <span>抵達時間${showDayHint ? `<span class="nowrap stop-editor-day-hint">（第 ${stopDayIndex} 天）</span>` : ''}</span>
             <input id="stopEditorStart" type="time" value="${escapeHtml(startValue)}" ${readOnly ? 'disabled' : ''}>
           </label>
           <label class="stop-editor-field">
@@ -15324,7 +15598,14 @@
     const durationInput = document.getElementById('stopEditorDuration');
     const transitInput = document.getElementById('stopEditorTransit');
     const noteInput = document.getElementById('stopEditorNote');
-    const startMin = clockToMinutes(startInput && startInput.value);
+    // 欄位收的是當日 HH:MM；多日行程要依這一站所屬的天補回跨日偏移，
+    // 否則第 2 天的站會被存成第 1 天的時刻。
+    const startRow = getStopEditorSchedule(activeStopEditorId);
+    const startMin = fromClockFieldValue(
+      startInput && startInput.value,
+      (startRow && startRow.dayIndex) || stop.dayIndex,
+      startRow && startRow.start
+    );
     const duration = Number(durationInput && durationInput.value);
     if (!Number.isFinite(startMin) || (!Number.isFinite(duration) && stop.type !== 'start' && stop.type !== 'end')) {
       feedbackToast('請確認抵達時間與停留時間', 'orange');
@@ -15399,7 +15680,7 @@
     }
     renderToiletMarkersForActiveRouteStage();
 
-    if (stop.mapPinId && !useDesktopEditor) {
+    if (stop.mapPinId && !useDesktopEditor && !isMobileLayout()) {
       showPinInfo(stop.mapPinId);
     }
 
@@ -15866,7 +16147,7 @@
         : '<li>等待開始展示行程</li>';
     }
     const recap = panel.querySelector('[data-sim-recap]');
-    if (recap) recap.style.display = currentTripStatus === 'completed' ? '' : 'none';
+    if (recap) recap.hidden = currentTripStatus !== 'completed';
   }
 
   function createSimulationPanel() {
@@ -15874,28 +16155,29 @@
     const panel = document.createElement('section');
     panel.id = 'tripSimulationPanel';
     panel.setAttribute('aria-label', '行程展示模擬控制');
-    panel.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:3000;width:min(310px,calc(100vw - 24px));padding:14px;border-radius:16px;background:rgba(15,23,42,.94);color:#fff;box-shadow:0 18px 48px rgba(15,23,42,.35);font:600 13px/1.4 system-ui,sans-serif;';
     panel.innerHTML = `
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px;">
-        <strong style="white-space:nowrap;">🧪 展示模擬</strong><span data-sim-status style="font-size:12px;color:#C4B5FD;white-space:nowrap;"></span>
+      <div class="sim-toolbar">
+        <button type="button" class="sim-toolbar-toggle" data-sim-toggle aria-controls="simControlBody" aria-expanded="true" aria-label="收合展示模擬工具列">🧪 展示模擬 <span data-sim-chevron>⌄</span></button>
+        <span data-sim-status class="sim-toolbar-status"></span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,42px);justify-content:center;gap:5px;margin-bottom:10px;">
-        <span></span><button type="button" data-sim-move="0,1" aria-label="向前">▲</button><span></span>
-        <button type="button" data-sim-move="-1,0" aria-label="向左">◀</button><button type="button" data-sim-stop aria-label="停止移動">●</button><button type="button" data-sim-move="1,0" aria-label="向右">▶</button>
-        <span></span><button type="button" data-sim-move="0,-1" aria-label="向後">▼</button><span></span>
+      <div class="sim-control-body" id="simControlBody">
+      <div class="sim-joystick" data-sim-joystick role="application" tabindex="0" aria-label="虛擬搖桿：拖動圓點控制移動，鍵盤可使用方向鍵">
+        <span class="sim-joystick-north" aria-hidden="true">前</span><span class="sim-joystick-west" aria-hidden="true">左</span>
+        <span class="sim-joystick-east" aria-hidden="true">右</span><span class="sim-joystick-south" aria-hidden="true">後</span>
+        <span class="sim-joystick-thumb" data-sim-thumb aria-hidden="true"></span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+      <div class="sim-actions">
         <button type="button" data-sim-play style="white-space:nowrap;">▶ 播放</button>
         <button type="button" data-sim-snap style="white-space:nowrap;">🧲 路線吸附</button>
         <button type="button" data-sim-next style="white-space:nowrap;">⏭ 下一站</button>
         <button type="button" data-sim-reset style="white-space:nowrap;">↺ 重設</button>
         <select data-sim-speed aria-label="模擬速度"><option value="1">1×</option><option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option></select>
-        <button type="button" data-sim-recap style="display:none;white-space:nowrap;">🎞 展示回顧</button>
-        <button type="button" data-sim-close style="white-space:nowrap;">關閉</button>
+        <button type="button" data-sim-recap hidden>🎞 展示回顧</button>
+        <button type="button" data-sim-close>結束模擬</button>
       </div>
-      <ol data-sim-events aria-live="polite" style="margin:10px 0 0;padding:8px 8px 8px 26px;border-radius:10px;background:rgba(255,255,255,.08);font-size:12px;font-weight:500;max-height:104px;overflow:auto;"></ol>
-      <p style="margin:8px 0 0;color:#CBD5E1;font-size:11px;text-wrap:pretty;">Sandbox 展示：打卡、照片提示與完成事件只存在這個分頁，不會寫入正式紀錄。</p>`;
-    panel.querySelectorAll('button,select').forEach((el) => { el.style.minHeight = '36px'; el.style.borderRadius = '8px'; el.style.border = '0'; el.style.padding = '6px 9px'; el.style.cursor = 'pointer'; });
+      <ol data-sim-events aria-live="polite"></ol>
+      <p class="sim-sandbox-note">展示操作只存在此分頁，不會寫入正式行程。</p>
+      </div>`;
     panel.querySelector('[data-sim-play]').addEventListener('click', () => { tripSimulation.paused = !tripSimulation.paused; updateSimulationPanel(); });
     panel.querySelector('[data-sim-snap]').addEventListener('click', () => { tripSimulation.snapToRoute = !tripSimulation.snapToRoute; updateSimulationPanel(); });
     panel.querySelector('[data-sim-next]').addEventListener('click', () => advanceSimulationStage());
@@ -15907,14 +16189,55 @@
       feedbackToast(`🎞 展示回顧：完成 ${arrivals} 個景點、觸發 ${photos} 次照片提示（未儲存）`, 'green');
     });
     panel.querySelector('[data-sim-speed]').addEventListener('change', (event) => { tripSimulation.speedMultiplier = Number(event.target.value) || 1; });
-    panel.querySelectorAll('[data-sim-move]').forEach((button) => {
-      const parts = button.dataset.simMove.split(',').map(Number);
-      const start = (event) => { event.preventDefault(); tripSimulation.joystick = { x: parts[0], y: parts[1] }; tripSimulation.paused = false; updateSimulationPanel(); };
-      button.addEventListener('pointerdown', start);
-      button.addEventListener('pointerup', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
-      button.addEventListener('pointercancel', () => { tripSimulation.joystick = { x: 0, y: 0 }; });
+    const joystick = panel.querySelector('[data-sim-joystick]');
+    const thumb = panel.querySelector('[data-sim-thumb]');
+    let joystickStartedPlayback = false;
+    const releaseJoystick = () => {
+      tripSimulation.joystick = { x: 0, y: 0 };
+      thumb.style.transform = '';
+      if (joystickStartedPlayback) {
+        tripSimulation.paused = true;
+        joystickStartedPlayback = false;
+        updateSimulationPanel();
+      }
+    };
+    const moveJoystick = (event) => {
+      const rect = joystick.getBoundingClientRect();
+      const radius = Math.min(rect.width, rect.height) * 0.35;
+      const dx = event.clientX - (rect.left + rect.width / 2);
+      const dy = event.clientY - (rect.top + rect.height / 2);
+      const scale = Math.min(1, radius / (Math.hypot(dx, dy) || 1));
+      const x = dx * scale / radius;
+      const y = -dy * scale / radius;
+      tripSimulation.joystick = Math.hypot(x, y) < 0.12 ? { x: 0, y: 0 } : { x, y };
+      thumb.style.transform = `translate(${dx * scale}px, ${dy * scale}px)`;
+      if (Math.hypot(x, y) >= 0.12 && tripSimulation.paused) {
+        joystickStartedPlayback = true;
+        tripSimulation.paused = false;
+      }
+      updateSimulationPanel();
+    };
+    joystick.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      joystick.setPointerCapture(event.pointerId);
+      moveJoystick(event);
     });
-    panel.querySelector('[data-sim-stop]').addEventListener('click', () => { tripSimulation.joystick = { x: 0, y: 0 }; tripSimulation.paused = true; updateSimulationPanel(); });
+    joystick.addEventListener('pointermove', (event) => {
+      if (joystick.hasPointerCapture(event.pointerId)) moveJoystick(event);
+    });
+    joystick.addEventListener('pointerup', releaseJoystick);
+    joystick.addEventListener('pointercancel', releaseJoystick);
+    joystick.addEventListener('lostpointercapture', releaseJoystick);
+    tripSimulation.abortController = new AbortController();
+    window.addEventListener('blur', releaseJoystick, { signal: tripSimulation.abortController.signal });
+    panel.querySelector('[data-sim-toggle]').addEventListener('click', () => {
+      const collapsed = panel.classList.toggle('collapsed');
+      if (!collapsed && isMobileLayout() && mobileRouteSheetState !== 'collapsed') toggleMobileRouteSheet(false);
+      panel.querySelector('[data-sim-toggle]').setAttribute('aria-expanded', String(!collapsed));
+      panel.querySelector('[data-sim-toggle]').setAttribute('aria-label', collapsed ? '展開展示模擬工具列' : '收合展示模擬工具列');
+      panel.querySelector('[data-sim-chevron]').textContent = collapsed ? '⌃' : '⌄';
+      if (collapsed) releaseJoystick();
+    });
     document.body.appendChild(panel);
     tripSimulation.panel = panel;
     updateSimulationPanel();
@@ -15974,6 +16297,10 @@
     stopUserLocationWatch();
     createSimulationPanel();
     resetSimulation();
+    if (isMobileLayout()) {
+      mobileRouteSheetState = 'collapsed';
+      setMobileMode('map');
+    }
     tripSimulation.lastTickAt = performance.now();
     tripSimulation.timer = window.setInterval(simulationTick, 100);
     feedbackToast('🧪 已進入展示模擬；所有進度只存在此分頁', 'blue');
@@ -15984,6 +16311,8 @@
     if (!tripSimulation.enabled) return false;
     if (tripSimulation.timer) window.clearInterval(tripSimulation.timer);
     tripSimulation.timer = null;
+    if (tripSimulation.abortController) tripSimulation.abortController.abort();
+    tripSimulation.abortController = null;
     const snapshot = tripSimulation.snapshot;
     tripSimulation.enabled = false;
     tripSimulation.paused = true;
@@ -16673,11 +17002,11 @@
       const el = document.getElementById(`toilet-section-${stop.mapPinId}`);
       if (!el) return;
       if (isTransitHubStop(stop.name)) {
-        el.innerHTML = `<span style="font-size:12px;color:var(--ink3);">🚻 站內設有廁所</span>`;
+        el.innerHTML = `<span class="nearby-toilets-hint">🚻 站內設有廁所</span>`;
       } else if (Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0) {
         el.innerHTML = `<span class="nearby-toilets-label">附近廁所</span><div class="nearby-toilets-list">${stop.nearbyToiletLocations.slice(0, 3).map(t => `<span class="toilet-item">🚻 ${t.name || t}</span>`).join('')}</div>`;
       } else {
-        el.innerHTML = `<span style="font-size:12px;color:var(--ink3);">🚻 附近廁所資料不足，建議出發前自行確認</span>`;
+        el.innerHTML = `<span class="nearby-toilets-hint">🚻 點選景點時查詢附近廁所</span>`;
       }
     });
   }
@@ -16747,45 +17076,6 @@
 
     layoutMapMarkers();
     updateToiletSectionsInDOM();
-  }
-
-  // 只補「廁所文字資料」到各站卡片，不在地圖上放廁所 pin。
-  // 自 commit ec9724b 起，廁所 pin 只在點選階段時顯示，連帶讓載入時不再搜尋廁所、
-  // 卡片廁所行因此一直停在「搜尋中…」。此函式在載入/套用新規劃後背景搜尋一次，
-  // 把結果快取到 stop.nearbyToiletLocations 並更新文字（地圖 pin 仍維持只在點選階段時出現）。
-  let toiletPrefetchToken = 0;
-  async function prefetchAllStopToiletData() {
-    const myToken = ++toiletPrefetchToken;
-    if (!window.google || !google.maps || !hasGooglePlacesService()) {
-      updateToiletSectionsInDOM();
-      return;
-    }
-    const stops = getAllToiletsFromStops();
-    if (stops.length === 0) {
-      updateToiletSectionsInDOM();
-      return;
-    }
-    const service = getPlacesService();
-    for (const { stop } of stops) {
-      if (myToken !== toiletPrefetchToken) return; // 已被新的載入/規劃取代，中止
-      if (isTransitHubStop(stop.name)) continue;   // 交通樞紐顯示「站內設有廁所」，免搜尋
-      if (Array.isArray(stop.nearbyToiletLocations) && stop.nearbyToiletLocations.length > 0) continue; // 已有快取
-      const rawToilets = getStopToiletLocations(stop).slice(0, 3);
-      let toilets = [];
-      for (const toilet of rawToilets) {
-        if (myToken !== toiletPrefetchToken) return;
-        const resolved = await resolveToiletCoordinatesNearStop(stop, toilet, service);
-        if (resolved) toilets.push(resolved);
-      }
-      if (toilets.length === 0) {
-        if (myToken !== toiletPrefetchToken) return;
-        toilets = await fetchFallbackToiletsNearStop(stop, service);
-      }
-      if (toilets.length > 0) stop.nearbyToiletLocations = toilets.slice(0, 3);
-      if (myToken !== toiletPrefetchToken) return;
-      updateToiletSectionsInDOM(); // 每解析完一站即時更新，不必等全部
-    }
-    if (myToken === toiletPrefetchToken) updateToiletSectionsInDOM();
   }
 
   async function renderToiletMarkersForActiveRouteStage() {
@@ -17440,8 +17730,8 @@
         const chosen = await pickWalkableParking(center, nearbyTdxParkings(center, list, PARKING_SEARCH_RADIUS_METERS, PARKING_CANDIDATE_LIMIT), outInfo);
         if (chosen) return finish(chosen);
       }
-      // 3) Places 候選 → 用步行時間挑
-      const placeCands = await listParkingFromPlaces(center);
+      // 3) Places 候選 → 用步行時間挑（帶景點名，讓第三段具名搜尋找得到「◯◯停車場」）
+      const placeCands = await listParkingFromPlaces(center, stop && stop.name);
       const chosen2 = await pickWalkableParking(center, placeCands, outInfo);
       return finish(chosen2);
     } catch (e) {
@@ -17449,8 +17739,16 @@
     }
   }
 
-  // Places 停車場候選（≤1km 直線、依距離排序前 4 筆）；nearbySearch type:'parking' → textSearch 退回
-  function listParkingFromPlaces(center) {
+  // Places 停車場候選（≤1km 直線、依距離排序前 4 筆）。三段式，一段沒結果才走下一段：
+  //   a) nearbySearch type:'parking'
+  //   b) textSearch「停車場」
+  //   c) textSearch「<景點名> 停車場」
+  // (c) 是為了鄉鎮景點加的：那裡的停車場多半沒被登錄成 type:'parking' 的 POI，
+  //     而是掛在景點名下（「利吉惡地停車場」「加母子灣遊憩區停車場」），generic 搜尋抓不到，
+  //     於是整條鏈一路 miss 到底、畫面就印「無停車場」。
+  //     這一段只增加「找得到」的機會，距離上限與後續的真實步行驗證都不放寬，
+  //     所以不會把別的鄉鎮的同名停車場配進來。
+  function listParkingFromPlaces(center, stopName) {
     const service = getPlacesService();
     if (!service) return Promise.resolve([]);
     const okStatus = () => hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
@@ -17469,8 +17767,16 @@
         .slice(0, PARKING_CANDIDATE_LIMIT)
         .map((x) => x.cand);
     };
+    const namedQuery = String(stopName || '').trim();
     return new Promise((resolve) => {
       // 計數已移到 instrumentPlacesService（包在共用實例上），這裡不能再加，否則重複計。
+      const tryNamed = () => {
+        if (!namedQuery) { resolve([]); return; }
+        service.textSearch(
+          { query: `${namedQuery} 停車場`, location: loc, radius: PARKING_SEARCH_RADIUS_METERS },
+          (res3, status3) => resolve(status3 === okStatus() ? toCandidates(res3) : [])
+        );
+      };
       service.nearbySearch(
         { location: loc, radius: PARKING_SEARCH_RADIUS_METERS, type: 'parking', keyword: '停車場' },
         (res, status) => {
@@ -17478,7 +17784,11 @@
           if (cands.length) { resolve(cands); return; }
           service.textSearch(
             { query: '停車場', location: loc, radius: PARKING_SEARCH_RADIUS_METERS },
-            (res2, status2) => resolve(status2 === okStatus() ? toCandidates(res2) : [])
+            (res2, status2) => {
+              const cands2 = (status2 === okStatus()) ? toCandidates(res2) : [];
+              if (cands2.length) { resolve(cands2); return; }
+              tryNamed();
+            }
           );
         }
       );
@@ -17739,7 +18049,7 @@
 
     activeRouteStage = activeRouteStage === stageIndex ? null : stageIndex;
     activeItineraryStopId = null; // 清除行程階段選擇
-    mobileRouteSheetState = 'peek';
+    mobileRouteSheetState = 'collapsed';
     updateRouteRendererVisibility(currentRouteBounds, stage.origin, stage.destination);
     renderToiletMarkersForActiveRouteStage();
     renderItineraryDisplay();
@@ -17913,13 +18223,22 @@
   function renderDirectionsPanelHandle(collapsed) {
     const handle = document.getElementById('directionsPanelHandle');
     if (!handle) return;
-    const count = Array.isArray(routeStageCache) ? routeStageCache.filter(Boolean).length : 0;
-    const title = `路線${count ? ` · ${count} 段` : ''}`;
+    // 段數要跟著「第 N 天」切換走。原本固定取 routeStageCache 的總數，
+    // 使用者切到第 1 天、卡片其實已經篩掉了，標題卻還寫「路線 · 19 段」，
+    // 看起來就像切換完全沒生效。
+    const all = Array.isArray(routeStageCache) ? routeStageCache.filter(Boolean) : [];
+    const dayFilter = getActiveDayFilter();
+    const dayRows = dayFilter > 0 ? buildReplanSchedule() : null;
+    const count = dayFilter > 0
+      ? all.filter((stage) => getRouteStageDayIndex(stage, dayRows) === dayFilter).length
+      : all.length;
+    const dayNote = dayFilter > 0 ? `第 ${dayFilter} 天 · ` : '';
+    const title = `路線${count ? ` · ${dayNote}${count} 段` : (dayFilter > 0 ? ` · ${dayNote}無移動路段` : '')}`;
     handle.innerHTML = collapsed
       ? `<span class="dph-title">${title}</span><span class="dph-icon" aria-hidden="true">›</span>`
       : `<span class="dph-title">${title}</span><span class="dph-action">收合<span aria-hidden="true"> ‹</span></span>`;
     handle.setAttribute('aria-expanded', String(!collapsed));
-    handle.setAttribute('aria-label', collapsed ? `展開路線階段（${count} 段）` : '收合路線階段');
+    handle.setAttribute('aria-label', collapsed ? `展開路線階段（${dayNote}${count} 段）` : '收合路線階段');
   }
 
   function setDirectionsPanelCollapsed(collapsed) {
@@ -17988,9 +18307,15 @@
     const live = getLiveRouteStageIndex();
     const expanded = activeRouteStage !== null && activeRouteStage !== undefined ? activeRouteStage : live;
     let liveCard = null;
+    // 行程列表切到「第 N 天」時，路線面板跟著只留那一天的段落（同一個 itineraryDayFilter 狀態）
+    const dayFilter = getActiveDayFilter();
+    const dayRows = dayFilter > 0 ? buildReplanSchedule() : null;
     panel.querySelectorAll('.route-stage-card').forEach((card) => {
       const idx = Number(card.dataset.index);
       const stage = routeStageCache[idx];
+      const outOfDay = dayFilter > 0 && getRouteStageDayIndex(stage, dayRows) !== dayFilter;
+      card.classList.toggle('is-day-hidden', outOfDay);
+      if (outOfDay) return; // 被隱藏的段不該搶「捲到目前段」
       card.classList.toggle('is-active', idx === activeRouteStage);
       card.classList.toggle('is-live', idx === live);
       card.classList.toggle('is-expanded', idx === expanded);
@@ -18003,6 +18328,8 @@
       lastScrolledLiveRouteStage = live;
       panel.scrollTo({ top: Math.max(0, liveCard.offsetTop - 8), behavior: 'smooth' });
     }
+    // 把手標題的段數也要跟著分日篩選更新，否則卡片篩掉了、標題還寫整趟段數
+    try { renderDirectionsPanelHandle(panel.classList.contains('collapsed')); } catch (_e) {}
   }
 
   function formatStageMinutes(minutes) {
@@ -18037,9 +18364,7 @@
     if (typeof forceExpanded === 'boolean') {
       mobileRouteSheetState = forceExpanded ? 'expanded' : 'collapsed';
     } else {
-      mobileRouteSheetState = mobileRouteSheetState === 'collapsed'
-        ? 'peek'
-        : (mobileRouteSheetState === 'peek' ? 'expanded' : 'collapsed');
+      mobileRouteSheetState = mobileRouteSheetState === 'collapsed' ? 'expanded' : 'collapsed';
     }
     const toggle = document.querySelector('#mobileRouteSheet .mobile-route-toggle');
     if (toggle) toggle.setAttribute('aria-expanded', mobileRouteSheetState === 'collapsed' ? 'false' : 'true');
@@ -18070,28 +18395,55 @@
       return;
     }
 
-    sheet.classList.toggle('peek', mobileRouteSheetState === 'peek');
+    sheet.classList.remove('peek');
     sheet.classList.toggle('expanded', mobileRouteSheetState === 'expanded');
     sheet.dataset.state = mobileRouteSheetState;
-    icon.textContent = mobileRouteSheetState === 'collapsed' ? '▴' : (mobileRouteSheetState === 'peek' ? '▴' : '▾');
+    icon.textContent = mobileRouteSheetState === 'collapsed' ? '⌃' : '×';
 
-    const stages = routeStageCache.filter(Boolean);
+    // 跟著行程列表的「第 N 天」切換一起過濾——兩天一夜時整面板 12 段太長，看哪天就只留那天
+    const dayFilter = getActiveDayFilter();
+    const dayRows = dayFilter > 0 ? buildReplanSchedule() : null;
+    const allStages = routeStageCache.filter(Boolean);
+    const stages = dayFilter > 0
+      ? allStages.filter((stage) => getRouteStageDayIndex(stage, dayRows) === dayFilter)
+      : allStages;
+    const dayNote = dayFilter > 0 ? `第 ${dayFilter} 天 · ` : '';
     const activeStage = stages.find((stage) => stage.index === activeRouteStage);
     const nextStage = activeStage || stages.find((stage) => inferredStageProgress(stage) < 1) || stages[stages.length - 1];
     const visibleStages = mobileRouteSheetState === 'collapsed' && nextStage ? [nextStage] : stages;
-    summary.textContent = activeStage
-      ? `目前聚焦第 ${activeStage.index + 1} 段 · ${activeStage.origin.name || activeStage.origin.title} → ${activeStage.destination.name || activeStage.destination.title}`
-      : `${stages.length} 段路徑 · ${mobileRouteSheetState === 'collapsed' ? '點開看前三段' : (mobileRouteSheetState === 'peek' ? '再點看完整路線' : '再點收合')}`;
+    const summaryStage = activeStage || nextStage;
+    summary.textContent = mobileRouteSheetState === 'collapsed' && summaryStage
+      ? `${dayNote}${stages.length} 段 · ${shortStopName(summaryStage.origin.name || summaryStage.origin.title || '上一站')} → ${shortStopName(summaryStage.destination.name || summaryStage.destination.title || '下一站')}`
+      : `${dayNote}${stages.length} 段路徑 · 點一下即可收合`;
 
-    list.innerHTML = visibleStages.length ? visibleStages.map((stage) => {
+    // 手機上原本要先切回「行程」分頁才能換日期，很不順手 → 階段路徑面板裡直接給一排切換。
+    // 共用 setItineraryDayFilter，所以行程頁與這裡永遠同步。收合狀態只剩一行，就不佔位。
+    const routeTripDayCount = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days)
+      ? Math.max(2, getPrefsDayCount(currentTripPreferences || {}))
+      : 1;
+    const routeDayTabsHtml = (routeTripDayCount > 1 && mobileRouteSheetState !== 'collapsed')
+      ? `<div class="itinerary-day-tabs route-day-tabs" role="group" aria-label="依天數篩選路線">
+          <span class="itinerary-day-tabs-label">看哪一天</span>
+          ${Array.from({ length: routeTripDayCount }, (_v, i) => i + 1).concat(0).map((value) => `
+            <button type="button" class="itinerary-day-tab${itineraryDayFilter === value ? ' active' : ''}"
+              aria-pressed="${itineraryDayFilter === value}"
+              title="${value > 0 && itineraryDayFilter === value ? '再點一次看全部' : ''}"
+              onclick="event.stopPropagation(); setItineraryDayFilter(${value})">${value === 0 ? '全部' : `第 ${value} 天`}</button>
+          `).join('')}
+        </div>`
+      : '';
+
+    list.innerHTML = routeDayTabsHtml + (visibleStages.length ? visibleStages.map((stage) => {
       const status = getMobileRouteStageStatus(stage);
+      const originName = String(stage.origin.name || stage.origin.title || '上一站');
+      const destinationName = String(stage.destination.name || stage.destination.title || '下一站');
       return `
       <div class="mobile-route-item-wrap">
-      <button class="mobile-route-item ${activeRouteStage === stage.index ? 'active' : ''} status-${status.key}" type="button" onclick="selectRouteStage(${stage.index})">
+      <button class="mobile-route-item ${activeRouteStage === stage.index ? 'active' : ''} status-${status.key}" type="button" onclick="selectRouteStage(${stage.index})" aria-label="第 ${stage.index + 1} 段：${escapeHtml(originName)}到${escapeHtml(destinationName)}">
         <div class="mobile-route-item-main">
           <div class="mobile-route-item-head">
-            <div class="mobile-route-item-time">${escapeHtml(getRouteStageTimeText(stage) || '時間計算中')}</div>
-            <div class="mobile-route-item-name">階段 ${stage.index + 1}：${escapeHtml(stage.origin.name || stage.origin.title)} → ${escapeHtml(stage.destination.name || stage.destination.title)}</div>
+            <div class="mobile-route-item-time"><span class="mobile-route-stage-index">第 ${stage.index + 1} 段</span><span>${escapeHtml(getRouteStageTimeText(stage) || '時間計算中')}</span></div>
+            <div class="mobile-route-item-name" title="${escapeHtml(originName)} → ${escapeHtml(destinationName)}"><span class="mobile-route-item-origin" title="${escapeHtml(originName)}">${escapeHtml(originName)}</span><span class="mobile-route-item-destination-group"><span class="mobile-route-item-arrow" aria-hidden="true">→</span><span class="mobile-route-item-destination" title="${escapeHtml(destinationName)}">${escapeHtml(destinationName)}</span></span></div>
           </div>
           <div class="mobile-route-item-meta">${escapeHtml(getTransitModeMeta(stage.mode).icon)} ${escapeHtml(getTransitModeMeta(stage.mode).label)} · ${escapeHtml((!stage.distance || isDistanceAbnormallySmall(stage.distance)) ? '距離計算中' : stage.distance)} · ${escapeHtml(getRouteStageTimeText(stage) || '路線時間計算中')}</div>
         </div>
@@ -18099,7 +18451,9 @@
       </button>
       <button type="button" class="mobile-route-more" onclick="openRouteStageActions(${stage.index}, event)" aria-label="查看第 ${stage.index + 1} 段路線選項" title="路線選項">⋯</button>
       </div>
-    `; }).join('') : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>';
+    `; }).join('') : (dayFilter > 0 && allStages.length
+      ? `<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">第 ${dayFilter} 天沒有移動路段。切到「全部」可看整趟路線。</div>`
+      : '<div style="padding: 12px 2px; font-size: 12px; color: var(--ink2);">路線資料載入中。</div>'));
   }
 
   function refreshMobileMapLayout() {
@@ -18428,7 +18782,7 @@
               <div class="route-stage-row">
                 <span class="route-stage-num">${i + 1}</span>
                 <span class="route-stage-names" title="${escapeHtml(stageOriginName)} → ${escapeHtml(stageDestName)}"><span class="route-stage-origin">${escapeHtml(shortStopName(stageOriginName))} </span>→ ${escapeHtml(shortStopName(stageDestName))}</span>
-                ${noParkingFound ? '<span class="route-stage-flag" title="目的地附近查不到停車場資料"><span class="flag-long">無停車場</span><span class="flag-short" aria-hidden="true">P</span></span>' : ''}
+                ${noParkingFound ? '<span class="route-stage-flag" title="尚未取得這一站的停車場資料，不代表現場沒有停車空間"><span class="flag-long">停車待確認</span><span class="flag-short" aria-hidden="true">P?</span></span>' : ''}
                 <span class="route-stage-dur">${stageMeta.icon} ${formatStageMinutes(legEstimate.durationMinutes)}</span>
                 <button type="button" class="route-stage-more" onclick="openRouteStageActions(${i}, event)" aria-label="查看第 ${i + 1} 段路線選項" title="路線選項">⋯</button>
               </div>
@@ -18442,7 +18796,7 @@
                   const who = escapeHtml(shortStopName(destination.name || destination.title || '下一站'));
                   return far
                     ? `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;">🅿️ ${who}：最近的停車場是「${escapeHtml(far.name)}」，步行約 ${Math.max(1, Math.round(far.walkSeconds / 60))} 分鐘</span>`
-                    : `<span style="display:block;margin-top:3px;color:#C2410C;font-weight:600;">🅿️ ${who}：附近查不到停車場資料，請自行尋找路邊或付費停車</span>`;
+                    : `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;">🅿️ ${who}：尚未取得停車場資料（不代表沒有），到場後可用「回報停車資訊」幫大家補上</span>`;
                 })() : ''}
               </div>
               </div>
@@ -18661,6 +19015,12 @@
         selectedModifySpotId = mappedSpot.id;
         renderModifyWindowBody();
       }
+    }
+
+    // 手機地圖只顯示路線與標記；詳細內容已有獨立的「現在景點」頁。
+    if (isMobileLayout()) {
+      closePinInfo();
+      return;
     }
     
     // 替換卡片內容

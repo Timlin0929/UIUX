@@ -259,13 +259,66 @@
 
   function finishRun(success) { return finishRunFor(activeRun, success); }
 
+  /* ── 每日用量統計（不分 run）──────────────────────────────────────────────
+     為什麼要另外記一份：原本 countClientCall 只在「AI 生成的統計區間」內計數，
+     區間外一律丟掉。但 planner 開啟既有行程時查廁所、查停車場、畫路線這些呼叫
+     全都在區間外——也就是網頁端最大的一塊 Maps 用量，我們自己完全沒有帳。
+     2026-09-27 帳單 Places 破 $255、而當天 generation_runs 只記到 $0.0015，
+     差距就是這個盲點造成的：不是「網頁沒花錢」，是「網頁沒在量」。
+
+     這份統計存在 localStorage，只代表「這台瀏覽器」的用量，不是全站總量；
+     要跨使用者彙總需要後端與 Firestore 規則配合（見 docs 待辦）。 */
+  var DAILY_KEY = 'wai_maps_daily_usage_v1';
+  var DAILY_KEEP_DAYS = 30;
+
+  function todayKey() {
+    var d = new Date();
+    // 用本地日期：使用者是照自己的日曆在對帳單，不是照 UTC
+    return d.getFullYear() + '-'
+      + String(d.getMonth() + 1).padStart(2, '0') + '-'
+      + String(d.getDate()).padStart(2, '0');
+  }
+
+  function readDaily() {
+    try {
+      var raw = window.localStorage.getItem(DAILY_KEY);
+      var obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === 'object') ? obj : {};
+    } catch (e) { return {}; }
+  }
+
+  function writeDaily(obj) {
+    try {
+      // 只留最近 N 天，避免無限長大
+      var keys = Object.keys(obj).sort();
+      while (keys.length > DAILY_KEEP_DAYS) { delete obj[keys.shift()]; }
+      window.localStorage.setItem(DAILY_KEY, JSON.stringify(obj));
+    } catch (e) { /* 隱私模式或配額滿：統計不是關鍵路徑，靜默略過 */ }
+  }
+
+  function bumpDaily(kind) {
+    var all = readDaily();
+    var key = todayKey();
+    var day = all[key] || (all[key] = { directions: 0, geocoding: 0, placesLegacy: 0, inRun: 0, outOfRun: 0 });
+    if (!Object.prototype.hasOwnProperty.call(day, kind)) day[kind] = 0;
+    day[kind] += 1;
+    if (usable(activeRun)) day.inRun += 1; else day.outOfRun += 1;
+    writeDaily(all);
+  }
+
   /** Maps JS SDK 呼叫計數。kind: directions | geocoding | placesLegacy */
   function countClientCall(kind) {
     var run = activeRun;
     if (usable(run) && Object.prototype.hasOwnProperty.call(run.counts, kind)) {
       run.counts[kind] += 1;
     }
+    // run 之外也要記——這正是先前完全沒帳的那一塊
+    bumpDaily(kind);
   }
+
+  /** 讀取每日用量（本機）。回傳 { '2026-09-27': {directions, geocoding, placesLegacy, inRun, outOfRun}, … } */
+  function dailyUsage() { return readDaily(); }
+  function clearDailyUsage() { try { window.localStorage.removeItem(DAILY_KEY); } catch (e) {} }
 
   /**
    * 讀取某趟行程的成本紀錄（Firestore 唯讀；寫入只有後端做得到）。
@@ -301,6 +354,8 @@
     completeRun: completeRun,   // 綁定＋收尾（釘住呼叫當下的 run）
     finishRun: finishRun,
     countClientCall: countClientCall,
-    loadTripRuns: loadTripRuns
+    loadTripRuns: loadTripRuns,
+    dailyUsage: dailyUsage,
+    clearDailyUsage: clearDailyUsage
   };
 })();

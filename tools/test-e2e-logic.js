@@ -1170,7 +1170,7 @@ async function section19() {
   ]).map((m) => [m.uid, m.name]));
   check('同一人的名稱以正式照片為準（不被 memories 的 email 開頭蓋掉）', names.uA === 'Codex測試擁有者A', JSON.stringify(names));
 
-  // 存檔前先對齊，否則會把已刪的照片寫回 memories
+  // memories 只寫備註（組員確認 2026-09-28：App 旅記每站列出全員的 note），照片走正式 photos
   const save = extractFunction(P, 'saveMyTripMemory');
   check('saveMyTripMemory 不再寫照片網址／封面', !/photos|coverUrl/.test(save.replace(/\/\/.*$/gm, '')),
     '寫回 memories 會跟 Cloud Function 清理打架，刪掉的照片又跑回來');
@@ -1382,11 +1382,16 @@ function section21() {
     querySelectorAll: () => cards, scrollTo: (o) => scrolls.push(o.top) };
   const c = {
     Math, Number, String, currentTripStatus: 'ongoing', currentStopIndex: 2, activeRouteStage: null, lastScrolledLiveRouteStage: null,
-    routeStageCache: [0, 1, 2, 3].map((i) => ({ index: i, destinationStopIndex: i + 1 })),
-    document: { getElementById: () => panel }, isMobileLayout: () => false, map: { getDiv: () => ({ clientWidth: 1000 }) }
+    routeStageCache: [0, 1, 2, 3].map((i) => ({ index: i, sourceStopIndex: i, destinationStopIndex: i + 1 })),
+    document: { getElementById: () => panel }, isMobileLayout: () => false, map: { getDiv: () => ({ clientWidth: 1000 }) },
+    // 階段面板會跟著行程列表的「第 N 天」切換一起過濾
+    currentTripPreferences: {}, itineraryDayFilter: 0,
+    buildReplanSchedule: () => [{ dayIndex: 1 }, { dayIndex: 1 }, { dayIndex: 2 }, { dayIndex: 2 }]
   };
   vm.createContext(c);
-  ['getLiveRouteStageIndex', 'syncDirectionsPanelStages', 'routeFitPadding', 'formatStageMinutes'].forEach((n) => vm.runInContext(extractFunction(P, n), c));
+  ['getLiveRouteStageIndex', 'syncDirectionsPanelStages', 'routeFitPadding', 'formatStageMinutes',
+    'getActiveDayFilter', 'getRouteStageDayIndex', 'isMultiDayTrip', 'getPrefsDayCount', 'clampDayIndex'
+  ].forEach((n) => vm.runInContext(extractFunction(P, n), c));
   const run = (code) => vm.runInContext(code, c);
   const has = (i, n) => cards[i].classList.contains(n);
 
@@ -1402,6 +1407,29 @@ function section21() {
   c.activeRouteStage = null; c.currentTripStatus = 'planning';
   run('syncDirectionsPanelStages()');
   check('規劃中沒有點選就全部一行', cards.every((_, i) => !has(i, 'is-expanded') && !has(i, 'is-done')));
+
+  // 兩天一夜：行程列表切到「第 2 天」，階段面板只留第 2 天的段（段別依起點站所屬的天）
+  c.currentTripPreferences = { days: '2天' };
+  c.itineraryDayFilter = 2;
+  run('syncDirectionsPanelStages()');
+  check('切到第 2 天：第 1 天的段被隱藏', has(0, 'is-day-hidden') && has(1, 'is-day-hidden'));
+  check('切到第 2 天：第 2 天的段留著', !has(2, 'is-day-hidden') && !has(3, 'is-day-hidden'));
+  // 把手標題的段數要跟著分日走（使用者回報：卡片篩掉了，標題還寫「路線 · 19 段」）
+  const handleEl = { innerHTML: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+  c.document = { getElementById: (id) => (id === 'directionsPanelHandle' ? handleEl : panel) };
+  vm.runInContext(extractFunction(P, 'renderDirectionsPanelHandle'), c);
+  c.itineraryDayFilter = 2;
+  run('renderDirectionsPanelHandle(false)');
+  check('把手標題顯示當天段數，不是整趟段數', /第 2 天 · 2 段/.test(handleEl.innerHTML), handleEl.innerHTML);
+  c.itineraryDayFilter = 0;
+  run('renderDirectionsPanelHandle(false)');
+  check('切回「全部」：把手標題回到整趟段數', /路線 · 4 段/.test(handleEl.innerHTML), handleEl.innerHTML);
+  c.document = { getElementById: () => panel };
+
+  c.itineraryDayFilter = 0;
+  run('syncDirectionsPanelStages()');
+  check('切回「全部」：所有段都回來', cards.every((_, i) => !has(i, 'is-day-hidden')));
+  c.currentTripPreferences = {};
 
   let pad = run('routeFitPadding(40)');
   check('面板展開：左側留白＝面板寬＋間距', pad.left === 40 + 240 + 16 && pad.right === 40, JSON.stringify(pad));
@@ -1433,8 +1461,77 @@ function section21() {
   check('選取高亮只用 class，不再逐張寫 inline style', !/child\.style\.(borderColor|backgroundColor|boxShadow)/.test(P),
     '實測：舊的 inline style 讓每一行都多出外框');
   check('一行一段、細節預設收起', /\.route-stage-detail \{ display: none;/.test(C) && /\.route-stage-card\.is-expanded \.route-stage-detail \{ display: block; \}/.test(C));
+  check('手機路段起終點各自防拆詞，箭頭與目的地同組',
+    /class="mobile-route-item-origin"/.test(P)
+    && /class="mobile-route-item-destination-group"/.test(P)
+    && /\.mobile-route-item-origin,\s*\.mobile-route-item-destination-group\s*\{[^}]*white-space:\s*nowrap;/.test(C)
+    && /\.mobile-route-item-destination\s*\{[^}]*white-space:\s*nowrap;/.test(C));
 }
 section21();
+
+// ══════════════════════════════════════════════════════════════
+// 22. 跨端相容：App 建立的多日行程在網頁上不可被讀成單日
+//     （App 端回報：App 的兩天一夜到網頁變單日、時間軸一路排到 22:48）
+// ══════════════════════════════════════════════════════════════
+function section22() {
+  console.log('\n── 22. App 行程的天數相容 ──');
+  const P = fs.readFileSync(path.join(APP, 'ai-travel-planner-v8.js'), 'utf8');
+  const c = { Math, Number, String, Date, currentTripPreferences: {} };
+  vm.createContext(c);
+  ['derivePreferencesFromTrip', 'parseAppDaysWindow', 'getPrefsDayCount', 'isMultiDayTrip']
+    .forEach((n) => vm.runInContext(extractFunction(P, n), c));
+  const run = (code) => vm.runInContext(code, c);
+
+  // App 寫入的樣子：有 appDays（跨兩日）、沒有 wizardData
+  c.appTrip = { appDays: '2026/09/30 09:00 - 2026/10/01 15:00', transportMode: 'car' };
+  let prefs = run('derivePreferencesFromTrip(appTrip)');
+  check('App 行程（無 wizardData）→ 由 appDays 推出 2 天', prefs.days === '2天', JSON.stringify(prefs));
+  check('App 行程 → isMultiDayTrip 為真', run('isMultiDayTrip(derivePreferencesFromTrip(appTrip).days)') === true);
+
+  // 網頁改交通工具後曾補出的殘缺 wizardData（只有 transportMode，沒有 days）
+  c.brokenTrip = { ...c.appTrip, wizardData: { transportMode: 'scooter' } };
+  prefs = run('derivePreferencesFromTrip(brokenTrip)');
+  check('殘缺 wizardData 不再遮住 appDays（原本會變成單日）', prefs.days === '2天', JSON.stringify(prefs));
+  check('殘缺 wizardData 裡的車輛仍然保留', prefs.transportMode === 'scooter', String(prefs.transportMode));
+  check('仍標記為 App 推導', prefs.__appDerived === true);
+
+  // 網頁自己建立的完整 wizardData 要原封不動沿用（day2StartTime 等新欄位靠這條流通）
+  c.webTrip = { wizardData: { days: '2天', startTime: '14:00', day2StartTime: '08:00' }, appDays: '2026/09/30 09:00 - 2026/10/01 15:00' };
+  prefs = run('derivePreferencesFromTrip(webTrip)');
+  check('完整 wizardData 整包沿用、不被 appDays 蓋掉',
+    prefs.days === '2天' && prefs.startTime === '14:00' && prefs.day2StartTime === '08:00' && !prefs.__appDerived,
+    JSON.stringify(prefs));
+
+  // 寫入側：App 行程不可再被補上殘缺 wizardData（否則下次載入又壞）
+  check('Firestore 寫入前先擋 __appDerived，不補 wizardData',
+    /if \(!\(currentTripPreferences && currentTripPreferences\.__appDerived\)\) \{\s*patch\.wizardData = \{ \.\.\.\(patch\.wizardData \|\| \{\}\), transportMode: committedVehicle \};/.test(P));
+  check('本機快取寫入同樣擋掉',
+    /if \(hasVehiclePref && !\(currentTripPreferences && currentTripPreferences\.__appDerived\)\) \{/.test(P));
+
+  // 分日切換：再點一次同一天回到「全部」
+  check('再點一次目前那天 → 回到全部',
+    /if \(next > 0 && itineraryDayFilter === next\) next = 0;/.test(P));
+
+  // ── 停車資訊：不得把「查不到」講成「沒有」，並補上具名搜尋 ──
+  check('Places 第三段用「景點名＋停車場」具名搜尋',
+    /query: `\$\{namedQuery\} 停車場`/.test(P) && /listParkingFromPlaces\(center, stop && stop\.name\)/.test(P),
+    '鄉鎮景點的停車場多半掛在景點名下，generic type:parking 搜不到');
+  check('具名搜尋沿用同一個距離上限，不放寬',
+    !/PARKING_NAMED_SEARCH_RADIUS|namedRadius/.test(P),
+    '放寬半徑會把別鄉鎮的同名停車場配進來');
+  check('畫面不再宣稱「無停車場／查不到停車場」',
+    !/無停車場<\/span>/.test(P) && !/查不到停車場資料，請/.test(P),
+    '查不到資料不等於現場沒有停車空間');
+  check('改用「停車待確認」並說明不代表沒有',
+    /停車待確認/.test(P) && /不代表沒有/.test(P));
+  // Cost regression: opening or replanning a trip must not prefetch toilets for every stop.
+  // The selected stop/stage still resolves its toilets through the existing lazy path.
+  check('opening a trip does not batch-prefetch toilets',
+    !P.includes('prefetchAllStopToiletData'));
+  check('selected stop or route stage still resolves toilets lazily',
+    /async function renderToiletMarkersForActiveRouteStage\(\)[\s\S]{0,2600}?resolveToiletCoordinatesNearStop/.test(P));
+}
+section22();
 
 section19().catch((e) => check('第 19 節執行', false, e && e.stack)).then(() => {
   console.log('\n══════════════════════════════════════');
