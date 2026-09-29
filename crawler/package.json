@@ -20,6 +20,8 @@
     "crawl:food:dry": "node worker.js --crawl-food --dry-run",
     "crawl:parking": "node worker.js --crawl-parking",
     "crawl:parking:dry": "node worker.js --crawl-parking --dry-run",
+    "crawl:parking:osm": "node worker.js --crawl-parking --source=osm",
+    "crawl:parking:osm:dry": "node worker.js --crawl-parking --source=osm --dry-run",
     "cleanup:collab": "node worker.js --cleanup-collab",
     "cleanup:collab:dry": "node worker.js --cleanup-collab --dry-run"
   },

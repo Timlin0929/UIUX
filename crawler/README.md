@@ -280,6 +280,35 @@ npm run crawl:parking       # 正式寫入
 npm run export:local        # 一併把 parking_lots 匯出成 app/parking-data.js（window.WAI_PARKING_DATA）
 ```
 
+### OpenStreetMap 來源（`--source`）
+
+縣府那份只有 **30 筆、23 筆集中在台東市區**，但 `poi-data.js` 有 280 個台東景點——
+鄉鎮景點幾乎必然查不到停車場，前端只能一路顯示「停車待確認」。因此加上
+**OSM `amenity=parking`** 作為第二來源：Overpass API **免金鑰、免費用**，
+台灣鄉間由在地社群長期維護，覆蓋遠優於 TDX 與縣府名單。
+
+```powershell
+npm run crawl:parking                     # 預設 --source=all：縣府 + OSM 都跑
+node worker.js --crawl-parking --source=osm --dry-run   # 只看 OSM 會抓到什麼
+node worker.js --crawl-parking --source=gov             # 只跑原本的縣府 XLSX
+```
+
+- **不需要 Google 金鑰**：OSM 自帶座標，不用地理編碼。沒設 `GOOGLE_MAPS_API_KEY` 時
+  縣府那條會自己略過，OSM 仍照跑。
+- **docId**：`osm-<type>-<id>`（穩定，重跑會原地更新而非重複新增）。
+- **去重**：與既有資料（縣府／社群／前一輪 OSM）比對，**60 公尺內**視為同一座而跳過；
+  可用 `OSM_DEDUPE_METERS` 調整，`--force` 可忽略去重。
+- **排除**：`access=private/no/permit` 與 `parking=private` 的私人停車場不匯入。
+- **欄位對應**：`capacity` → `smallSpots`；`fee` / `surface` / `covered` → `notes`
+  （「收費」「免費」「未鋪面」「有遮蔽」）；`source: 'osm'`，另存 `osmType` / `osmId`。
+- **無名稱的場**很常見，一律寫成「停車場」，不自行編造看起來很正式、現場卻找不到的名字。
+
+⚠️ **公共 Overpass 鏡像很不穩**，程式會依序嘗試多個端點（GET 再 POST），並且
+**把「HTTP 200 但 0 筆」也當成失敗換下一個端點**——有些鏡像只涵蓋單一國家
+（例如 `overpass.osm.ch` 只有瑞士），查台東會回 200 + 空陣列，若當成成功就會
+「匯入成功但什麼都沒進來」。要指定單一端點可設 `OVERPASS_API_URL`。
+若全部端點都逾時，等幾分鐘再跑即可，既有資料不受影響。
+
 說明：
 
 - 欄位：`name / address / phone / evSpots / largeSpots / smallSpots / motoSpots / notes / lat / lng`。

@@ -263,9 +263,11 @@ function readXlsxSheetByHeaderMatch(buf, requiredHeaderTexts) {
 }
 
 // 台東縣府停車場臺東範圍粗篩（拒絕地理編碼明顯落在縣外/查無結果的極端值）
+const TAITUNG_BOUNDS = { south: 22.0, north: 23.6, west: 120.7, east: 121.7 };
 function isInsideTaitungBounds(lat, lng) {
   return Number.isFinite(lat) && Number.isFinite(lng)
-    && lat >= 22.0 && lat <= 23.6 && lng >= 120.7 && lng <= 121.7;
+    && lat >= TAITUNG_BOUNDS.south && lat <= TAITUNG_BOUNDS.north
+    && lng >= TAITUNG_BOUNDS.west && lng <= TAITUNG_BOUNDS.east;
 }
 
 async function crawlParking(db) {
@@ -358,6 +360,237 @@ async function crawlParking(db) {
     geocoded += 1;
   }
   console.log('Crawl-parking summary', { scanned, geocoded, skipped, failed, sliced, dryRun: DRY });
+}
+
+// ── OpenStreetMap 停車場匯入（amenity=parking）────────────────────────────────
+// 為什麼要這個來源：縣府 dataset 165292 只有 30 筆、且 23 筆集中在台東市區，
+// 但 poi-data.js 有 280 個台東景點——鄉鎮景點幾乎必然查不到停車場，前端只好一路印
+// 「停車待確認」。OSM 的 amenity=parking 在台灣鄉間由在地社群長期維護，覆蓋好很多，
+// 而且 Overpass API 免金鑰、免費用，符合本專案 local-first 壓 API 成本的設計。
+// 依序嘗試多個 Overpass 實例：主站 overpass-api.de 對部分網路環境會直接回 406
+// （實測本機就是），單一端點會讓整個匯入靜默失敗。OVERPASS_API_URL 可指定單一端點覆蓋。
+const OVERPASS_ENDPOINTS = process.env.OVERPASS_API_URL
+  ? [process.env.OVERPASS_API_URL]
+  : [
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
+    'https://overpass-api.de/api/interpreter'
+  ];
+// 已排除的端點（實測）：
+//  - overpass.osm.jp：憑證過期（certificate has expired）
+//  - overpass.osm.ch：只涵蓋瑞士資料，查台東會回 HTTP 200 + 0 筆 —— 比報錯更危險，
+//    會讓匯入「成功但什麼都沒進來」。fetchOverpassElements 因此把 0 筆也當失敗換下一個端點。
+// 與既有資料的去重半徑：同一座停車場在兩個來源之間的座標差通常 <40m（政府用門牌地理編碼、
+// OSM 用實際範圍中心），取 60m 兼顧「不重複」與「不誤殺隔壁的另一座」。
+const OSM_DEDUPE_METERS = parseInt(process.env.OSM_DEDUPE_METERS || '60', 10);
+
+// 台東縣的實際範圍，拆成三塊 bbox：本島 + 綠島 + 蘭嶼。
+// 為什麼不用 TAITUNG_BOUNDS 那個大矩形：它是給「地理編碼結果的粗篩」用的，寬鬆沒關係；
+// 但拿來當 Overpass 的查詢範圍就會把恆春半島（屏東，lat 22.0–22.1／lng 120.7–120.8）
+// 整片撈進來——實測 dry-run 就出現了一批墾丁的停車場被當成台東資料。
+// 拆成三塊同時也讓查詢輕很多（少掉大片海域與屏東），公共實例比較不會逾時。
+const TAITUNG_OSM_BOXES = [
+  { south: 22.30, west: 120.74, north: 23.50, east: 121.70 }, // 本島
+  { south: 22.63, west: 121.44, north: 22.72, east: 121.53 }, // 綠島
+  { south: 21.90, west: 121.48, north: 22.12, east: 121.65 }  // 蘭嶼
+];
+
+function isInsideTaitungCounty(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return TAITUNG_OSM_BOXES.some((b) => lat >= b.south && lat <= b.north && lng >= b.west && lng <= b.east);
+}
+
+// 首選查詢：用台東縣的行政區界（ISO 3166-2:TW-TTT）精準取值。
+// 矩形再怎麼調都會沿著中央山脈那一側多切到高雄／屏東（實測 dry-run 就撈到 lng 120.75
+// 一帶、實際在山脈西側的點）。area 查詢較重、公共實例容易逾時，所以保留 bbox 當退路。
+function buildOverpassParkingQueryByArea() {
+  return `[out:json][timeout:90];
+area["ISO3166-2"="TW-TTT"]->.tt;
+(
+  node["amenity"="parking"](area.tt);
+  way["amenity"="parking"](area.tt);
+);
+out center tags;`;
+}
+
+function buildOverpassParkingQuery() {
+  const bboxes = TAITUNG_OSM_BOXES.map((b) => `${b.south},${b.west},${b.north},${b.east}`);
+  // out center：way 只回幾何中心，不用把整個多邊形拉回來（回應小很多）。
+  // 只查 node + way：amenity=parking 的 relation（多邊形群組）在台灣極少，
+  // 但把 relation 加進來會讓整個查詢在公共實例上逾時（實測回 504）。
+  const clauses = bboxes
+    .map((bbox) => `  node["amenity"="parking"](${bbox});\n  way["amenity"="parking"](${bbox});`)
+    .join('\n');
+  return `[out:json][timeout:90];
+(
+${clauses}
+);
+out center tags;`;
+}
+
+// 私人／不對外開放的停車場對旅客沒有意義，匯進來只會讓前端挑到停不進去的點
+function isPublicOsmParking(tags) {
+  const access = String(tags.access || '').toLowerCase();
+  if (['private', 'no', 'permit', 'permissive_private'].includes(access)) return false;
+  if (String(tags.parking || '').toLowerCase() === 'private') return false;
+  return true;
+}
+
+function osmParkingName(tags) {
+  const name = String(tags['name:zh'] || tags.name || '').trim();
+  if (name) return name;
+  const operator = String(tags.operator || '').trim();
+  if (operator) return `${operator}停車場`;
+  // 無名停車場在 OSM 很常見（路邊劃設的小型場）。寧可誠實寫「停車場」，
+  // 也不要自己編一個看起來很正式、實際上現場找不到的名字。
+  return '停車場';
+}
+
+function osmParkingNotes(tags) {
+  const parts = [];
+  const fee = String(tags.fee || '').toLowerCase();
+  if (fee === 'yes') parts.push('收費');
+  else if (fee === 'no') parts.push('免費');
+  const surface = String(tags.surface || '').toLowerCase();
+  if (surface === 'unpaved' || surface === 'ground' || surface === 'gravel') parts.push('未鋪面');
+  if (String(tags.covered || '').toLowerCase() === 'yes') parts.push('有遮蔽');
+  return parts.length ? parts.join('・') : null;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Overpass 公共實例的使用政策：同時只給少量 slot、超量會回 429／504，短時間連打會被暫時擋掉
+// （實測就是這樣把自己打到全部端點逾時）。因此：
+//  1. 兩次請求之間至少間隔 OVERPASS_MIN_INTERVAL_MS
+//  2. 整輪端點都失敗時，指數退避後再重試，而不是立刻重打
+const OVERPASS_MIN_INTERVAL_MS = parseInt(process.env.OVERPASS_MIN_INTERVAL_MS || '3000', 10);
+const OVERPASS_MAX_ROUNDS = parseInt(process.env.OVERPASS_MAX_ROUNDS || '3', 10);
+const OVERPASS_BACKOFF_MS = [15000, 45000, 90000];
+
+// 逐一嘗試端點，每個端點先 GET 再 POST；整輪失敗就退避後重試，全部用完才放棄。
+async function fetchOverpassElements(query) {
+  const headers = {
+    'Accept': 'application/json',
+    // Overpass 公共實例要求可辨識的 UA，否則可能被限流
+    'User-Agent': 'TravelLinkAI-crawler/1.0 (+https://travel-link-ai.duckdns.org)'
+  };
+  let lastRequestAt = 0;
+  const politeWait = async () => {
+    const wait = OVERPASS_MIN_INTERVAL_MS - (Date.now() - lastRequestAt);
+    if (wait > 0) await sleep(wait);
+    lastRequestAt = Date.now();
+  };
+  for (let round = 0; round < Math.max(1, OVERPASS_MAX_ROUNDS); round++) {
+    if (round > 0) {
+      const backoff = OVERPASS_BACKOFF_MS[Math.min(round - 1, OVERPASS_BACKOFF_MS.length - 1)];
+      console.log(`Overpass 整輪失敗，${Math.round(backoff / 1000)} 秒後重試（第 ${round + 1}/${OVERPASS_MAX_ROUNDS} 輪）…`);
+      await sleep(backoff);
+    }
+    for (const url of OVERPASS_ENDPOINTS) {
+      for (const method of ['get', 'post']) {
+        await politeWait();
+        try {
+          const res = method === 'get'
+            // 每次嘗試上限 90s（對齊查詢本身的 [timeout:90]）：公共實例時常逾時或 5xx，
+            // 拖太久只是白等，快點換下一個端點比較實際。
+            ? await axios.get(url, { params: { data: query }, headers, timeout: 90000 })
+            : await axios.post(url, `data=${encodeURIComponent(query)}`,
+              { headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 90000 });
+          const elements = Array.isArray(res.data && res.data.elements) ? res.data.elements : [];
+          // 0 筆一律當失敗換下一個端點：台東不可能一個停車場都沒有，回 0 代表這個鏡像
+          // 根本沒有這個區域的資料（例如只涵蓋單一國家的鏡像）。
+          // 若當成成功，匯入會靜默地什麼都不做。
+          if (!elements.length) {
+            console.warn(`Overpass 回 0 筆（${method.toUpperCase()} ${url}）→ 視為該鏡像無此區域資料，換下一個`);
+            continue;
+          }
+          console.log(`Overpass OK（${method.toUpperCase()} ${url}）`);
+          return elements;
+        } catch (e) {
+          const status = e && e.response ? e.response.status : null;
+          console.warn(`Overpass 失敗（${method.toUpperCase()} ${url}）→ ${status || (e && e.message)}`);
+          // 429＝明確的限流，這個端點本輪不用再試第二種方法，直接換下一個端點
+          if (status === 429) break;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function crawlParkingOsm(db) {
+  console.log('查詢 OpenStreetMap Overpass（amenity=parking，台東縣行政區）…');
+  let elements = await fetchOverpassElements(buildOverpassParkingQueryByArea());
+  // 行政區查詢的結果本身就已經是台東縣境內，不可以再套那三塊粗略 bbox——
+  // 實測會把 3 個貼著框邊、但確實在縣內的點誤判成 outOfBounds 丟掉。
+  let needsBoxFilter = false;
+  if (!elements) {
+    console.warn('行政區查詢失敗，改用 bbox 查詢（會多切到鄰縣，靠 isInsideTaitungCounty 再篩）…');
+    elements = await fetchOverpassElements(buildOverpassParkingQuery());
+    needsBoxFilter = true;
+  }
+  if (!elements) {
+    console.warn('所有 Overpass 端點都失敗，OSM 停車場略過（既有資料不受影響）。');
+    return;
+  }
+  console.log(`Overpass 回傳 ${elements.length} 個元素`);
+
+  // 既有資料（縣府 / 社群 / 先前的 OSM）先讀一次，用來做座標去重
+  const existing = [];
+  const snap = await db.collection(PARKING_COLLECTION).get();
+  snap.forEach((doc) => {
+    const d = doc.data();
+    if (Number.isFinite(d.lat) && Number.isFinite(d.lng)) {
+      existing.push({ id: doc.id, lat: d.lat, lng: d.lng, source: d.source || '' });
+    }
+  });
+  console.log(`既有停車場 ${existing.length} 筆，去重半徑 ${OSM_DEDUPE_METERS}m`);
+
+  let scanned = 0, written = 0, dupSkipped = 0, privateSkipped = 0, outOfBounds = 0;
+  const acceptedThisRun = [];
+  for (const el of elements) {
+    const tags = el.tags || {};
+    const lat = Number(el.lat != null ? el.lat : (el.center && el.center.lat));
+    const lng = Number(el.lon != null ? el.lon : (el.center && el.center.lon));
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) { outOfBounds += 1; continue; }
+    // 只有 bbox 退路才需要再篩一次（矩形邊角會切到屏東／花蓮）；行政區查詢的結果已經精準。
+    if (needsBoxFilter && !isInsideTaitungCounty(lat, lng)) { outOfBounds += 1; continue; }
+    if (!isPublicOsmParking(tags)) { privateSkipped += 1; continue; }
+    scanned += 1;
+    if (argv.limit !== undefined && written >= LIMIT) break;
+
+    const docId = `osm-${el.type}-${el.id}`;
+    const point = { lat, lng };
+    // 去重：先比既有資料，再比本輪已接受的（OSM 自己也會有相鄰重複的小場）
+    const near = existing.concat(acceptedThisRun)
+      .find((p) => p.id !== docId && measureDistanceMeters(point, p) <= OSM_DEDUPE_METERS);
+    if (near && !FORCE) { dupSkipped += 1; continue; }
+
+    const capacity = parseInt(tags.capacity, 10);
+    const addr = [tags['addr:city'], tags['addr:suburb'], tags['addr:street'], tags['addr:housenumber']]
+      .filter(Boolean).join('');
+    const data = {
+      name: osmParkingName(tags),
+      lat,
+      lng,
+      source: 'osm',
+      osmType: el.type,
+      osmId: String(el.id),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    if (addr) data.address = addr;
+    if (Number.isFinite(capacity) && capacity > 0) data.smallSpots = capacity;
+    const notes = osmParkingNotes(tags);
+    if (notes) data.notes = notes;
+
+    acceptedThisRun.push({ id: docId, lat, lng, source: 'osm' });
+    written += 1;
+    if (written <= 10) console.log(`✓ ${data.name} → (${lat.toFixed(5)}, ${lng.toFixed(5)})${notes ? `｜${notes}` : ''}`);
+    if (DRY) continue;
+    await db.collection(PARKING_COLLECTION).doc(docId).set(data, { merge: true });
+  }
+  console.log('Crawl-parking(OSM) summary', {
+    elements: elements.length, scanned, written, dupSkipped, privateSkipped, outOfBounds, dryRun: DRY
+  });
 }
 
 function measureDistanceMeters(origin, target) {
@@ -2002,7 +2235,14 @@ async function main() {
   } else if (CRAWL_FOOD_MODE) {
     await crawlFood(db);
   } else if (CRAWL_PARKING_MODE) {
-    await crawlParking(db);
+    // --source=gov｜osm｜all（預設 all）。gov 這條在沒有 GOOGLE_MAPS_API_KEY 時會自己略過，
+    // 而 OSM 完全不需要金鑰，所以預設兩條都跑：沒有金鑰的環境至少還拿得到 OSM 資料。
+    const source = String(argv.source || 'all').toLowerCase();
+    if (source === 'gov' || source === 'all') await crawlParking(db);
+    if (source === 'osm' || source === 'all') await crawlParkingOsm(db);
+    if (!['gov', 'osm', 'all'].includes(source)) {
+      throw new Error(`未知的 --source=${source}（可用：gov / osm / all）`);
+    }
   } else if (VERIFY_PLACES_MODE) {
     await verifyPlaces(db);
   } else if (ENRICH_FEES_MODE) {
