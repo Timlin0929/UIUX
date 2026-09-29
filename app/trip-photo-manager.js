@@ -409,6 +409,7 @@ window.TripPhotoManager = (function () {
   }
 
   function numberOrNull(value) {
+    if (value == null || value === '') return null;
     var number = Number(value);
     return Number.isFinite(number) ? number : null;
   }
@@ -431,7 +432,7 @@ window.TripPhotoManager = (function () {
   }
 
   function dayKeyFor(epoch, offsetMinutes) {
-    if (!Number.isFinite(Number(epoch))) return null;
+    if (epoch == null || epoch === '' || !Number.isFinite(Number(epoch))) return null;
     var date = new Date(Number(epoch));
     if (offsetMinutes == null) {
       return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
