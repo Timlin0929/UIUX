@@ -5440,7 +5440,11 @@
       + `<div class="api-cost-rows">${rows}</div>`
       + `<div class="api-cost-note">今天有 ${inRun} 次發生在生成行程期間、${outOfRun} 次在那之外。`
       + `${outOfRun > inRun ? '「之外」占多數是正常的——瀏覽行程本身就會查廁所與停車場。' : ''}</div>`
-      + '<div class="api-cost-note">⚠️ 只統計這台瀏覽器，不是全站總量；也不含 App 端與爬蟲。</div>';
+      // 這份統計是「診斷用」，不是帳單依據：它只看得到這台瀏覽器，存在 localStorage
+      // 可被清除或竄改，也可能因為分頁被關、隱私模式而漏記。對帳一律以 Cloud Billing
+      // 為準，要看全專案的請求數則用 Cloud Monitoring（可依金鑰與方法拆）。
+      + '<div class="api-cost-note">⚠️ 這是<b>診斷用</b>數據，不是帳單依據——只統計這台瀏覽器（不含 App 與爬蟲），'
+      + '存在本機可被清除。實際費用以 Cloud Billing 為準，全專案請求數看 Cloud Monitoring。</div>';
   }
   window.renderDailyMapsUsage = renderDailyMapsUsage;
 
