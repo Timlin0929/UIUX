@@ -595,7 +595,7 @@ function parseDurationMinutes(days) {
 
 function isLongTrip(days) {
   const s = String(days || '');
-  return s === '2天' || s === '3天' || s === '三天兩夜';
+  return s === '2天' || s === '兩天一夜' || s === '3天' || s === '三天兩夜';
 }
 
 // 天數字串 → 過夜行程天數（單日回 1）。本專案上限兩天一夜，舊 '3天' 資料視同 2 天。
@@ -745,6 +745,31 @@ function calcTripEndTime(startTime, days) {
   return minutesToTimeString(startMin + duration);
 }
 
+function getLastDayStartTime(endTime, firstDayEndMinutes = 0) {
+  const endMinutes = timeStringToMinutes(normalizeClockInput(endTime, '12:00'));
+  const usualStart = Math.min(9 * 60, Math.max(0, endMinutes - 60));
+  // 第一天若玩到午夜後，第二天不能在第一天結束前又重新開始。
+  const afterFirstDay = Math.max(0, firstDayEndMinutes - 1440);
+  return minutesToTimeString(Math.max(usualStart, Math.min(endMinutes, afterFirstDay)));
+}
+
+function getDay2StartTime(wizardData, firstDayEndMinutes = 0) {
+  const selected = normalizeClockInput(wizardData.day2StartTime, '');
+  return selected || getLastDayStartTime(wizardData.day2EndTime, firstDayEndMinutes);
+}
+
+function reconcileDay2StartTime() {
+  const selected = normalizeClockInput(wizData.day2StartTime, '');
+  if (!selected) return false;
+  const firstEnd = timeStringToMinutes(wizData.startTime || '09:00')
+    + (Number(wizData.day1Hours) || 8) * 60;
+  const secondStart = 1440 + timeStringToMinutes(selected);
+  const secondEnd = 1440 + timeStringToMinutes(wizData.day2EndTime || '12:00');
+  if (secondStart >= firstEnd && secondStart < secondEnd) return false;
+  wizData.day2StartTime = '';
+  return true;
+}
+
 // 計算行程每日時間窗口（單日：start–end；多日：第一天時數 + 中間日 8 小時 + 最後一天結束時間）
 // F5：day2EndTime 語意泛化為「最後一天玩到幾點」；保留 day1End/day2End 鍵讓既有兩天邏輯不變。
 function getTripDayWindows(wizardData) {
@@ -756,13 +781,30 @@ function getTripDayWindows(wizardData) {
   const d1h = Math.min(12, Math.max(1, Math.round(Number(wizardData.day1Hours) || 8)));
   const day1End = minutesToTimeString(timeStringToMinutes(start) + d1h * 60);
   const lastEnd = normalizeClockInput(wizardData.day2EndTime, '12:00'); // 語意：最後一天玩到幾點
+  const lastStart = getDay2StartTime(wizardData, timeStringToMinutes(day1End));
   const dayWindows = [];
   for (let i = 1; i <= dayCount; i++) {
     if (i === 1) dayWindows.push({ day: 1, start, end: day1End });
-    else if (i === dayCount) dayWindows.push({ day: i, start, end: lastEnd });
+    else if (i === dayCount) dayWindows.push({ day: i, start: lastStart, end: lastEnd });
     else dayWindows.push({ day: i, start, end: minutesToTimeString(timeStringToMinutes(start) + 8 * 60) }); // 中間日約 8 小時
   }
-  return { multi: true, start, dayCount, dayWindows, day1Start: start, day1End, day1Hours: d1h, day2Start: start, day2End: lastEnd };
+  return { multi: true, start, dayCount, dayWindows, day1Start: start, day1End, day1Hours: d1h, day2Start: lastStart, day2End: lastEnd };
+}
+
+function getTripActiveMinutes(wizardData) {
+  const windows = getTripDayWindows(wizardData);
+  if (!windows.multi) return parseDurationMinutes(wizardData.days);
+  return windows.dayWindows.reduce((total, window) =>
+    total + Math.max(0, timeStringToMinutes(window.end) - timeStringToMinutes(window.start)), 0);
+}
+
+function hasValidMultiDayWindow(wizardData) {
+  const windows = getTripDayWindows(wizardData);
+  if (!windows.multi) return true;
+  const firstEnd = timeStringToMinutes(windows.day1End);
+  const lastStart = 1440 + timeStringToMinutes(windows.day2Start);
+  const lastEnd = 1440 + timeStringToMinutes(windows.day2End);
+  return lastStart < lastEnd && firstEnd <= lastStart;
 }
 
 function getPromptRuleLines(wizardData, mode) {
@@ -977,7 +1019,7 @@ function buildPrompt(wizardData, firebaseHint = '', mode = 'final') {
 
   const rules = getPromptRuleLines(wizardData, mode).join('\n');
   const outputSchema = mode === 'preview'
-    ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"}]}`
+    ? `請用 JSON 格式回應：{"title":"行程標題","reply":"一句話摘要","stops":[{"order":1,"name":"景點名","time":"09:00","desc":"簡短描述"${win.multi ? ',"dayIndex":1' : ''}}]}${win.multi ? '；每站必須附 dayIndex（1 或 2），時間使用該天的 HH:MM' : ''}`
     : `請用 JSON 格式回應，包含：title, reply, stops[{order,emoji,name,time,address,desc,duration(必填·正整數·分鐘，禁止固定填整數倍，應依規模靈活設定：例觀景台填38、美食填22、博物館填65、海灘填35、步道填55),businessHours,transportMode${win.multi ? ',dayIndex(整數1-' + (win.dayCount || 2) + '，該站屬於第幾天)' : ''}}]`;
 
   const firebaseSection = mode === 'final' && firebaseHint
@@ -1362,10 +1404,23 @@ function getWizardPlanCacheKey(wizardData, mode) {
     mode || 'final',
     wizardData.dest || wizardData.destCustom || '',
     wizardData.days || '',
+    wizardData.startTime || '',
+    wizardData.day1Hours || '',
+    wizardData.day2StartTime || '',
+    wizardData.day2EndTime || '',
+    wizardData.departureDate || '',
+    wizardData.returnDate || '',
     wizardData.people || '',
     wizardData.pace || '',
     (wizardData.interests || []).join('|'),
-    wizardData.theme || ''
+    wizardData.theme || '',
+    wizardData.transportMode || '',
+    wizardData.startLocation || '',
+    wizardData.endLocation || '',
+    wizardData.desiredSpots || '',
+    wizardData.budget || '',
+    wizardData.accommodation || '',
+    wizardData.lodgingName || ''
   ].join('::');
 }
 
@@ -1378,26 +1433,85 @@ function renderAiSkeletonPreview(plan) {
 
   const stops = plan.stops.slice(0, 6);
   flowTitle.textContent = plan.title || flowTitle.textContent;
+  let secondDayIndex = isLongTrip(wizData.days)
+    ? stops.findIndex((spot) => Number(spot && spot.dayIndex) >= 2)
+    : -1;
+  if (isLongTrip(wizData.days) && secondDayIndex < 0) {
+    // 舊預覽資料沒有 dayIndex 時，以時鐘從晚跳回早辨識第二天。
+    for (let i = 1; i < stops.length; i++) {
+      if (/^次日\s*/.test(String(stops[i] && stops[i].time || ''))) {
+        secondDayIndex = i;
+        break;
+      }
+      const previous = normalizeClockInput(stops[i - 1] && stops[i - 1].time, '');
+      const current = normalizeClockInput(stops[i] && stops[i].time, '');
+      if (previous && current && timeStringToMinutes(current) < timeStringToMinutes(previous)) {
+        secondDayIndex = i;
+        break;
+      }
+    }
+  }
   flowNodes.innerHTML = stops.map((spot, index) => {
     const name = spot && spot.name ? spot.name : `景點 ${index + 1}`;
     const desc = spot && spot.desc ? spot.desc : 'AI 預覽骨架';
-    const time = spot && spot.time ? spot.time : '--:--';
+    const rawTime = spot && spot.time ? String(spot.time) : '--:--';
+    const time = secondDayIndex >= 0 && index >= secondDayIndex
+      && /^\d{1,2}:\d{2}$/.test(rawTime)
+      ? `次日 ${normalizeClockInput(rawTime, rawTime)}` : rawTime;
     return `
-    <div class="wizard-node">
+    ${index === secondDayIndex ? '<div class="wizard-day-break"><span>🌙 過夜</span><strong>第 2 天</strong></div>' : ''}
+    <div class="wizard-node${index === secondDayIndex - 1 ? ' wizard-node-day-end' : ''}">
       <div class="wizard-node-top">
-        <h4 class="wizard-node-title">🧭 ${name}</h4>
-        <span style="font-size:14px;color:#4e6b87;">${time}</span>
+        <h4 class="wizard-node-title">🧭 ${escapeHtml(name)}</h4>
+        <span style="font-size:14px;color:#4e6b87;white-space:nowrap;">${escapeHtml(time)}</span>
       </div>
-      <p class="wizard-node-desc">${desc}</p>
+      <p class="wizard-node-desc">${escapeHtml(desc)}</p>
     </div>`;
   }).join('');
   flowSummary.textContent = plan.reply || 'AI 已先生成預覽骨架，按下建立行程後會在背景補齊完整細節。';
+  setWizardPreviewBanner('AI 景點預覽已更新，可直接查看最新安排。', 'done');
 }
 
-function setWizardStreamingHint(text) {
+function setWizardPreviewBanner(text, state = 'loading') {
+  const banner = document.getElementById('wizardPreviewStatus');
+  if (!banner) return;
+  banner.hidden = !text;
+  banner.textContent = text || '';
+  banner.dataset.state = state;
+}
+
+function setWizardStreamingHint(text, state = 'loading') {
   const flowSummary = document.getElementById('flowSummary');
-  if (!flowSummary) return;
-  flowSummary.textContent = text;
+  if (flowSummary) flowSummary.textContent = text;
+  setWizardPreviewBanner(text, state);
+}
+
+function getWizardPreviewStatusText(reason, streaming = false) {
+  const labels = {
+    'step1-destination': '目的地',
+    'step0-people': '旅行人數',
+    'step2-days': '旅行天數',
+    'step3-departure-date': '旅行日期',
+    'step3-start-time': '第一天出發時間',
+    'step0-day1': '第一天遊玩時間',
+    'step0-day2': '第二天結束時間',
+    'day2-start-time': '第二天出發時間',
+    'day2-start-default': '第二天出發時間',
+    'step2-pace': '旅行節奏',
+    'step3-interests': '旅遊偏好',
+    'step2-theme': '旅程風格',
+    'step4-theme': '旅程風格',
+    'start-location': '出發地點',
+    'end-location': '回程地點',
+    'desired-spots': '希望景點',
+    'transport-mode': '交通方式',
+    'preview-start-time': '第一天出發時間',
+    'preview-day2-end-time': '第二天結束時間'
+  };
+  const label = labels[reason] || '行程設定';
+  return streaming
+    ? `AI 正在依照「${label}」安排景點，預覽即將更新…`
+    : `AI 正在依照「${label}」更新景點預覽…`;
 }
 
 function clearWizardPrefetchState() {
@@ -1406,6 +1520,7 @@ function clearWizardPrefetchState() {
   wizardPreviewCacheKey = '';
   wizardPreviewRequestKey = '';
   wizardPreviewStreamBuffer = '';
+  setWizardPreviewBanner('', 'loading');
   if (wizardPreviewDebounceTimer) {
     clearTimeout(wizardPreviewDebounceTimer);
     wizardPreviewDebounceTimer = null;
@@ -1423,21 +1538,35 @@ function triggerFirebaseHintPrefetch() {
 function requestWizardPreviewInBackground(reason = 'wizard') {
   const destination = getWizardDestination(wizData);
   if (!destination) return;
-  if (!getGeminiApiKey()) return;
+  if (!getVertexConfig().ready) return;
 
   const requestKey = getWizardPlanCacheKey(wizData, 'preview');
   if (wizardPreviewCacheKey === requestKey && wizardPreviewPlan) return;
   wizardPreviewRequestKey = requestKey;
-  setWizardStreamingHint(`AI 預覽生成中（${reason}）...`);
+  setWizardStreamingHint(getWizardPreviewStatusText(reason));
 
   const requestData = {
     dest: wizData.dest,
     destCustom: wizData.destCustom,
     days: wizData.days,
+    startTime: wizData.startTime,
+    day1Hours: wizData.day1Hours,
+    day2StartTime: wizData.day2StartTime,
+    day2EndTime: wizData.day2EndTime,
+    transportMode: wizData.transportMode,
+    startLocation: wizData.startLocation,
+    endLocation: wizData.endLocation,
+    desiredSpots: wizData.desiredSpots,
+    budget: wizData.budget,
+    accommodation: wizData.accommodation,
+    lodgingName: wizData.lodgingName,
+    departureDate: wizData.departureDate,
+    returnDate: wizData.returnDate,
     people: wizData.people,
     pace: wizData.pace,
     interests: Array.isArray(wizData.interests) ? [...wizData.interests] : [],
-    theme: wizData.theme
+    theme: wizData.theme,
+    profilePrefs: wizData.profilePrefs
   };
 
   wizardPreviewPromise = requestGeminiMicroTravelPlan(requestData, {
@@ -1446,15 +1575,17 @@ function requestWizardPreviewInBackground(reason = 'wizard') {
     useStreaming: true,
     promptForKey: false,
     onChunk: (_chunk, fullText) => {
+      if (wizardPreviewRequestKey !== requestKey) return;
       wizardPreviewStreamBuffer = fullText;
       const size = fullText.length;
       if (size > 0) {
-        setWizardStreamingHint(`AI 預覽生成中（${reason}）... 已接收 ${size} 字`);
+        setWizardStreamingHint(getWizardPreviewStatusText(reason, true));
       }
     }
   })
     .then((plan) => {
       if (wizardPreviewRequestKey !== requestKey) return;
+      if (!plan || !Array.isArray(plan.stops) || !plan.stops.length) throw new Error('AI 預覽缺少景點');
       wizardPreviewPlan = plan;
       wizardPreviewCacheKey = requestKey;
       renderAiSkeletonPreview(plan);
@@ -1462,6 +1593,7 @@ function requestWizardPreviewInBackground(reason = 'wizard') {
     .catch((error) => {
       if (wizardPreviewRequestKey !== requestKey) return;
       console.warn('Preview prewarm failed:', error);
+      setWizardStreamingHint('AI 景點預覽暫時無法更新；目前顯示示意安排，建立行程仍可繼續。', 'error');
     })
     .finally(() => {
       if (wizardPreviewRequestKey === requestKey) {
@@ -1472,6 +1604,8 @@ function requestWizardPreviewInBackground(reason = 'wizard') {
 
 function scheduleWizardPreviewRequest(reason = 'wizard') {
   if (wizardPreviewDebounceTimer) clearTimeout(wizardPreviewDebounceTimer);
+  // 在 450ms debounce 期間就淘汰舊請求，避免舊天數／時間的回覆蓋掉剛更新的本地預覽。
+  wizardPreviewRequestKey = getWizardPlanCacheKey(wizData, 'preview');
   wizardPreviewDebounceTimer = setTimeout(() => {
     requestWizardPreviewInBackground(reason);
   }, 450);
@@ -2410,11 +2544,19 @@ function applyTripPlanningRules(stops, wizardData = {}) {
   const pace = wizardData.pace || '平衡';
   const maxGapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
   const startMinutes = timeStringToMinutes(normalizeClockInput(wizardData.startTime, '09:00'));
+  const windows = getTripDayWindows(wizardData);
   let previousEndMinutes = null;
 
   return stops.map((stop, index) => {
-    // 第一站從出發時間開始；後續站點接在前一站結束後
-    const defaultStart = index === 0 ? startMinutes : (previousEndMinutes ?? startMinutes);
+    // 過夜行程的第二天要從該日窗口重新開始，不能把兩天接成一條連續時間軸。
+    const dayIndex = windows.multi
+      ? Math.max(1, Math.min(windows.dayCount, Math.round(Number(stop && stop.dayIndex)) || 1))
+      : 1;
+    const dayWindow = windows.multi && windows.dayWindows[dayIndex - 1];
+    const dayStart = dayWindow
+      ? (dayIndex - 1) * 1440 + timeStringToMinutes(dayWindow.start)
+      : startMinutes;
+    const defaultStart = index === 0 ? startMinutes : Math.max(previousEndMinutes ?? startMinutes, dayStart);
     const normalized = normalizeGeneratedStop(stop, index, minutesToTimeString(defaultStart));
     let currentMinutes = defaultStart;
 
@@ -2425,9 +2567,11 @@ function applyTripPlanningRules(stops, wizardData = {}) {
     // （formatDayBusinessHours 的 🔴、getBusinessHoursWarning 的 ⚠️）。
     // 留著等於又養出第二份營業時間狀態，正是這條修復線要消滅的東西。
     const businessWindow = extractDayHoursWindow(normalized.businessHours, stopServiceDate(normalized, wizardData));
-    if (businessWindow && !businessWindow.closed && currentMinutes < businessWindow.open) {
-      const waitTime = businessWindow.open - currentMinutes;
-      if (waitTime <= maxGapMinutes) currentMinutes = businessWindow.open;
+    if (businessWindow && !businessWindow.closed) {
+      const openMinutes = Math.floor(currentMinutes / 1440) * 1440 + businessWindow.open;
+      if (currentMinutes < openMinutes && openMinutes - currentMinutes <= maxGapMinutes) {
+        currentMinutes = openMinutes;
+      }
     }
 
     normalized.time = minutesToTimeString(currentMinutes);
@@ -3248,7 +3392,7 @@ function estimateTripMinutes(stops) {
 // 每站最多只縮原本的 35%（保底 65%），以水位填平方式反覆均攤直到符合或已無可縮空間。回傳是否有調整。
 function fitGeneratedStopsToTimeLimit(stops, wizardData = {}) {
   if (!Array.isArray(stops) || !stops.length) return false;
-  const targetMin = parseDurationMinutes(wizardData.days || '1天');
+  const targetMin = getTripActiveMinutes(wizardData);
   if (!Number.isFinite(targetMin) || targetMin <= 0) return false;
   if (estimateTripMinutes(stops) <= targetMin) return false;
 
@@ -3364,7 +3508,7 @@ function buildTimeFillPrompt(dest, needed, shortfallMin, excludedNames, wizardDa
 
 // 合併後若行程縮水超過 45 分，沿路線補景點填回目標時段（含回終點交通、不超時）。傳入/回傳「中段站」。
 async function fillTripTimeBudget(middleStops, wizardData, destination, startCoords, endCoords) {
-  const targetMin = parseDurationMinutes(wizardData.days || '1天');
+  const targetMin = getTripActiveMinutes(wizardData);
   const startStub = startCoords ? { type: 'start', lat: startCoords.lat, lng: startCoords.lng } : null;
   const endStub = endCoords ? { type: 'end', lat: endCoords.lat, lng: endCoords.lng } : null;
   const fullSeq = (arr) => [startStub, ...arr, endStub].filter(Boolean);
@@ -3607,6 +3751,10 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
       console.info('[暫停開放] 替換', swapped, '站；找不到替代而保留', kept, '站（由 planner 顯示提示）');
     }
   }
+  // 前面的補站、刪站與缺日修正都可能改變 dayIndex；最後才依確定的天次排時間。
+  // 替換景點若改了停留時長，也一併在此重新計算後續站點。
+  const scheduledStops = applyTripPlanningRules(finalStops, wizardData);
+  finalStops.splice(0, finalStops.length, ...scheduledStops);
   return finalStops;
 }
 
@@ -5837,9 +5985,63 @@ function goToWizStep(i) {
   renderWizard();
 }
 
+function renderWizardDurationField() {
+  const multi = isLongTrip(wizData.days);
+  const start = normalizeClockInput(wizData.startTime, '09:00');
+  const hours = Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
+  const day1Hours = Math.min(12, Math.max(1, Math.round(Number(wizData.day1Hours) || 8)));
+  const day1End = minutesToTimeString(timeStringToMinutes(start) + day1Hours * 60);
+  const day2End = normalizeClockInput(wizData.day2EndTime, '12:00');
+  const day2Start = getDay2StartTime(wizData, timeStringToMinutes(day1End));
+  const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:26px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
+  return `<div class="wizard-field">
+    <label>整體旅行時間</label>
+    <div class="wizard-chips" style="margin-bottom:12px">
+      <button class="wizard-tag${multi ? '' : ' active'}" type="button" onclick="setTripDurationMode('single')">☀️ 單日</button>
+      <button class="wizard-tag${multi ? ' active' : ''}" type="button" onclick="setTripDurationMode('multi')">🌙 兩天一夜</button>
+    </div>
+    ${multi ? `
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第一天遊玩時數</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+            ${stepBtn('−', 'adjustDay1Hours(-1)', day1Hours <= 1)}
+            <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${day1Hours} 小時</div>
+            ${stepBtn('＋', 'adjustDay1Hours(1)', day1Hours >= 12)}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天出發時間</div>
+          <div class="wai-dt-field" onclick="pickWizDay2StartTime()" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickWizDay2StartTime()}">
+            <span>${day2Start}${wizData.day2StartTime ? '' : '（預設）'}</span><span class="wai-dt-ic">🕒</span>
+          </div>
+          ${wizData.day2StartTime ? '<button type="button" class="wiz-focus-toggle" onclick="clearDay2StartTime()" style="margin-top:6px;">恢復預設時間</button>' : '<p style="margin-top:6px;font-size:13px;color:#5f6876;">不修改時會以 09:00 開始；早於 10:00 返程時會自動提前。</p>'}
+        </div>
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
+          <div class="wai-dt-field" onclick="pickWizDay2EndTime('${day2End}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickWizDay2EndTime('${day2End}')}">
+            <span>${day2End}</span><span class="wai-dt-ic">🕒</span>
+          </div>
+        </div>
+      </div>
+      <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;line-height:1.6;">🌙 <span style="white-space:nowrap;">第一天 ${start}–${day1End}</span><br><span style="white-space:nowrap;">第二天 ${day2Start}–${day2End}</span><br>玩完即返程</p>
+    ` : `
+      <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
+        ${stepBtn('−', 'adjustTripHours(-1)', hours <= 1)}
+        <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${hours} 小時</div>
+        ${stepBtn('＋', 'adjustTripHours(1)', hours >= 12)}
+      </div>
+      <div class="wizard-chips" style="justify-content:center;margin-top:10px">
+        ${[2,4,6,8,10].map(n => `<button class="wizard-tag${hours === n ? ' active' : ''}" type="button" onclick="setTripHours(${n})">${n}h</button>`).join('')}
+      </div>
+      <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">🕘 預計 ${start}–${calcTripEndTime(start, wizData.days)}・約 ${hours} 小時</p>
+    `}
+  </div>`;
+}
+
 function renderWizard() {
   const steps = document.getElementById('wizSteps');
-  const stepTitles = ['目的地', '交通 & 偏好', '出發日期 & 時間', '預算 & 其他'];
+  const stepTitles = ['目的地', '日期 & 遊玩時間', '交通 & 偏好', '預算 & 其他'];
   // 這排 chip 長得就像分頁，使用者會去點它——原本是純 <div>，點了完全沒反應，
   // 無障礙樹裡也找不到（整個精靈只有「上一步／下一步」兩個可聚焦元素）。
   // 已完成的步驟可以直接跳回去；還沒走到的維持不可點（往前仍要通過各步驟的驗證）。
@@ -5902,60 +6104,10 @@ function renderWizard() {
           `;
         })()}
       </div>
-      <div class="wizard-field">
-        <label>整體旅行時間</label>
-        ${(() => {
-          const isMulti = isLongTrip(wizData.days);
-          const dayCount = getWizardDayCount(wizData.days);
-          const hours = Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
-          const startT = wizData.startTime || '09:00';
-          const endT = calcTripEndTime(startT, wizData.days);
-          const day1Hours = Math.min(12, Math.max(1, Math.round(Number(wizData.day1Hours) || 8)));
-          const day1End = minutesToTimeString(timeStringToMinutes(startT) + day1Hours * 60);
-          const day2End = normalizeClockInput(wizData.day2EndTime, '12:00');
-          const stepBtn = (label, fn, disabled) => `<button type="button" onclick="${fn}" ${disabled ? 'disabled' : ''} style="width:42px;height:42px;border-radius:12px;border:1px solid #d8e2ef;background:#f7fbff;font-size:26px;font-weight:700;color:#2b4c6b;cursor:pointer;${disabled ? 'opacity:.4;cursor:not-allowed;' : ''}">${label}</button>`;
-          const multiSummary = `🌙 第一天 ${startT}–${day1End}・第二天 約 ${startT} 玩到 ${day2End}（玩完即返程）`;
-          return `
-            <div class="wizard-chips" style="margin-bottom:12px">
-              <button class="wizard-tag${!isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('single')">☀️ 單日</button>
-              <button class="wizard-tag${isMulti ? ' active' : ''}" type="button" onclick="setTripDurationMode('multi')">🌙 兩天一夜</button>
-            </div>
-            ${isMulti ? `
-              <div style="display:flex;flex-direction:column;gap:14px;">
-                <div>
-                  <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第一天遊玩時數</div>
-                  <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
-                    ${stepBtn('−', 'adjustDay1Hours(-1)', day1Hours <= 1)}
-                    <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${day1Hours} 小時</div>
-                    ${stepBtn('＋', 'adjustDay1Hours(1)', day1Hours >= 12)}
-                  </div>
-                </div>
-                <div>
-                  <div style="font-size:16px;font-weight:700;color:#2b4c6b;margin-bottom:8px;">第二天玩到幾點</div>
-                  <div class="wai-dt-field" onclick="pickWizDay2EndTime('${day2End}')">
-                    <span>${day2End}</span>
-                    <span class="wai-dt-ic">🕒</span>
-                  </div>
-                </div>
-              </div>
-              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">${multiSummary}</p>
-            ` : `
-              <div style="display:flex;align-items:center;justify-content:center;gap:16px;">
-                ${stepBtn('−', 'adjustTripHours(-1)', hours <= 1)}
-                <div style="min-width:96px;text-align:center;font-size:24px;font-weight:800;color:#1f3a52;">${hours} 小時</div>
-                ${stepBtn('＋', 'adjustTripHours(1)', hours >= 12)}
-              </div>
-              <div class="wizard-chips" style="justify-content:center;margin-top:10px">
-                ${[2,4,6,8,10].map(n => `<button class="wizard-tag${hours === n ? ' active' : ''}" type="button" onclick="setTripHours(${n})">${n}h</button>`).join('')}
-              </div>
-              <p style="margin-top:10px;font-size:14px;color:#5f6876;text-align:center;">🕘 預計 ${startT} – ${endT}・約 ${hours} 小時<span style="color:#8fa4b8;">（出發時間可於下一步調整）</span></p>
-            `}
-          `;
-        })()}
-      </div>`;
+      `;
 
-  } else if (wizStep===1) {
-    // Step 1：交通 + 偏好（合併）
+  } else if (wizStep===2) {
+    // Step 3：交通 + 偏好（合併）
     const autoHub = getDefaultTransitHub(wizData.dest || wizData.destCustom || '');
     const startHint = autoHub ? `留空則自動使用「${autoHub}」` : '可填車站名、停車場或民宿名稱';
     const endHint = autoHub ? `留空則自動使用「${autoHub}」` : (isLongTrip(wizData.days) ? '可填飯店或車站名稱' : '可填停車場或車站名稱');
@@ -5969,12 +6121,12 @@ function renderWizard() {
       <p class="wizard-block-help">設定交通安排，並調整本趟想偏重的方向與風格</p>
       <div class="wizard-field">
         <label>出發站點 / 集合地點</label>
-        <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview()">
+        <input type="text" id="wizStartLocation" placeholder="${startHint}" value="${wizData.startLocation||''}" oninput="wizData.startLocation=this.value;renderFlowPreview();scheduleWizardPreviewRequest('start-location')">
         <p style="margin-top:5px;font-size:14px;color:#5f6876;">可填車站、停車場或民宿；留空自動使用目的地最近的交通樞紐</p>
       </div>
       <div class="wizard-field">
         <label>回程站點 / 返回地點</label>
-        <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview()">
+        <input type="text" id="wizEndLocation" placeholder="${endHint}" value="${wizData.endLocation||''}" oninput="wizData.endLocation=this.value;renderFlowPreview();scheduleWizardPreviewRequest('end-location')">
         <p style="margin-top:5px;font-size:14px;color:#5f6876;">旅程結束的返回地點；留空則與出發站點相同</p>
       </div>
       <div class="wizard-field" style="margin-top:16px">
@@ -6024,10 +6176,10 @@ function renderWizard() {
         `).join('')}
       </div>`;
 
-  } else if (wizStep===2) {
-    // Step 2：出發日期 + 回程日期 + 出發時間
-    body.innerHTML = `<h3 class="wizard-block-title">📅 出發日期 & 時間</h3>
-      <p class="wizard-block-help">設定出發與回程日期，以及當天的出發時間</p>
+  } else if (wizStep===1) {
+    // Step 2：出發日期、每日出發時間與遊玩時數
+    body.innerHTML = `<h3 class="wizard-block-title">📅 日期 & 遊玩時間</h3>
+      <p class="wizard-block-help">設定出發日期，以及每天開始與結束的時間</p>
       <div class="wizard-field">
         <label for="wizDepartureDateField">出發日期 <span class="wizard-required" aria-hidden="true">必填</span></label>
         <div class="wai-dt-field" id="wizDepartureDateField" onclick="pickWizDepartureDate()"
@@ -6042,13 +6194,14 @@ function renderWizard() {
       </div>
 
       <div class="wizard-field">
-        <label>出發時間</label>
+        <label>${isLongTrip(wizData.days) ? '第一天出發時間' : '出發時間'}</label>
         <div class="wai-dt-field" onclick="pickWizStartTime()">
           <span>${wizData.startTime||'09:00'}</span>
           <span class="wai-dt-ic">🕒</span>
         </div>
         <p style="margin-top:8px;font-size:14px;color:#5f6876;">行程將依「${paceLabel(wizData.pace||'平衡')}」節奏自動計算每站間距</p>
-      </div>`;
+      </div>
+      ${renderWizardDurationField()}`;
 
   } else if (wizStep===3) {
     // Step 3：預算、住宿、希望景點
@@ -6086,13 +6239,13 @@ function renderWizard() {
       ${wizData.collabTripId ? `<div class="wizard-field"><div class="wiz-focus-avoid" style="background:#eef4ff;border-color:#cfe0f7;color:#2b4c6b">📍 想去的景點已在「成員偏好」設定（會綜合所有成員），這裡不再重複填寫。</div></div>` : `
       <div class="wizard-field">
         <label>希望去的景點 <span style="font-size:13px;color:#8fa4b8;font-weight:normal;">（選填，AI 會優先安排）</span></label>
-        <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value;updateDesiredSpotsWarning()">${wizData.desiredSpots||''}</textarea>
+        <textarea id="wizDesiredSpots" rows="3" placeholder="例：太麻里金針山、知本溫泉、多良車站…（可多個，逗號分隔）" oninput="wizData.desiredSpots=this.value;updateDesiredSpotsWarning();scheduleWizardPreviewRequest('desired-spots')">${wizData.desiredSpots||''}</textarea>
         <div id="wizDesiredWarn">${desiredSpotsWarningHtml(wizData.desiredSpots||'')}</div>
       </div>`}`;
   }
 
   // 興趣勾選事件（Step 1，交通 & 偏好合併頁）
-  if (wizStep === 1) {
+  if (wizStep === 2) {
     setTimeout(() => {
       const checkboxes = document.querySelectorAll('.wizard-check-pill input[type="checkbox"]');
       checkboxes.forEach(cb => {
@@ -6143,12 +6296,19 @@ function getSafeSlotMinutes(days, pace, people) {
 function updateWizardDays(value) {
   wizData.days = value;
   wizData.slotMinutes = getSafeSlotMinutes(value, wizData.pace || '平衡', wizData.people);
+  autoUpdateReturnDate();
   scheduleWizardPreviewRequest('step2-days');
   renderWizard();
 }
 
 // 切換「單日 / 兩天一夜」（本專案上限兩天一夜）
 function setTripDurationMode(mode) {
+  if (isLongTrip(wizData.days) !== (mode === 'multi') && wizData.customNodeTimes) {
+    // 單日與過夜預覽的相同索引代表不同天次，不能沿用舊的手動站點時間。
+    Object.keys(wizData.customNodeTimes).forEach((key) => {
+      if (key !== '0') delete wizData.customNodeTimes[key];
+    });
+  }
   if (mode === 'multi') {
     if (!wizData.day1Hours) wizData.day1Hours = 8;        // 第一天預設 8 小時
     if (!wizData.day2EndTime) wizData.day2EndTime = '12:00'; // 第二天預設玩到中午
@@ -6160,14 +6320,12 @@ function setTripDurationMode(mode) {
       : Math.min(12, Math.max(1, Math.round(parseDurationMinutes(wizData.days) / 60)));
     updateWizardDays(`${h}小時`);
   }
-  autoUpdateReturnDate();
 }
 
 // 單日：直接設定小時數（1–12）
 function setTripHours(h) {
   const hours = Math.min(12, Math.max(1, Math.round(h)));
   updateWizardDays(`${hours}小時`);
-  autoUpdateReturnDate();
 }
 
 // 單日：步進調整小時數
@@ -6198,6 +6356,8 @@ function setWizTripName(v) {
 function setDay1Hours(h) {
   wizData.day1Hours = Math.min(12, Math.max(1, Math.round(h)));
   wizData.slotMinutes = getSafeSlotMinutes(wizData.days, wizData.pace || '平衡', wizData.people);
+  if (reconcileDay2StartTime()) showToast('第二天出發時間已配合第一天結束時間調整', 'blue');
+  if (reconcilePreviewCustomTimes()) showToast('已重新調整超出第一天時間的預覽站點', 'blue');
   scheduleWizardPreviewRequest('step0-day1');
   renderWizard();
 }
@@ -6205,9 +6365,37 @@ function adjustDay1Hours(delta) {
   setDay1Hours((Number(wizData.day1Hours) || 8) + delta);
 }
 
+function setDay2StartTime(value) {
+  const selected = normalizeClockInput(value, '09:00');
+  const firstEnd = timeStringToMinutes(wizData.startTime || '09:00')
+    + (Number(wizData.day1Hours) || 8) * 60;
+  const selectedMinutes = 1440 + timeStringToMinutes(selected);
+  const secondEnd = 1440 + timeStringToMinutes(wizData.day2EndTime || '12:00');
+  if (selectedMinutes < firstEnd || selectedMinutes >= secondEnd) {
+    showToast('第二天出發時間須在第一天結束後、第二天返程前', 'orange');
+    return;
+  }
+  wizData.day2StartTime = selected;
+  const breakIndex = buildPreviewBaseTimes((wizData.previewTimes || []).length || 4, wizData).dayBreakIndex;
+  if (wizData.customNodeTimes && breakIndex >= 0) delete wizData.customNodeTimes[String(breakIndex)];
+  if (reconcilePreviewCustomTimes()) showToast('已重新調整超出第二天時間的預覽站點', 'blue');
+  scheduleWizardPreviewRequest('day2-start-time');
+  renderWizard();
+}
+function clearDay2StartTime() {
+  wizData.day2StartTime = '';
+  if (reconcilePreviewCustomTimes()) showToast('已重新調整第二天預覽站點時間', 'blue');
+  scheduleWizardPreviewRequest('day2-start-default');
+  renderWizard();
+}
+
 // 兩天一夜：第二天結束時間（玩到幾點）
 function setDay2EndTime(value) {
   wizData.day2EndTime = normalizeClockInput(value, '12:00');
+  if (reconcileDay2StartTime()) showToast('第二天出發時間已配合回程時間調整', 'blue');
+  const lastIndex = (wizData.previewTimes || []).length - 1;
+  if (lastIndex >= 0 && wizData.customNodeTimes) delete wizData.customNodeTimes[String(lastIndex)];
+  if (reconcilePreviewCustomTimes()) showToast('已重新調整超出第二天時間的預覽站點', 'blue');
   scheduleWizardPreviewRequest('step0-day2');
   renderWizard();
 }
@@ -6229,8 +6417,8 @@ function pickWizDepartureDate() {
     value: wizData.departureDate || '',
     min: waiLocalDateStr(),
     title: '設定出發日期',
-    onSet: function (v) { wizData.departureDate = v; autoUpdateReturnDate(); renderWizard(); },
-    onClear: function () { wizData.departureDate = ''; autoUpdateReturnDate(); renderWizard(); }
+    onSet: function (v) { wizData.departureDate = v; autoUpdateReturnDate(); renderWizard(); scheduleWizardPreviewRequest('step3-departure-date'); },
+    onClear: function () { wizData.departureDate = ''; wizData.returnDate = ''; renderWizard(); scheduleWizardPreviewRequest('step3-departure-date'); }
   });
 }
 function pickWizStartTime() {
@@ -6241,7 +6429,14 @@ function pickWizStartTime() {
     value: wizData.startTime || '09:00',
     min: minTime,
     title: '設定出發時間',
-    onSet: function (v) { wizData.startTime = v; renderWizard(); }
+    onSet: function (v) {
+      wizData.startTime = v;
+      if (reconcileDay2StartTime()) showToast('第二天出發時間已配合第一天結束時間調整', 'blue');
+      if (wizData.customNodeTimes) delete wizData.customNodeTimes['0'];
+      if (reconcilePreviewCustomTimes()) showToast('已重新調整超出遊玩時間的預覽站點', 'blue');
+      renderWizard();
+      scheduleWizardPreviewRequest('step3-start-time');
+    }
   });
 }
 function pickWizDay2EndTime(current) {
@@ -6252,10 +6447,19 @@ function pickWizDay2EndTime(current) {
     onSet: function (v) { setDay2EndTime(v); }
   });
 }
+function pickWizDay2StartTime() {
+  if (!window.WAIPicker) return;
+  WAIPicker.openTime({
+    value: getDay2StartTime(wizData, timeStringToMinutes(wizData.startTime || '09:00') + (Number(wizData.day1Hours) || 8) * 60),
+    title: '設定第二天出發時間',
+    onSet: function (v) { setDay2StartTime(v); }
+  });
+}
 function pickPreviewNodeTime(index, current) {
   if (!window.WAIPicker) return;
   WAIPicker.openTime({
-    value: current || '09:00',
+    // 滾輪選擇器只接受 HH:MM；「次日 09:00」直接傳入會跳回預設時刻。
+    value: minutesToTimeString(timeStringToMinutes(current || '09:00') % 1440),
     title: '設定時間',
     onSet: function (v) { updatePreviewNodeTime(index, v); }
   });
@@ -6301,7 +6505,7 @@ function toggleTripFocus() {
 }
 
 function syncWizardTimeOptionAvailability() {
-  if (wizStep !== 0) return;
+  if (wizStep !== 1) return;
   const daysSelect = document.getElementById('wizDays');
   if (!daysSelect) return;
 
@@ -6325,6 +6529,10 @@ function timeStringToMinutes(value) {
   let offset = 0;
   let text = source;
   if (text.startsWith('次日 ')) { offset = 24 * 60; text = text.slice(3); }
+  else {
+    const dayPrefix = /^第\s*(\d+)\s*天\s*/.exec(text);
+    if (dayPrefix) { offset = Math.max(0, Number(dayPrefix[1]) - 1) * 1440; text = text.slice(dayPrefix[0].length); }
+  }
   const match = text.match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return 9 * 60;
   const hour = Number(match[1]);
@@ -6364,8 +6572,14 @@ function buildAutoDelayedPreviewTimes(baseTimes, customTimes, minimumGapMinutes)
 
   return baseTimes.map((baseTime, index) => {
     const custom = customTimes ? customTimes[String(index)] : null;
-    const normalizedTime = normalizeClockInput(custom, baseTime);
-    let currentMinutes = timeStringToMinutes(normalizedTime);
+    // 多日預覽的自訂時間是時鐘值；保留該節點原本所屬的日子。
+    const baseDay = Math.floor(timeStringToMinutes(baseTime) / 1440);
+    const normalizedTime = custom
+      ? normalizeClockInput(custom, baseTime.replace(/^次日\s*/, ''))
+      : baseTime;
+    let currentMinutes = custom
+      ? baseDay * 1440 + timeStringToMinutes(normalizedTime)
+      : timeStringToMinutes(normalizedTime);
 
     if (previousMinutes !== null && currentMinutes <= previousMinutes) {
       currentMinutes = previousMinutes + gap;
@@ -6382,13 +6596,121 @@ function updatePreviewNodeTime(index, value) {
     wizData.customNodeTimes = {};
   }
   const normalized = normalizeClockInput(value, '09:00');
+  const multi = isLongTrip(wizData.days);
+  const lastIndex = (wizData.previewTimes || []).length - 1;
+  if (multi && lastIndex >= 1) {
+    const dayBreakIndex = buildPreviewBaseTimes(lastIndex + 1, wizData).dayBreakIndex;
+    if (index === dayBreakIndex) {
+      const firstEnd = timeStringToMinutes(wizData.startTime || '09:00')
+        + (Number(wizData.day1Hours) || 8) * 60;
+      const selected = 1440 + timeStringToMinutes(normalized);
+      const day2End = 1440 + timeStringToMinutes(wizData.day2EndTime || '12:00');
+      if (selected < firstEnd || selected >= day2End) {
+        showToast('第二天出發時間須在第一天結束後、第二天返程前', 'orange');
+        return;
+      }
+      setDay2StartTime(normalized);
+      return;
+    }
+  }
+  let adjustedLastTime = normalized;
+  if (multi && lastIndex >= 1) {
+    const baseTimes = buildPreviewBaseTimes(lastIndex + 1, wizData);
+    const tentative = { ...wizData.customNodeTimes, [key]: normalized };
+    const tentativeTimes = buildAutoDelayedPreviewTimes(baseTimes, tentative,
+      Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || '平衡'));
+    const firstEnd = timeStringToMinutes(wizData.startTime || '09:00')
+      + (Number(wizData.day1Hours) || 8) * 60;
+    const lastEnd = 1440 + timeStringToMinutes(wizData.day2EndTime || '12:00');
+    const firstDayOverruns = timeStringToMinutes(tentativeTimes[baseTimes.dayBreakIndex - 1]) > firstEnd;
+    const finalMinutes = timeStringToMinutes(tentativeTimes[lastIndex]);
+    if (firstDayOverruns || finalMinutes >= 2880 || (index !== lastIndex && finalMinutes > lastEnd)) {
+      showToast('預覽時間超過當日設定的結束時間，請先調整遊玩時數或回程時間', 'orange');
+      return;
+    }
+    if (index === lastIndex) adjustedLastTime = minutesToTimeString(finalMinutes).replace(/^次日\s*/, '');
+  }
   wizData.customNodeTimes[key] = normalized;
   // ★ 第一個節點的時間「就是」出發時間。customNodeTimes 只活在精靈的暫存狀態裡，
   //   存檔時（newTrip.wizardData）沒有帶走，於是使用者在預覽改成 14:00、生成出來
   //   仍從 startTime 的 09:00 開始——這是實測回報的「預覽與保存後時間不同」。
   //   同步寫回 startTime 後，摘要列、結束時間、送去生成的 prompt 與存檔會一起跟上。
   if (index === 0) wizData.startTime = normalized;
-  renderFlowPreview();
+  if (multi && index === lastIndex) {
+    wizData.day2EndTime = adjustedLastTime;
+  }
+  if (index === 0 || (multi && index === lastIndex)) {
+    renderWizard();
+    scheduleWizardPreviewRequest(index === 0 ? 'preview-start-time' : 'preview-day2-end-time');
+  } else {
+    renderFlowPreview();
+  }
+}
+
+function buildPreviewBaseTimes(stopCount, wizardData) {
+  const count = Math.max(2, stopCount);
+  const start = timeStringToMinutes(normalizeClockInput(wizardData.startTime, '09:00'));
+  if (!isLongTrip(wizardData.days)) {
+    const duration = parseDurationMinutes(wizardData.days);
+    return Array.from({ length: count }, (_, i) =>
+      minutesToTimeString(start + Math.floor(duration * i / (count - 1))));
+  }
+
+  const firstHours = Math.min(12, Math.max(1, Math.round(Number(wizardData.day1Hours) || 8)));
+  const lastEnd = timeStringToMinutes(normalizeClockInput(wizardData.day2EndTime, '12:00'));
+  // 第二天重新開始，不把過夜時段當成連續遊玩時間。若回程在 09:00 前，
+  // 至少保留一小時供第二天的示意站點分配。
+  const secondStart = timeStringToMinutes(getDay2StartTime(wizardData, start + firstHours * 60));
+  const secondDuration = Math.max(0, lastEnd - secondStart);
+  const firstCount = count === 2 ? 1 : Math.max(2, Math.min(count - (count >= 4 ? 2 : 1),
+    Math.round(count * firstHours * 60 / (firstHours * 60 + secondDuration))));
+  const times = Array.from({ length: count }, (_, i) => {
+    if (i < firstCount) {
+      return minutesToTimeString(start + (firstCount === 1 ? 0 : Math.floor(firstHours * 60 * i / (firstCount - 1))));
+    }
+    const secondIndex = i - firstCount;
+    const secondCount = count - firstCount;
+    const minutes = secondStart + (secondCount === 1
+      ? secondDuration
+      : Math.floor(secondDuration * secondIndex / (secondCount - 1)));
+    return minutesToTimeString(1440 + minutes);
+  });
+  times.dayBreakIndex = firstCount;
+  return times;
+}
+
+function reconcilePreviewCustomTimes() {
+  if (!isLongTrip(wizData.days) || !wizData.customNodeTimes) return false;
+  const count = (wizData.previewTimes || []).length;
+  if (count < 2) return false;
+  const baseTimes = buildPreviewBaseTimes(count, wizData);
+  let changed = false;
+  const oldBreak = Number(wizData.previewDayBreakIndex);
+  if (Number.isInteger(oldBreak) && oldBreak > 0 && oldBreak !== baseTimes.dayBreakIndex) {
+    for (let i = Math.min(oldBreak, baseTimes.dayBreakIndex); i < Math.max(oldBreak, baseTimes.dayBreakIndex); i++) {
+      if (Object.prototype.hasOwnProperty.call(wizData.customNodeTimes, String(i))) {
+        delete wizData.customNodeTimes[String(i)];
+        changed = true;
+      }
+    }
+  }
+  const firstEnd = timeStringToMinutes(wizData.startTime || '09:00')
+    + (Number(wizData.day1Hours) || 8) * 60;
+  const lastEnd = 1440 + timeStringToMinutes(wizData.day2EndTime || '12:00');
+  const gap = Number(wizData.slotMinutes) || getDefaultSlotMinutes(wizData.pace || '平衡');
+  for (let attempt = 0; attempt < count; attempt++) {
+    const times = buildAutoDelayedPreviewTimes(baseTimes, wizData.customNodeTimes, gap);
+    const firstOverflow = timeStringToMinutes(times[baseTimes.dayBreakIndex - 1]) > firstEnd;
+    const lastOverflow = timeStringToMinutes(times[count - 1]) > lastEnd;
+    if (!firstOverflow && !lastOverflow) break;
+    const candidates = Object.keys(wizData.customNodeTimes)
+      .map(Number).filter((i) => i > 0 && i < count
+        && (firstOverflow ? i < baseTimes.dayBreakIndex : i >= baseTimes.dayBreakIndex));
+    if (!candidates.length) break;
+    delete wizData.customNodeTimes[String(Math.max(...candidates))];
+    changed = true;
+  }
+  return changed;
 }
 
 function buildInterestDrivenStops(dest, interests = [], pace = '平衡', startLocation = '', endLocation = '') {
@@ -6453,18 +6775,14 @@ function renderFlowPreview() {
   const defaultHub = getDefaultTransitHub(dest);
   const allStops = buildInterestDrivenStops(dest, interests, pace, wizData.startLocation || defaultHub, wizData.endLocation || defaultHub);
   const stopCount = clampPreviewStopsByDuration(days, wizData.people);
-  const durationMinutes = getPreviewDurationMinutes(days);
   const previewStops = allStops.slice(0, Math.max(2, stopCount));
 
-  const baseMinutes = timeStringToMinutes(startTime);
   const previewStopCount = previewStops.length;
   const maxSlotMinutes = getMaxSlotMinutes(days, previewStopCount);
   let effectiveSlotMinutes = Math.min(slotMinutes, maxSlotMinutes);
   wizData.slotMinutes = effectiveSlotMinutes;
-  const displaySlotMinutes = previewStops.length > 1
-    ? Math.floor(durationMinutes / (previewStops.length - 1))
-    : durationMinutes;
-  const baseTimes = previewStops.map((_, index) => minutesToTimeString(baseMinutes + displaySlotMinutes * index));
+  const baseTimes = buildPreviewBaseTimes(previewStopCount, wizData);
+  wizData.previewDayBreakIndex = baseTimes.dayBreakIndex ?? -1;
 
   if (!wizData.customNodeTimes || typeof wizData.customNodeTimes !== 'object') {
     wizData.customNodeTimes = {};
@@ -6478,14 +6796,16 @@ function renderFlowPreview() {
 
   const times = buildAutoDelayedPreviewTimes(baseTimes, wizData.customNodeTimes, effectiveSlotMinutes);
   wizData.previewTimes = times;
+  const secondDayIndex = baseTimes.dayBreakIndex ?? -1;
 
   document.getElementById('flowNodes').innerHTML = previewStops.map((spot, i) => `
-    <div class="wizard-node">
+    ${i === secondDayIndex ? '<div class="wizard-day-break"><span>🌙 過夜</span><strong>第 2 天</strong></div>' : ''}
+    <div class="wizard-node${i === secondDayIndex - 1 ? ' wizard-node-day-end' : ''}">
       <div class="wizard-node-top">
-        <h4 class="wizard-node-title">🧭 ${spot.title}</h4>
-        <div class="wizard-node-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;" onclick="pickPreviewNodeTime(${i}, '${times[i]}')">${times[i]}<span style="font-size:13px;opacity:.6;">🕒</span></div>
+        <h4 class="wizard-node-title">🧭 ${escapeHtml(spot.title)}</h4>
+        <div class="wizard-node-time-input" style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap;" onclick="pickPreviewNodeTime(${i}, '${times[i]}')">${times[i]}<span style="font-size:13px;opacity:.6;">🕒</span></div>
       </div>
-      <p class="wizard-node-desc">${spot.desc}</p>
+      <p class="wizard-node-desc">${escapeHtml(spot.desc)}</p>
     </div>
   `).join('') + `
     <p class="wizard-node-desc" style="margin-top:10px;opacity:.75;">
@@ -6493,7 +6813,9 @@ function renderFlowPreview() {
     </p>
   `;
 
-  const endTime = calcTripEndTime(startTime, days);
+  const endTime = isLongTrip(days)
+    ? normalizeClockInput(wizData.day2EndTime, '12:00')
+    : calcTripEndTime(startTime, days);
   const interestSummary = interests.length ? interests.join('、') : '多元探索';
   const effectiveHub = getDefaultTransitHub(dest);
   const effectiveStart = wizData.startLocation || effectiveHub;
@@ -6502,8 +6824,15 @@ function renderFlowPreview() {
   const endLocSummary = effectiveStart !== effectiveEnd ? `結束：${effectiveEnd}` : '';
   const locationSummary = [startLocSummary, endLocSummary].filter(Boolean).join('，');
   const peopleStr = wizData.people === '1人' ? '獨旅' : `${wizData.people || '2人'}人同行`;
-  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${peopleStr}，時間 ${startTime} - ${endTime}（${pace}節奏，每站間距 ${effectiveSlotMinutes} 分鐘），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
+  const secondStartTime = getDay2StartTime(wizData,
+    timeStringToMinutes(startTime) + (Number(wizData.day1Hours) || 8) * 60);
+  const timeSummary = isLongTrip(days)
+    ? `第一天 ${startTime}–${minutesToTimeString(timeStringToMinutes(startTime) + (Number(wizData.day1Hours) || 8) * 60)}、第二天約 ${secondStartTime}–${endTime}`
+    : `${startTime} - ${endTime}`;
+  document.getElementById('flowSummary').textContent = `以「${theme}」風格生成，${peopleStr}，時間 ${timeSummary}（${pace}節奏），重點偏好：${interestSummary}。${locationSummary ? ' ' + locationSummary + '。' : ''}`;
   updateFlowParkingNote();
+  const cachedPreview = getCachedWizardPreviewPlan();
+  if (cachedPreview && !Object.keys(wizData.customNodeTimes).length) renderAiSkeletonPreview(cachedPreview);
 }
 
 function onDestInput(val) {
@@ -6544,6 +6873,7 @@ function selectTheme(theme) {
 function selectTransport(mode) {
   const valid = ['taxi', 'scooter', 'car'];
   wizData.transportMode = valid.includes(mode) ? mode : 'car';
+  scheduleWizardPreviewRequest('transport-mode');
   renderFlowPreview();
   renderWizard();
 }
@@ -6561,10 +6891,14 @@ function autoUpdateReturnDate() {
 function wizNext() {
   if (isGeneratingTrip) { showToast('正在生成行程中，請稍候…', 'orange'); return; }
   if (wizStep===0 && !wizData.dest && !wizData.destCustom) { showToast('請選擇或輸入目的地', 'orange'); return; }
-  // Step 3（出發日期 & 時間）：必須先選好出發日期才能進下一步
+  if (!hasValidMultiDayWindow(wizData)) {
+    showToast('第一天結束時間與第二天回程時間重疊，請調整出發時間、第一天時數或第二天結束時間', 'orange');
+    return;
+  }
+  // Step 2（出發日期 & 時間）：必須先選好出發日期才能進下一步
   // toast 會自己消失，消失後畫面上沒有任何線索說是哪一欄出錯——
   // 錯誤要留在欄位旁邊，並把焦點帶過去。
-  if (wizStep===2 && !wizData.departureDate) {
+  if (wizStep===1 && !wizData.departureDate) {
     const err = document.getElementById('wizDepartureDateErr');
     const field = document.getElementById('wizDepartureDateField');
     if (err) err.hidden = false;
@@ -6572,8 +6906,8 @@ function wizNext() {
     showToast('請先選擇出發日期', 'orange');
     return;
   }
-  // Step 3：有出發日期但回程日期空，自動推算
-  if (wizStep===2 && wizData.departureDate && !wizData.returnDate) autoUpdateReturnDate();
+  // Step 2：有出發日期但回程日期空，自動推算
+  if (wizStep===1 && wizData.departureDate && !wizData.returnDate) autoUpdateReturnDate();
   if (wizStep===WIZ_TOTAL-1) { finishWizard(); return; }
   wizStep++; renderWizard();
 }
@@ -6837,7 +7171,7 @@ async function finishWizard() {
       budget: wizData.budget || '',
       accommodation: isLongTrip(days) ? (wizData.accommodation || '飯店') : '',
       lodgingName: isLongTrip(days) ? String(wizData.lodgingName || '').trim().slice(0, 60) : '',
-      ...(isLongTrip(days) ? { day1Hours: wizData.day1Hours || 8, day2EndTime: wizData.day2EndTime || '12:00' } : {}),
+      ...(isLongTrip(days) ? { day1Hours: wizData.day1Hours || 8, day2StartTime: wizData.day2StartTime || '', day2EndTime: wizData.day2EndTime || '12:00' } : {}),
       desiredSpots: (wizData.desiredSpots || '').trim()
     },
     stops: []

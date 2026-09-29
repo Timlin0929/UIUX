@@ -288,6 +288,11 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-modal{background:linear-gradient(135deg,#fff4de 0%,#e9f8f4 100%);border-radius:24px;width:100%;max-width:1000px;max-height:90vh;overflow:hidden;box-shadow:0 16px 44px rgba(25,32,45,.12);transform:translateY(20px);transition:transform .3s;display:flex;flex-direction:column;}
 .overlay.open .wizard-modal{transform:translateY(0);}
 .wizard-header{padding:32px 28px;display:flex;align-items:flex-end;justify-content:space-between;gap:20px;border-bottom:1px solid rgba(255,255,255,.68);}
+.wizard-preview-status{display:flex;align-items:center;gap:9px;padding:11px 24px;border-bottom:1px solid #bfe6d5;background:#e8fff5;color:#176747;font-size:15px;font-weight:800;line-height:1.45;text-wrap:pretty;box-shadow:0 5px 16px rgba(18,111,78,.1);}
+.wizard-preview-status::before{content:"✨";flex:none;font-size:17px;}
+.wizard-preview-status[data-state="done"]{background:#eaf5ff;border-bottom-color:#c9dff4;color:#295f91;}
+.wizard-preview-status[data-state="error"]{background:#fff4ec;border-bottom-color:#ffd3bd;color:#914a2a;}
+.wizard-preview-status[hidden]{display:none;}
 .wizard-hero{flex:1;}
 .wizard-title{font-family:'DM Serif Display',serif;font-size:34px;line-height:1.2;margin:0 0 8px;color:#173648;}
 .wizard-sub{font-size:17px;color:#3d4b56;margin:0;}
@@ -380,6 +385,9 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--ink)
 .wizard-node:nth-child(5){animation-delay:.3s;}
 @keyframes fadeNode{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:translateY(0);}}
 .wizard-node:not(:last-child)::after{content:"";position:absolute;left:50%;transform:translateX(-50%);bottom:-12px;width:2px;height:12px;background:linear-gradient(180deg,#7cbde3 0%,#d9ecf9 100%);}
+.wizard-node-day-end::after{display:none;}
+.wizard-day-break{display:flex;align-items:center;justify-content:center;gap:8px;margin:5px 0;padding:7px 10px;border-radius:999px;background:#edf5fd;color:#37587b;font-size:14px;white-space:nowrap;}
+.wizard-day-break strong{font-weight:800;}
 .wizard-node-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;gap:8px;}
 .wizard-node-time{font-size:14px;font-weight:800;color:#576071;background:#f1f5fa;border-radius:999px;padding:3px 9px;}
 .wizard-node-time-input{
@@ -975,6 +983,7 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
   /* 建立行程精靈：改單欄、步驟兩排、內距收斂 */
   .wizard-modal{max-width:100%;max-height:94vh;border-radius:18px;}
   .wizard-header{padding:20px 18px;}
+  .wizard-preview-status{padding:10px 16px;font-size:14px;}
   .wizard-title{font-size:26px;}
   .wizard-sub{font-size:14px;}
   .wizard-badge{font-size:13px;padding:6px 12px;}
@@ -989,6 +998,10 @@ button:focus-visible,.filter-tab:focus-visible,.tc-preview-btn:focus-visible{out
   .wizard-btn{min-height:46px;font-size:16px;padding:12px 16px;}
   .wizard-flow-wrap{padding:16px;min-height:auto;}
   .wizard-flow-title{font-size:26px;}
+  .wizard-field .wai-dt-field{min-height:48px;box-sizing:border-box;}
+  .wizard-node-top{align-items:flex-start;}
+  .wizard-node-title{min-width:0;font-size:17px;line-height:1.35;overflow-wrap:break-word;line-break:strict;text-wrap:pretty;}
+  .wizard-node-time-input{flex:none;min-width:0;font-size:13px;}
   /* 表單被壓扁：panel 的 overflow:hidden 讓 grid 列可縮到 0，表單區只剩 32px 高的捲動框，
      第 1 步的目的地／人數／時間全被藏起來。改由整個 wizard-body 捲動，panel 用 clip
      （保留圓角裁切、但不成為捲動容器，底下的 sticky「下一步」才黏得住 body 底部）。 */
