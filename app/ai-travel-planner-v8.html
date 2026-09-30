@@ -9,13 +9,27 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Noto+Serif+TC:wght@500;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260929-places2">
+<link rel="stylesheet" href="./ai-travel-planner-v8.css?v=20260930-mapctl1">
 <link rel="stylesheet" href="./design-tokens.css?v=20260727-fix3">
 <link rel="stylesheet" href="./trip-photo-gallery.css?v=20260922-gallery1">
 <script src="./icons.js?v=20260727-fix3"></script>
 <script src="./ui-feedback.js?v=20260727-fix3"></script>
 <script src="./cost-tracking.js?v=20260929-dailyusage1"></script>
 <script src="./business-hours.js?v=20260922-access1"></script>
+<script>
+  // header 的按鈕（第 30 行起）一解析完就能點，但實作它們的 ai-travel-planner-v8.js
+  // 約 1MB、掛在 </body> 前 —— 中間的空窗期點下去是 ReferenceError，而且 inline onclick
+  // 的錯誤不會有任何畫面回饋，使用者只會看到「按了沒反應」。
+  // 這裡先擺同名佔位函式接住那一次點擊，主 JS 載入後由檔尾的 flush 補做。
+  (function () {
+    function queue(name, arg) { window.__waiPendingHeaderAction = { name: name, arg: arg }; }
+    function placeholder(fn) { fn.__waiPlaceholder = true; return fn; }
+    // __waiPlaceholder 讓檔尾的 flush 認得「這顆還沒被真正的實作覆蓋掉」，避免自己呼叫自己。
+    window.switchView = placeholder(function (viewId) { queue('switchView', viewId); });
+    window.toggleAI = placeholder(function () { queue('toggleAI'); });
+    window.openLogin = placeholder(function () { queue('openLogin'); });
+  })();
+</script>
 </head>
 <body>
 
@@ -78,7 +92,6 @@
             <button class="replan-btn secondary" id="replanStartBtn" onclick="replanWithAI()">重新規劃</button>
             <button class="replan-btn maps-route-btn" onclick="openFullTripNavigation()" title="以 Google Maps 開啟整趟路線" aria-label="以 Google Maps 開啟整趟路線（新分頁）">🗺 Google Maps 路線 <span aria-hidden="true">↗</span></button>
             <button class="replan-btn secondary" onclick="openMapShareDialog()" title="分享整趟 Google Maps 路線">📤 分享地圖</button>
-            <button class="replan-btn secondary" onclick="openTravelTools('import')">網址匯入</button>
             <button class="replan-btn secondary" onclick="openTravelTools('export')">匯出行程圖</button>
           </span>
           <button class="replan-btn secondary" id="heroMoreBtn" onclick="toggleHeroMore()" aria-label="更多行程操作" aria-controls="heroMoreGroup" aria-haspopup="menu" aria-expanded="false"><svg class="wai-icon" aria-hidden="true"><use href="#wai-more-horizontal"></use></svg> 更多</button>
@@ -471,15 +484,14 @@
   <div class="travel-tools-modal" onclick="event.stopPropagation()">
     <div class="travel-tools-head">
       <div>
-        <div class="travel-tools-title" id="travelToolsTitle">旅遊工具</div>
-        <div class="travel-tools-subtitle" id="travelToolsSubtitle">網址匯入與行程匯出都放在這裡。</div>
+        <div class="travel-tools-title" id="travelToolsTitle">匯出行程圖</div>
+        <div class="travel-tools-subtitle" id="travelToolsSubtitle">把目前行程輸出成可分享的圖檔與邀請碼。</div>
       </div>
       <button class="travel-tools-close" onclick="closeTravelTools()" aria-label="關閉旅遊工具">✕</button>
     </div>
-    <div class="travel-tools-tabs">
-      <button class="travel-tools-tab active" id="travelToolsTabImport" onclick="setTravelToolTab('import')">網址匯入</button>
-      <button class="travel-tools-tab" id="travelToolsTabExport" onclick="setTravelToolTab('export')">匯出行程圖</button>
-    </div>
+    <!-- 「網址匯入」已移除（實用性不足）。原本這裡是「網址匯入／匯出行程圖」兩個分頁，
+         現在只剩匯出一種用途，分頁列就沒有意義了，整列拿掉。
+         ⚠️ 若日後要加回分頁，記得 renderTravelTools() 的 guard 會檢查這些元素是否存在。 -->
     <div class="travel-tools-body" id="travelToolsBody"></div>
   </div>
 </div>
@@ -610,7 +622,7 @@
 <script src="./trip-photo-manager.js?v=20260928-order1"></script>
 <script src="./trip-photo-sync.js?v=20260927-ownfile1"></script>
 <script src="./trip-photo-gallery.js?v=20260927-labels1"></script>
-<script src="./ai-travel-planner-v8.js?v=20260929-places2"></script>
+<script src="./ai-travel-planner-v8.js?v=20260930-stagefollow1"></script>
 <script>
   // 動態載入 Google Maps：金鑰統一由 weather.env.js 的 TRAVEL_APP_CONFIG 提供，
   // 避免在頁面硬編金鑰（先前硬編的舊金鑰已失效，導致 InvalidKeyMapError）。

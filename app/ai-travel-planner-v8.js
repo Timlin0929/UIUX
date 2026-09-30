@@ -65,7 +65,8 @@
   let selectedModifySpotId = null;
   let selectedModifyStartTime = '';
   let selectedModifyEndTime = '';
-  let activeTravelToolTab = 'import';
+  // 「網址匯入」已移除 UI 入口，初始分頁改為 export（原本是 'import'）
+  let activeTravelToolTab = 'export';
   let importedTravelResult = null;
   let importedTravelPinId = null;
   let importedTravelDraft = '';
@@ -1303,6 +1304,92 @@
     });
   }
 
+  // ── 「回到我的位置」按鈕 ─────────────────────────────────────────
+  // 掛成 Maps 自訂控制項（而不是自己在 .map-panel 疊一顆絕對定位的 div）：
+  // 控制項活在地圖內部，所以桌機／平板／手機三種版面都自動跟著地圖走，
+  // 不必為每個斷點各寫一份定位與 z-index。位置選 RIGHT_BOTTOM，和縮放鍵同一欄。
+  let locateControlBtn = null;
+
+  async function locateMeOnMap(btn) {
+    if (!map) return;
+    if (btn) { btn.disabled = true; btn.classList.add('locating'); }
+    try {
+      const pos = await getCurrentPositionOnce(10000);
+      if (!pos || !pos.ok) {
+        // 分開講原因：使用者對「拒絕權限」和「收不到訊號」能做的事完全不同
+        const msg = pos && pos.reason === 'denied'
+          ? '定位權限被拒絕，請點網址列的鎖頭圖示開啟位置權限'
+          : pos && pos.reason === 'unsupported' ? '這個瀏覽器不支援定位'
+          : pos && pos.reason === 'unavailable' ? '目前收不到定位訊號'
+          : '定位逾時，移到空曠處或靠窗再試一次';
+        feedbackToast(msg, 'orange');
+        return;
+      }
+      updateUserLocationMarker(pos);
+      bumpMapFocus(); // 使用者主動按的：這是新的焦點意圖，別被稍後的路線重繪拉回去
+      map.panTo({ lat: pos.lat, lng: pos.lng });
+      const z = map.getZoom();
+      if (!Number.isFinite(z) || z < 16) map.setZoom(16);
+    } finally {
+      if (btn) { btn.disabled = false; btn.classList.remove('locating'); }
+    }
+  }
+
+  function createLocateControl() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'map-locate-btn';
+    btn.title = '回到我的位置';
+    btn.setAttribute('aria-label', '回到我的位置');
+    // 十字準心：和多數地圖 App 的定位鍵一致，不另外造一個使用者要重新學的圖示
+    btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+      + '<circle cx="12" cy="12" r="3.2"></circle>'
+      + '<path d="M12 1.6v3.2M12 19.2v3.2M1.6 12h3.2M19.2 12h3.2"></path>'
+      + '<circle cx="12" cy="12" r="7.4" fill="none"></circle>'
+      + '</svg>';
+    btn.addEventListener('click', () => locateMeOnMap(btn));
+    return btn;
+  }
+
+  function mountLocateControl() {
+    if (!map || !window.google || !google.maps || locateControlBtn) return;
+    locateControlBtn = createLocateControl();
+    map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(locateControlBtn);
+    syncMapControlPosition();
+  }
+
+  // 手機地圖模式下，底部那條切換列（約 58px 高）會壓在地圖上，
+  // 而 RIGHT_BOTTOM 的控制欄剛好落在它下面——實測「縮小」鍵整顆被蓋住點不到
+  // （放大 795–835 可點；縮小 836–876 的點擊被 .mobile-switch-btn 接走）。
+  // 解法是換控制項的位置，而不是用 !important 去壓 Google 的行內樣式：
+  // 那些 bottom/right 是 Maps 自己算出來寫進 style 的，硬蓋等於賭它不改版。
+  let _mapControlPos = null;
+
+  function syncMapControlPosition() {
+    if (!map || !window.google || !google.maps || !google.maps.ControlPosition) return;
+    const CP = google.maps.ControlPosition;
+    const mobileMap = document.body.classList.contains('mobile-mode-map');
+    const pos = mobileMap ? CP.RIGHT_CENTER : CP.RIGHT_BOTTOM;
+    if (_mapControlPos === pos) return;
+    _mapControlPos = pos;
+
+    // 內建縮放鍵：走官方 options，Maps 會自己重排
+    map.setOptions({ zoomControlOptions: { position: pos } });
+
+    // 自訂控制項不會跟著 options 搬，要自己從舊陣列移除再 push 到新位置，
+    // 否則會在兩個角落各留一顆。
+    if (locateControlBtn) {
+      [CP.RIGHT_BOTTOM, CP.RIGHT_CENTER].forEach((p) => {
+        const arr = map.controls[p];
+        if (!arr || typeof arr.getLength !== 'function') return;
+        for (let i = arr.getLength() - 1; i >= 0; i--) {
+          if (arr.getAt(i) === locateControlBtn) arr.removeAt(i);
+        }
+      });
+      map.controls[pos].push(locateControlBtn);
+    }
+  }
+
   // 站點座標讀取，優先序同共編快照（鎖定座標 → 已解析座標 → 頂層 lat/lng）
   function getStopLatLng(stop) {
     if (!stop) return null;
@@ -1524,6 +1611,7 @@
       mapTypeControl: false,
       streetViewControl: false,
       fullscreenControl: false,
+      cameraControl: false,
       clickableIcons: false,
       gestureHandling: 'greedy'
     });
@@ -1953,8 +2041,28 @@
     // D6：前往此站那段若套用了替代路線，帶一個途經點讓 Google Maps 走同一條
     const via = idx > 0 ? appliedRouteVia(stageIndexForLegIntoStop(idx)) : null;
     const wp = via ? `&waypoints=${encodeURIComponent(via.lat + ',' + via.lng)}` : '';
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${pos.lat},${pos.lng}${wp}&travelmode=${travelmode}`;
+
+    // 開車／機車時導到停車場，而不是景點本身。
+    // 原本一律用景點座標，於是畫面說「停在 ◯◯停車場、走 N 分鐘到景點」，
+    // 按下導航卻把人載到景點門口——那裡通常正是不能停車的地方，兩邊對不起來。
+    // 只有 car／scooter 才需要停車；走路不用，計程車是司機放人也不用
+    // （taxi 段 resolveParkingForStages 本來就不解析、值會是 null，但這裡仍明確判斷，不依賴那個巧合）。
+    const needsParking = (prevMode === 'car' || prevMode === 'scooter');
+    const parking = needsParking ? _parkingByStopIndex[idx] : null;
+    const dest = (parking && Number.isFinite(Number(parking.lat)) && Number.isFinite(Number(parking.lng)))
+      ? { lat: Number(parking.lat), lng: Number(parking.lng), name: parking.name || '停車場' }
+      : null;
+    const target = dest || pos;
+
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${target.lat},${target.lng}${wp}&travelmode=${travelmode}`;
     window.open(url, '_blank', 'noopener');
+
+    // 導航目的地和卡片上的站名不一樣，不說一聲使用者會以為按錯了。
+    if (dest) {
+      const walkMin = Number(stop.parkWalkMin);
+      const tail = Number.isFinite(walkMin) && walkMin > 0 ? `，停好後步行約 ${walkMin} 分鐘到${shortStopName(stop.name || '景點')}` : '';
+      feedbackToast(`導航至「${dest.name}」${tail}`, 'green');
+    }
   }
 
   // ── 整趟導航：一次把所有站串成 Google Maps 多點路線（起點→中停點→終點）──
@@ -4158,7 +4266,7 @@
       ? `${currentTripWindow.start} – ${currentTripWindow.end}`
       : '待設定';
     const stopSummary = schedule.map((stop) => `${minutesToClock(stop.start)} ${stop.name}`).join('\n');
-    return `嗨！我用 TravelLinkAI 規劃了「${tripTitle}」✨\n\n邀請碼【 ${inviteCode} 】\n時間：${timeRange}\n\n行程摘要：\n${stopSummary || '目前尚未加入任何停靠點'}\n\n加入後可以一起共編、匯入網址與分享行程圖。`;
+    return `嗨！我用 TravelLinkAI 規劃了「${tripTitle}」✨\n\n邀請碼【 ${inviteCode} 】\n時間：${timeRange}\n\n行程摘要：\n${stopSummary || '目前尚未加入任何停靠點'}\n\n加入後可以一起共編並分享行程圖。`;
   }
 
   function parseImportWindow(text) {
@@ -5122,7 +5230,8 @@
     feedbackToast(val ? '📝 備註已儲存' : '備註已清除', 'green');
   }
 
-  // UIUX#6：手機版把「網址匯入／匯出行程圖」收進「⋯ 更多」浮出選單（桌機兩鈕直出、更多鈕隱藏）
+  // UIUX#6：手機版把次要行程操作收進「⋯ 更多」浮出選單（桌機直出、更多鈕隱藏）
+  // （原本這裡寫「網址匯入／匯出行程圖」兩鈕，網址匯入已移除，只剩匯出行程圖）
   function toggleHeroMore() {
     const g = document.getElementById('heroMoreGroup');
     const btn = document.getElementById('heroMoreBtn');
@@ -7614,7 +7723,9 @@
     }
   }
 
-  function openTravelTools(tab = 'import') {
+  // 預設分頁原本是 'import'；「網址匯入」移除後改為 'export'，
+  // 否則從其他入口不帶參數呼叫時會指向一個已不存在的分頁。
+  function openTravelTools(tab = 'export') {
     activeTravelToolTab = tab;
     const overlay = document.getElementById('travelToolsOverlay');
     if (overlay) {
@@ -7639,24 +7750,23 @@
     const titleEl = document.getElementById('travelToolsTitle');
     const subtitleEl = document.getElementById('travelToolsSubtitle');
     const bodyEl = document.getElementById('travelToolsBody');
-    const importTab = document.getElementById('travelToolsTabImport');
-    const exportTab = document.getElementById('travelToolsTabExport');
-    if (!bodyEl || !importTab || !exportTab) return;
-
-    importTab.classList.toggle('active', activeTravelToolTab === 'import');
-    exportTab.classList.toggle('active', activeTravelToolTab === 'export');
+    // ⚠️ 這裡原本還檢查 travelToolsTabImport / travelToolsTabExport 是否存在，
+    // 但「網址匯入」移除後分頁列整個拿掉了，若沿用舊 guard 會提早 return，
+    // 連「匯出行程圖」都一起變成空白面板。只檢查真正要用的 bodyEl。
+    if (!bodyEl) return;
 
     if (titleEl) {
-      titleEl.textContent = activeTravelToolTab === 'export' ? '匯出行程圖' : (activeTravelToolTab === 'join' ? '流程碼進入' : '網址匯入');
+      titleEl.textContent = activeTravelToolTab === 'join' ? '流程碼進入' : '匯出行程圖';
     }
     if (subtitleEl) {
-      subtitleEl.textContent = activeTravelToolTab === 'export'
-        ? '把目前行程輸出成可分享的圖檔與邀請碼。'
-        : (activeTravelToolTab === 'join'
-          ? '手機端直接輸入流程碼，就能進入旅遊中的使用者介面。'
-          : '貼上台東食記或店家網址，AI 會先做內容解析與相容性檢查。');
+      subtitleEl.textContent = activeTravelToolTab === 'join'
+        ? '手機端直接輸入流程碼，就能進入旅遊中的使用者介面。'
+        : '把目前行程輸出成可分享的圖檔與邀請碼。';
     }
 
+    // ⚠️ 目前無法進入這個分支：「網址匯入」的 UI 入口（hero 按鈕、分頁列、空狀態卡）
+    // 都已移除，activeTravelToolTab 不會再是 'import'。底層解析函式也一併保留著沒刪，
+    // 所以要復原只需把入口加回來。若確定不再需要，可連同 parseImportedTravel* 一起清掉。
     if (activeTravelToolTab === 'import') {
       const existingValue = importedTravelDraft || '';
       const result = importedTravelResult;
@@ -11159,10 +11269,10 @@
         <div class="voice-guide-card">
           <div class="voice-guide-meta">
             <div class="voice-guide-title">🗺️ 尚未載入行程</div>
-            <div class="voice-guide-sub" id="voiceGuideStatus">匯入網址、加入邀請碼，或進入重新規劃後新增第一個停靠點。</div>
+            <div class="voice-guide-sub" id="voiceGuideStatus">加入邀請碼，或進入重新規劃後新增第一個停靠點。</div>
           </div>
           <div class="voice-guide-actions">
-            <button class="voice-btn play" onclick="openTravelTools('import')">匯入行程</button>
+            <!-- 「匯入行程」（openTravelTools('import')）已隨網址匯入功能一併移除 -->
             <button class="voice-btn stop" onclick="enterReplanMode()">新增停靠點</button>
           </div>
         </div>
@@ -11432,13 +11542,16 @@
         // nextStop 是 schedule 的項目，不是 replanStops 的元素——用 indexOf 會永遠拿到 -1。
         // schedule 由 buildReplanSchedule 依序產生，與 replanStops 是 1:1，直接用索引對應。
         const farParking = _nearestFarParkingByStopIndex[index + 1];
+        // 名稱是通用詞、或遠到不值得提（例如實測過的 140 分鐘）時回 null，改印下面的中性訊息
+        const farParkingText = describeNearestFarParking(farParking);
         const systemWarnText = (routeInfo && routeInfo.parkingSearched && routeInfo.parkingFound === false)
-          ? (farParking
-            ? `🅿️ 目的地停車：最近是「${farParking.name}」，停好後步行約 ${Math.max(1, Math.round(farParking.walkSeconds / 60))} 分鐘。`
+          ? (farParkingText
+            ? `🅿️ 目的地停車：${farParkingText}。`
             // 「查不到資料」≠「沒有停車場」。台東鄉鎮景點多半有自己的停車空間，
-            // 只是沒被登錄成 Google 的停車場 POI、也不在縣府那 30 筆路外停車場名單裡。
-            // 原本的寫法等於替現場下結論，而且幾乎每一站都跳，久了使用者就整排略過。
-            : 'ℹ️ 目的地停車：尚未取得這一站的停車場資料（不代表沒有），建議預留找車位的時間。')
+            // 只是沒被登錄成 Google 的停車場 POI、也不在縣府那份路外停車場名單裡。
+            // 所以講「尚無附近停車資訊」而不是「沒有停車場」——前者講的是我們的資料狀態，
+            // 後者是替現場下結論。原句還多一層「（不代表沒有）」的但書，繞口又佔版面。
+            : 'ℹ️ 目的地停車：尚無附近停車資訊，請預留找車位的時間。')
           : '';
         // 有人回報「我停好了」（found）就不顯示任何警告，即使系統自己找不到停車場
         const warnText = latestReport
@@ -12199,7 +12312,10 @@
   }
 
   function isMobileLayout() {
-    return window.matchMedia('(max-width: 1024px)').matches;
+    // 門檻 2026-09-30 由 1024 改為 700：701–1024px（平板）改走縮小版桌機版面，
+    // 不再套手機模式。這個值和 ai-travel-planner-v8.css 檔尾的平板區塊必須一致，
+    // 否則 body 會被加上 mobile-mode-* 類別，和平板的雙欄規則打架。
+    return window.matchMedia('(max-width: 700px)').matches;
   }
 
   function updateMobileViewportMetrics() {
@@ -12352,6 +12468,8 @@
     }
     document.body.classList.toggle('mobile-mode-current-spot', isCurrSpot);
     document.documentElement.classList.toggle('mobile-map-active', showMap);
+    // 版面模式換了，地圖控制項要跟著換角落（否則縮小鍵會躲到底部切換列下面）
+    syncMapControlPosition();
 
     const fnBtn = document.getElementById('mobileSwitchFunctions');
     const spotBtn = document.getElementById('mobileSwitchSpot');
@@ -12391,6 +12509,7 @@
     }
     applyMobileMapHeight();
     updateMobileDriverPanelLayout();
+    syncMapControlPosition();
   }
 
   let currentVoiceGuide = null;
@@ -15389,7 +15508,8 @@
   }
 
   function isDesktopStopEditorAvailable() {
-    return !!(window.matchMedia && window.matchMedia('(min-width: 1025px)').matches);
+    // 與 isMobileLayout() 的 700px 門檻成對：平板也走桌機版的站點編輯器。
+    return !!(window.matchMedia && window.matchMedia('(min-width: 701px)').matches);
   }
 
   function getStopEditorSchedule(stopId) {
@@ -17590,6 +17710,31 @@
   const _parkingCoordCache = new Map();
   const _walkRouteCache = new Map();
 
+  // 「最近但超過門檻」的那座停車場要怎麼講。兩個坑：
+  //
+  // 1) 名字常常就是「停車場」三個字——台東縣府開放資料 202 筆裡有 152 筆如此
+  //    （記錄只有 name/lat/lng/source，沒有地址可以拿來補），
+  //    直接套進樣板就變成「最近的停車場是『停車場』」。
+  // 2) 距離可能荒謬——實測利吉惡地那段印出「步行約 140 分鐘」。
+  //    走兩個半小時的停車場不是資訊，是雜訊，還會讓人誤以為有解。
+  //
+  // 所以：太遠的直接不提（回 null，交給呼叫端印中性訊息）；
+  // 名字是通用詞的就不要加引號假裝它是專有名詞。
+  const PARKING_FAR_MENTION_MAX_SECONDS = 30 * 60;
+  const PARKING_GENERIC_NAME_RE = /^\s*(停車場|停車位|公有停車場|parking)\s*$/i;
+
+  // 回傳給 UI 的短句（不含前綴圖示），太遠或資料不足時回 null
+  function describeNearestFarParking(far) {
+    if (!far) return null;
+    const sec = Number(far.walkSeconds);
+    if (!Number.isFinite(sec) || sec > PARKING_FAR_MENTION_MAX_SECONDS) return null;
+    const min = Math.max(1, Math.round(sec / 60));
+    const name = String(far.name || '').trim();
+    return (!name || PARKING_GENERIC_NAME_RE.test(name))
+      ? `最近的停車場步行約 ${min} 分鐘`
+      : `最近的停車場是「${name}」，步行約 ${min} 分鐘`;
+  }
+
   // mapsCallTally 已移到檔案前段（緊鄰 instrumentPlacesService），因為計數包在
   // 共用的 PlacesService 實例上，宣告必須早於那個包裝函式所在的區塊。
 
@@ -17757,9 +17902,22 @@
     if (!service) return Promise.resolve([]);
     const okStatus = () => hasGooglePlacesService() ? google.maps.places.PlacesServiceStatus.OK : 'OK';
     const loc = new google.maps.LatLng(center.lat, center.lng);
+    // Places 回的是「最接近查詢字串的地點」，不保證那是停車場。
+    // 實測：附近真的沒停車場時，textSearch「千年夫妻樹 停車場」會把**景點本身**
+    // 回成第一名（名稱「台東縣千年夫妻樹」、座標與景點完全相同）。
+    // 原本只用距離過濾，於是距離 0 必過；再送去 pickWalkableParking 驗步行時間，
+    // 景點走到自己 0 秒當然在門檻內 —— 景點就這樣被當成自己的停車場：
+    // 路線卡顯示「已找到停車場」，導航也把人載到景點門口（那裡通常正是不能停的地方）。
+    // 所以候選必須通得過「真的是停車場」這關：types 標了 parking，或名稱看得出來。
+    const looksLikeParking = (p) => {
+      const types = Array.isArray(p && p.types) ? p.types : [];
+      if (types.includes('parking')) return true;
+      return /停車|parking/i.test(String((p && p.name) || ''));
+    };
     const toCandidates = (res) => {
       if (!Array.isArray(res) || !res.length) return [];
       return res
+        .filter(looksLikeParking)
         .map((p) => {
           const g = p && p.geometry && p.geometry.location;
           if (!g) return null;
@@ -17843,6 +18001,12 @@
   // 找不到「步行可達」的停車點時，這裡記下同一站「最近但超過門檻」的那一個，
   // 讓警告文字能說出實情（哪一座、要走多久），而不是一句「找不到鄰近停車場」。
   const _nearestFarParkingByStopIndex = {};
+
+  // 每站最後一次算出來的「實際可用停車點」（只有開車／機車段的目的地會有值）。
+  // 存成模組層變數是為了讓 openExternalNavigation() 能「同步」讀到——
+  // 那顆按鈕要在使用者點擊的當下就 window.open，中間不能 await，
+  // 否則會被瀏覽器的彈出視窗阻擋器當成非使用者觸發而擋掉。
+  const _parkingByStopIndex = {};
 
   async function resolveParkingForStages(locations, renderToken) {
     const parkingByStopIndex = {};
@@ -18305,10 +18469,37 @@
     return stage ? stage.index : null;
   }
 
+  // 「正在前往的段」上一次的值。用來分辨「行程剛換段」與「只是重畫一次面板」，
+  // 沒有這個就無法判斷該不該把焦點往前帶。
+  let _lastLiveRouteStage = null;
+
   function syncDirectionsPanelStages() {
     const panel = document.getElementById('directionsPanel');
     if (!panel) return;
     const live = getLiveRouteStageIndex();
+
+    // 行程中自動跟著往下一段走。
+    // 沒選任何段時本來就會跟著 live（見下面 expanded 的預設值）；問題出在使用者點過某一段之後——
+    // 那一下會把 activeRouteStage 釘住，於是打卡進到下一站時，面板還停在上一段，要再點一次才會換。
+    //
+    // 但不能「只要釘住的段跑完就往前跳」：使用者也可能是**特地回頭**點已走完的段落在看，
+    // 那樣會被硬生生搶走畫面。所以條件收得更緊——只有當他**原本就在看當時正在走的那一段**，
+    // 而且行程確實換段了，才把焦點交棒給新的 live。回頭看舊段落的情況不受影響。
+    if (currentTripStatus === 'ongoing' && live !== null && live !== _lastLiveRouteStage) {
+      if (activeRouteStage !== null && activeRouteStage !== undefined
+          && activeRouteStage === _lastLiveRouteStage) {
+        activeRouteStage = live;
+        const liveStage = routeStageCache[live];
+        if (liveStage) {
+          updateRouteRendererVisibility(currentRouteBounds, liveStage.origin, liveStage.destination);
+          try { renderToiletMarkersForActiveRouteStage(); } catch (_e) {}
+        }
+      }
+      _lastLiveRouteStage = live;
+    } else if (currentTripStatus !== 'ongoing') {
+      _lastLiveRouteStage = null; // 結束／重設行程後歸零，下次開始才不會沿用上一趟的段號
+    }
+
     const expanded = activeRouteStage !== null && activeRouteStage !== undefined ? activeRouteStage : live;
     let liveCard = null;
     // 行程列表切到「第 N 天」時，路線面板跟著只留那一天的段落（同一個 itineraryDayFilter 狀態）
@@ -18506,6 +18697,9 @@
       streetViewControl: false,
       fullscreenControl: false,
       zoomControl: true,
+      // Maps JS 向量底圖預設會放一顆「地圖攝影機控制項」（傾斜／旋轉的四向鍵）。
+      // 這個行程地圖是俯視看路線用的，傾斜與旋轉沒有用途，還會擋住右下角，故關掉。
+      cameraControl: false,
       styles: [
         {
           "featureType": "poi",
@@ -18515,6 +18709,7 @@
     };
 
     map = new google.maps.Map(document.getElementById("googleMap"), mapOptions);
+    mountLocateControl();
 
     // 添加交通層以顯示塞車路段
     const trafficLayer = new google.maps.TrafficLayer();
@@ -18618,6 +18813,9 @@
     // 先解析各「開車類」目的地的停車點（TDX 優先 → Places 退回），再建線
     resolveParkingForStages(locations, renderToken).then((parkingByStopIndex) => {
     if (renderToken !== routeRenderToken) return;
+    // 整條路線重畫了：先清空舊的停車點，否則改過交通工具或順序之後，
+    // 導航按鈕還會拿到上一版的停車場（下面的迴圈只會覆寫這次有走到的站）。
+    Object.keys(_parkingByStopIndex).forEach((k) => { delete _parkingByStopIndex[k]; });
     // 車可以留在上一個停車點，使用者再連續走訪多個景點；下一次開車時，
     // 出發端必須沿用這個停車錨點，而不是把車誤當成停在目前景點旁。
     let activeParkingAnchor = null;
@@ -18634,6 +18832,10 @@
       if (routeStageCache[i]) {
         routeStageCache[i].parkingSearched = isParkingMode;
         routeStageCache[i].parkingFound = !!destParking;
+      }
+      // 供「🧭 導航」同步取用；非開車段 destParking 為 null，等於一併清掉舊值
+      if (typeof destination.stopIndex === 'number') {
+        _parkingByStopIndex[destination.stopIndex] = destParking;
       }
       // 這段沒有停車點（走路段/找不到停車場/切換交通工具）→ 清掉目的站殘留的停車步行時間
       if (recalculateTransport && !destParking && typeof destination.stopIndex === 'number' && replanStops[destination.stopIndex]) {
@@ -18777,7 +18979,16 @@
             stageDiv.setAttribute('tabindex', '0');
             const stageOriginName = origin.name || origin.title || '';
             const stageDestName = destination.name || destination.title || '';
-            const noParkingFound = isParkingMode && !destParking && !_nearestFarParkingByStopIndex[destination.stopIndex];
+            // 徽章與展開後的停車說明必須用「同一個判斷」算出來。
+            // 原本徽章條件是 !_nearestFarParkingByStopIndex[...]（只要記到任何一座就不掛徽章），
+            // 但說明文字走的是 describeNearestFarParking()——它對「遠到不值得提」的（>30 分）會回 null
+            // 而改印「尚無附近停車資訊」。兩套規則一拆開就矛盾：
+            // 實測利吉惡地記到一座 140 分鐘外的停車場 → 摺疊列沒有「停車待確認」，
+            // 展開卻寫著「尚無附近停車資訊」，等於在同一張卡上自相矛盾。
+            const farParkingText = (isParkingMode && !destParking)
+              ? describeNearestFarParking(_nearestFarParkingByStopIndex[destination.stopIndex])
+              : null;
+            const noParkingFound = isParkingMode && !destParking && !farParkingText;
 
             // 站名可能來自 AI 生成或共編夥伴輸入，進 innerHTML 前一律 escapeHtml（防 XSS／破版）
             // 一行一段（原本每段 5～6 行，九段就蓋掉整張地圖）；細節收在 .route-stage-detail，
@@ -18796,11 +19007,17 @@
                 <span class="stage-walk-note-origin" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 <span class="stage-walk-note" style="display:none;margin-top:3px;color:#16A34A;font-weight:600;"></span>
                 ${(isParkingMode && !destParking) ? (() => {
-                  const far = _nearestFarParkingByStopIndex[destination.stopIndex];
                   const who = escapeHtml(shortStopName(destination.name || destination.title || '下一站'));
-                  return far
-                    ? `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;">🅿️ ${who}：最近的停車場是「${escapeHtml(far.name)}」，步行約 ${Math.max(1, Math.round(far.walkSeconds / 60))} 分鐘</span>`
-                    : `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;">🅿️ ${who}：尚未取得停車場資料（不代表沒有），到場後可用「回報停車資訊」幫大家補上</span>`;
+                  // 直接沿用上面算好的 farParkingText，不要在這裡重算一次——
+                  // 分開算正是先前徽章與文字對不起來的原因。
+                  const farText = farParkingText;
+                  return farText
+                    ? `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;text-wrap:pretty;">🅿️ ${who}：${escapeHtml(farText)}</span>`
+                    // 原句是「尚未取得停車場資料（不代表沒有），到場後可用「回報停車資訊」幫大家補上」：
+                    // 規劃階段就要使用者去回報，等於把找車位的責任丟回去；而且那顆按鈕在現場模式本來就有。
+                    // 「導航終點是景點」這句在導航改版後特別必要——有停車場的站現在會導去停車場，
+                    // 不講清楚會讓人以為每一站都是。
+                    : `<span style="display:block;margin-top:3px;color:#64748b;font-weight:600;text-wrap:pretty;">🅿️ ${who}：尚無附近停車資訊，導航終點是景點，請依現場標示找車位</span>`;
                 })() : ''}
               </div>
               </div>
@@ -19903,3 +20120,23 @@
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _applyDialogRoles);
   else _applyDialogRoles();
+
+  // 本檔約 1MB 且掛在 </body> 前，但 header 的按鈕在 HTML 第 30 行就能點。
+  // 載入空窗期的那一次點擊由 <head> 的佔位函式記下（見 ai-travel-planner-v8.html），
+  // 到這裡真正的 switchView／toggleAI／openLogin 都已就位，補做一次。
+  // 同樣要等 DOM 解析完：這些函式要操作的節點有一部分在本 script 標籤之後。
+  const _flushPendingHeaderAction = () => {
+    const pending = window.__waiPendingHeaderAction;
+    if (!pending) return;
+    window.__waiPendingHeaderAction = null;
+    const fn = window[pending.name];
+    // 佔位函式沒被真正的實作覆蓋掉就不要呼叫，否則會無限自我排隊
+    if (typeof fn !== 'function' || fn.__waiPlaceholder) return;
+    try {
+      if (pending.arg === undefined) fn(); else fn(pending.arg);
+    } catch (err) {
+      console.warn('[boot] 補做 header 操作失敗：' + pending.name, err);
+    }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _flushPendingHeaderAction);
+  else _flushPendingHeaderAction();

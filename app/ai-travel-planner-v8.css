@@ -2464,6 +2464,9 @@ body.prototype-mode .prototype-id-chip {
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+  /* 短按鈕標籤不斷行：中文預設任兩字都可斷，容器一窄就會變成一字一行
+     （實測平板 328px 左欄時「匯入行程」被拆成 5 行、按鈕高 106px）。 */
+  white-space: nowrap;
 }
 
 .voice-btn.play {
@@ -2862,7 +2865,9 @@ body.prototype-mode .prototype-id-chip {
   }
 }
 
-@media (max-width: 1024px) {
+/* 只在真正的手機才收掉桌機路線面板、改用底部路線抽屜。
+   平板（701–1024px）走縮小版桌機版面，仍然用 #directionsPanel。 */
+@media (max-width: 700px) {
   #directionsPanel {
     display: none !important;
   }
@@ -3588,14 +3593,18 @@ body.prototype-mode .prototype-id-chip {
   }
 }
 
-@media (min-width: 1025px) {
+/* 「說明」分頁有桌機版與手機版兩套內容。平板走縮小版桌機版面，
+   所以這組界線也跟著移到 700/701，否則平板會顯示手機版的手機殼模擬畫面。
+   （.desktop-only-content 的 inline style 已是 display:flex，
+     是這裡的 !important 把 JS 設好的值蓋掉，實測 computed 為 none。） */
+@media (min-width: 701px) {
   .mobile-only-content, .mobile-only-title, .mobile-only-meta { display: none !important; }
   .desktop-only-content { display: flex !important; }
   .desktop-only-title { display: block !important; }
   .desktop-only-meta { display: flex !important; }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 700px) {
   .desktop-only-content, .desktop-only-title, .desktop-only-meta { display: none !important; }
 }
 
@@ -3612,7 +3621,9 @@ body.prototype-mode .prototype-id-chip {
 }
 #directionsPanelHandle:hover { background: var(--accent-light); }
 #directionsPanelHandle.collapsed { left: 0; }
-@media (max-width: 1024px) { #directionsPanelHandle { display: none !important; } }
+/* 平板（701–1024px）走縮小版桌機版面，會顯示 #directionsPanel，
+   所以收合把手也要留著——否則 320px 的路線面板會永久蓋掉一半地圖。 */
+@media (max-width: 700px) { #directionsPanelHandle { display: none !important; } }
 /* 寬度跟著地圖欄：最多 320px、最多佔 40%（原本固定 320px，窄地圖會被蓋掉九成）。把手跟著面板右緣。 */
 #directionsPanel { width: min(320px, calc(40% - 16px)) !important; min-width: 220px; padding: 50px 8px 8px !important; }
 /* 把手＝面板標題列：與面板同寬、疊在面板頂端留白處（面板 padding-top 讓出位置） */
@@ -7463,10 +7474,17 @@ button.notif-item { cursor: pointer; }
   margin-top: 2px;
 }
 
-@media (max-width: 1024px) {
+/* 站點編輯：桌機用抽屜（.stop-editor-backdrop），手機用行內操作（.mobile-stop-actions）。
+   這條界線必須跟 JS 的 isDesktopStopEditorAvailable()（已改成 701px 起）一致，
+   否則平板會變成「JS 開了抽屜、CSS 又把它 display:none !important 蓋掉」——
+   openStopEditor() 有跑、元素也加了 .open，但使用者什麼都看不到。 */
+@media (max-width: 700px) {
   .stop-editor-backdrop { display: none !important; }
   .stop-edit-hint { display: none; }
   .mobile-stop-actions { display: inline-flex; align-items: center; gap: 6px; }
+}
+
+@media (max-width: 1024px) {
   html,
   body {
     width: 100%;
@@ -8394,3 +8412,206 @@ button.notif-item { cursor: pointer; }
     pointer-events: none;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   平板（701–1024px）：維持桌機的雙欄資訊架構，只把尺寸縮小
+   ───────────────────────────────────────────────────────────────────
+   先前 ≤1024px 一律套手機版：地圖被收掉、出現底部切換列、header 換成兩列。
+   平板橫向有 1024px，硬塞手機版等於浪費掉一半螢幕。
+   這一層刻意放在檔案最後，靠來源順序覆蓋前面所有 max-width:1024px 區塊
+   （同 specificity 時後者勝），不用 !important。
+   ⚠️ 必須和 JS 的 isMobileLayout()／isDesktopStopEditorAvailable() 門檻一起改，
+      否則 body 仍會被加上 mobile-mode-* 類別，和這裡的規則打架。
+   ═══════════════════════════════════════════════════════════════════ */
+@media (min-width: 701px) and (max-width: 1024px) {
+  /* ⚠️ 高度必須沿用桌機（css:204）那套反算，不能直接寫 100vh：
+     body 有 zoom:1.03，而 vh 不隨 zoom 換算，100vh 會渲染成視覺上的 103vh；
+     再疊上 position:sticky 的 header（sticky 仍佔流式空間），配上 overflow:hidden，
+     地圖與左欄的底部就會被「header 高度 + 3vh」裁掉。
+     這裡改用 body 撐 100/1.03 vh ＋ flex column，讓 header 與主版面分攤高度。
+     （上面 max-width:1024px 的區塊把 body 設成 height:auto／overflow-y:auto，
+       所以這三個屬性要在這裡明確寫回來，不能只靠 css:204 的桌機區塊。） */
+  body {
+    height: 97.0873786408vh;
+    /* 同一個 max-width:1024px 區塊還設了 min-height:100vh，
+       它會直接壓過上面的 height，讓 body 又變回 100vh（視覺上 103vh）。
+       這行必須留著，否則底部仍會被裁掉約 23px。 */
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  /* header 收回單列，高度比桌機再矮一點。
+     css:7479 在 max-width:1024px 把 .glass-header 設成 display:grid，
+     只寫 flex-wrap 不會讓它回 flex，必須明確宣告 display 與 justify-content。 */
+  .glass-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex: 0 0 auto;
+    height: auto;
+    flex-wrap: nowrap;
+    padding: 9px 16px;
+    gap: 12px;
+  }
+  /* ⚠️ 不要沿用桌機的「絕對定位置中」（base css:2092）。
+     絕對定位不佔流式空間，header-left／right 不知道它在那裡，
+     實測 701px 會壓到右側按鈕 39px、835px 也只剩 6px 餘裕，
+     而且登入後 header-right 變寬（多頭像＋通知鈴）就會疊上去。
+     這類重疊掃「橫向捲動」是掃不到的，所以改成真正的 flex 項目：
+     左(auto) + 中(可伸縮) + 右(auto)，結構上不可能重疊。
+     代價是膠囊置中於「剩餘空間」而非視窗正中（左右寬度差約 34px → 偏移約 17px）。 */
+  .header-center {
+    position: static;
+    left: auto;
+    transform: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    order: 0;
+    justify-content: center;
+  }
+  .header-back-link { width: 36px; height: 36px; font-size: 19px; }
+
+  /* 分頁膠囊：不再撐滿整列，回到置中的一組；min-height 仍保 40px 觸控目標 */
+  .nav-pill-group {
+    width: auto;
+    justify-content: center;
+    gap: 3px;
+    padding: 4px 5px;
+    overflow-x: visible;
+  }
+  .nav-pill {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 0 9px;
+    font-size: 14px;
+  }
+  .nav-pill-rideflow { display: inline-flex; }
+
+  /* 主版面回到左行程／右地圖。
+     高度交給 body 的 flex column 分配（height:auto + flex:1 1 auto），
+     不要再寫 100vh，否則會和 header 疊加而超出 body。 */
+  .split-layout {
+    flex-direction: row;
+    height: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  .left-panel {
+    width: 360px;
+    min-width: 360px;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    box-shadow: 4px 0 32px rgba(0, 0, 0, 0.05);
+  }
+  .map-panel {
+    display: block;
+    flex: 1;
+    height: 100%;
+  }
+
+  /* 手機專用的切換機制在這個尺寸用不到 */
+  .mobile-view-switch { display: none; }
+  .mobile-role-switch { display: none; }
+
+  .hero-section { padding: 28px 18px 18px; }
+
+  /* 語音導覽卡：左欄只有 318–371px，比 600px 手機的內容區還窄，
+     橫排會把兩顆按鈕擠成一字一行。沿用 ≤600px 那套直向排法。
+     （原本的修法綁在 max-width:600px，用視窗寬度判斷；
+       左欄變窄之後視窗寬度已經不能代表這張卡的可用寬度了。） */
+  .voice-guide-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .voice-guide-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .voice-btn { min-width: 0; min-height: 44px; }
+
+  /* 「說明」分頁的桌機版內容，本來只在 ≥1025px 出現，現在平板也會看到，
+     但左欄只有 318–371px（桌機是 486px），標題會留下句尾孤字
+     （實測「行程規劃與地圖導／覽」、「AI 隨行管家即時輔／助」）。
+     text-wrap:pretty 讓斷點往前挪，不支援的瀏覽器自動退回一般換行。 */
+  .features-shell h3,
+  .features-shell p {
+    text-wrap: pretty;
+  }
+}
+
+/* 直向平板（701–834px）：左欄再窄一點，否則地圖只剩一條 */
+@media (min-width: 701px) and (max-width: 834px) {
+  .left-panel { width: 318px; min-width: 318px; }
+  .nav-pill { padding: 0 5px; font-size: 13px; }
+  .glass-header { padding: 8px 12px; gap: 8px; }
+
+  /* .header-center 的 static flex 處理在上面 701–1024 那層，這裡只再縮尺寸。
+     讓出空間給分頁膠囊；沿用既有窄螢幕的縮字級＋省略號作法 */
+  .logo {
+    font-size: 20px;
+    max-width: 132px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .header-right .tool-btn.primary { padding: 9px 12px; font-size: 13px; }
+  /* 真的擠不下時（例如登入後）讓膠囊自己橫向滑動，而不是壓到隔壁 */
+  .nav-pill-group { overflow-x: auto; scrollbar-width: none; }
+  .nav-pill-group::-webkit-scrollbar { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   地圖「回到我的位置」按鈕
+   ───────────────────────────────────────────────────────────────────
+   掛在 Maps 的 RIGHT_BOTTOM 控制欄（和縮放鍵同一欄），所以桌機／平板／
+   手機三種版面都自動有，這裡只負責長相。尺寸與陰影刻意對齊 Google 自己的
+   控制項（40px、白底、同一組陰影），讓它看起來就是地圖內建的一部分。
+   ═══════════════════════════════════════════════════════════════════ */
+.map-locate-btn {
+  width: 40px;
+  height: 40px;
+  margin: 0 10px 10px 0;      /* 與縮放鍵的外距一致，才會對齊成一直行 */
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 2px;         /* Google 控制項用的是 2px，不是我們 UI 的大圓角 */
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  color: #5f6368;             /* 同 Google 控制項的灰 */
+  transition: background-color 0.15s, color 0.15s;
+}
+.map-locate-btn:hover { background: #f5f5f5; color: #1a73e8; }
+.map-locate-btn:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+
+.map-locate-btn svg {
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: currentColor;
+}
+/* 外圈是準心的環，不該被填滿（fill 已在 markup 以屬性關掉，這裡確保樣式端一致） */
+.map-locate-btn svg circle[fill="none"] { fill: none; }
+
+/* 定位中：轉圈表示正在取得位置。getCurrentPositionOnce 最長等 10 秒，
+   沒有回饋的話使用者會以為按鈕壞了而重複點。 */
+.map-locate-btn.locating { color: #1a73e8; cursor: progress; }
+.map-locate-btn.locating svg { animation: spin 1s linear infinite; }
+.map-locate-btn:disabled { pointer-events: none; }
+
+/* 手機地圖模式下右下角會被底部切換列蓋住的問題，已改由 JS 的
+   syncMapControlPosition() 把整組控制項換到 RIGHT_CENTER 處理
+   （用 Maps 官方的 controlOptions，不靠 CSS 硬推）。
+   這裡原本那條 margin-bottom 只推得動自訂按鈕、推不動內建縮放鍵，已移除。 */
