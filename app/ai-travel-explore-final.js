@@ -1638,12 +1638,16 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
     ? (options.livePoiHint || '')
     : '';
 
-  const hintBlock = localBlock || firebasePromptBlock || livePoiBlock;
+  // 餐廳候選獨立疊加：上面三個景點清單互斥（本地優先），但餐廳清單來源不同（restaurant-data.js
+  // ／Places），本地景點快取只含 kind==='scenic' 的景點、永遠不含餐廳。若讓餐廳跟著三選一被吃掉，
+  // prompt 只剩景點清單又寫著「只能從清單挑選」，AI 就排不出用餐站（見 _doGeneration 的 foodHint）。
+  const foodBlock = String(options.foodHint || '').trim();
+  const hintBlock = [localBlock || firebasePromptBlock || livePoiBlock, foodBlock].filter(Boolean).join('\n\n');
   // 在 DevTools Console 標明這次景點清單來源：本地 / Firebase / live Maps / 無
   const _poiSource = localBlock ? '本地 poi-data.js'
     : (firebasePromptBlock ? 'Firebase poi_cache'
     : (livePoiBlock ? 'live Google Maps' : '無清單（AI 自行生成）'));
-  console.info(`[POI來源] ${_poiSource}｜目的地：${getWizardDestination(wizardData)}｜mode：${mode}`);
+  console.info(`[POI來源] ${_poiSource}｜餐廳候選：${foodBlock ? '有' : '無'}｜目的地：${getWizardDestination(wizardData)}｜mode：${mode}`);
   const built = buildPrompt(wizardData, hintBlock, mode);
   const preferredModel = GEMINI_MODEL;
   const payload = {
@@ -2540,6 +2544,113 @@ function extractDayHoursWindow(businessHoursStr, departureDate) {
   return null;
 }
 
+// ══════════════════════════════════════════════════
+// 用餐時段錨定
+// 行程時間軸是「停留時長一站接一站串起來」的（applyTripPlanningRules），不含任何用餐概念。
+// 所以只要前面有站被濾掉（當天公休、驗證失敗），整條鏈就往前縮，AI 排在 12:10 的午餐會被
+// 重算成 10:05。加上地理排序只看距離，晚餐還可能被挪到第 3 站。以下兩件事分開處理：
+//   1. placeMealStopsAtMealTimes：把用餐站「移到時鐘真的走到那一餐的位置」（順序）
+//   2. applyTripPlanningRules 內的錨定：時鐘太早就延到開餐時間（時間）
+// aiFrom/aiTo＝從 AI 給的時間判斷這站是哪一餐；anchor/latest＝可接受的開餐區間。
+// ══════════════════════════════════════════════════
+// aiFrom/aiTo 刻意抓得窄：只認「明顯就是正餐」的時間。放寬到 15:00 會把下午茶咖啡廳
+// 當成午餐拉到 11:30，那是把使用者沒要求的東西改掉。
+const MEAL_WINDOWS = [
+  { key: 'lunch',  aiFrom: 11 * 60,      aiTo: 14 * 60,      anchor: 11 * 60 + 30, latest: 13 * 60 + 30 },
+  { key: 'dinner', aiFrom: 17 * 60,      aiTo: 20 * 60 + 30, anchor: 17 * 60 + 30, latest: 19 * 60 + 30 }
+];
+
+// 這站是不是「AI 刻意排的某一餐」。判斷依據是 AI 給的原始時間——
+// 早餐店、下午茶咖啡廳落在任一用餐時段之外，回 null＝不動它，維持原本行為。
+function getStopMealWindow(stop) {
+  if (!stop || typeof isFoodStop !== 'function' || !isFoodStop(stop)) return null;
+  const raw = String(stop.time || '').trim();
+  if (!raw) return null;
+  const within = ((timeStringToMinutes(raw) % 1440) + 1440) % 1440;
+  return MEAL_WINDOWS.find((w) => within >= w.aiFrom && within <= w.aiTo) || null;
+}
+
+// 插隊成本：把用餐站插在 prev 與 next 之間多繞的公尺數。缺座標就當 0（不因此排除該位置）。
+function mealInsertDetourMeters(prev, next, meal) {
+  const a = prev ? getStopCoordinate(prev) : null;
+  const b = next ? getStopCoordinate(next) : null;
+  const m = getStopCoordinate(meal);
+  if (!m || (!a && !b)) return 0;
+  if (!a) return getDistanceMeters(m, b);
+  if (!b) return getDistanceMeters(a, m);
+  return getDistanceMeters(a, m) + getDistanceMeters(m, b) - getDistanceMeters(a, b);
+}
+
+// 單日內：把用餐站抽出來，再插回「開餐時間落在用餐時段」的位置；同時段有多個位置可選時挑繞路最少的。
+function arrangeMealsWithinDay(dayStops, dayStart, dayIndex) {
+  const meals = [];
+  const rest = [];
+  dayStops.forEach((s) => {
+    const win = getStopMealWindow(s);
+    if (win) meals.push({ stop: s, win }); else rest.push(s);
+  });
+  if (!meals.length) return dayStops;
+
+  const result = rest.slice();
+  meals.sort((a, b) => a.win.anchor - b.win.anchor);
+  for (const { stop, win } of meals) {
+    const dayBase = (dayIndex - 1) * 1440;
+    const anchorAt = dayBase + win.anchor;
+    const latestAt = dayBase + win.latest;
+    // 依停留時長推算每個插入位置的開餐時間（與 applyTripPlanningRules 同一套鏈算法）
+    let clock = dayStart;
+    let fallbackIdx = -1; // 沒有位置能落在用餐時段內時：第一個已過開餐時間的位置（寧可晚吃，不提前）
+    let bestIdx = -1;
+    let bestDetour = Infinity;
+    for (let i = 0; i <= result.length; i++) {
+      if (clock >= anchorAt) {
+        if (fallbackIdx < 0) fallbackIdx = i;
+        if (clock <= latestAt) {
+          const detour = mealInsertDetourMeters(result[i - 1] || null, result[i] || null, stop);
+          if (detour < bestDetour) { bestDetour = detour; bestIdx = i; }
+        }
+      }
+      if (i < result.length) {
+        // 已插入的用餐站稍後會被錨定到開餐時間，這裡的時鐘要跟著往後推，
+        // 否則推算晚餐位置時會少算「午餐等到 11:30」的那段，晚餐位置偏早。
+        const placed = getStopMealWindow(result[i]);
+        if (placed) clock = Math.max(clock, dayBase + placed.anchor);
+        clock += Math.max(10, Number(result[i].duration) || 30);
+      }
+    }
+    const insertAt = bestIdx >= 0 ? bestIdx : (fallbackIdx >= 0 ? fallbackIdx : result.length);
+    result.splice(insertAt, 0, stop);
+  }
+  return result;
+}
+
+// 用餐站只在「自己那一天」內移動，不跨天，也不改變其他站的相對順序。
+function placeMealStopsAtMealTimes(stops, wizardData = {}) {
+  if (!Array.isArray(stops) || stops.length < 2) return stops;
+  const windows = getTripDayWindows(wizardData);
+  const startMinutes = timeStringToMinutes(normalizeClockInput(wizardData.startTime, '09:00'));
+  const dayOf = (s) => (windows.multi
+    ? Math.max(1, Math.min(windows.dayCount, Math.round(Number(s && s.dayIndex)) || 1))
+    : 1);
+  const dayStartOf = (day) => {
+    const w = windows.multi && windows.dayWindows[day - 1];
+    return w ? (day - 1) * 1440 + timeStringToMinutes(w.start) : startMinutes;
+  };
+
+  const groups = new Map();
+  stops.forEach((s) => {
+    const d = dayOf(s);
+    if (!groups.has(d)) groups.set(d, []);
+    groups.get(d).push(s);
+  });
+
+  const out = [];
+  [...groups.keys()].sort((a, b) => a - b).forEach((d) => {
+    out.push(...arrangeMealsWithinDay(groups.get(d), dayStartOf(d), d));
+  });
+  return out;
+}
+
 function applyTripPlanningRules(stops, wizardData = {}) {
   const pace = wizardData.pace || '平衡';
   const maxGapMinutes = Number(wizardData.slotMinutes) || getDefaultSlotMinutes(pace);
@@ -2559,6 +2670,21 @@ function applyTripPlanningRules(stops, wizardData = {}) {
     const defaultStart = index === 0 ? startMinutes : Math.max(previousEndMinutes ?? startMinutes, dayStart);
     const normalized = normalizeGeneratedStop(stop, index, minutesToTimeString(defaultStart));
     let currentMinutes = defaultStart;
+
+    // 用餐站錨定：時鐘比開餐時間早就延到開餐時間（只延後、不提前——提前要壓縮前面各站，
+    // 那是使用者沒要求的改動）。沒有這段，被濾掉幾站之後午餐就會落在 10 點。
+    // 但錨定不得把用餐站推到當天結束時間之後（例：行程只到 15:00 卻把晚餐推到 17:30）。
+    const mealWindow = getStopMealWindow(stop);
+    if (mealWindow) {
+      const dayBase = Math.floor(currentMinutes / 1440) * 1440;
+      const anchorAt = dayBase + mealWindow.anchor;
+      const dayEnd = dayWindow
+        ? (dayIndex - 1) * 1440 + timeStringToMinutes(dayWindow.end)
+        : timeStringToMinutes(windows.end || normalizeClockInput(wizardData.endTime, '18:00'));
+      // 連「吃完」都要在當天結束前：只看開餐時間會排出 17:30 開始、18:10 才吃完卻說行程 18:00 結束
+      const stayMin = Math.max(10, Number(normalized.duration) || 30);
+      if (currentMinutes < anchorAt && anchorAt + stayMin <= dayEnd) currentMinutes = anchorAt;
+    }
 
     // 營業時間調整：若需等候且等候時長在上限內，推遲開始。
     // 其餘情況（當天公休、等太久、已過打烊）只是「不調整時間」，不再寫 scheduleWarning ——
@@ -2745,8 +2871,13 @@ function buildLiveMapsPoiHintBlock(places) {
 // 餐廳本地優先：有 restaurant-data.js 快取就直接用（省 Places），否則即時抓最新。
 async function fetchGoogleMapsFoodList(destination, destCenter = null) {
   const cached = getLocalFoodList(destination);
-  if (cached.length) return cached;
-  return fetchGoogleMapsPoiList(destination, [], destCenter, ['餐廳', '美食', '小吃']);
+  const list = cached.length
+    ? cached
+    : await fetchGoogleMapsPoiList(destination, [], destCenter, ['餐廳', '美食', '小吃']);
+  // 標記來源為餐廳：isFoodStop 靠名稱關鍵字＋emoji 猜，認不出「榕樹下米苔目」「阿鋐炸雞」
+  // 這類真實店名（也不該靠 AI 有沒有給對 emoji）。這些項目本來就是從餐廳資料來的，直接掛 tag，
+  // 後續的用餐時段錨定、合併閘門、餐費計算才判得準。複製一份，不污染 restaurant-data.js 的快取物件。
+  return (Array.isArray(list) ? list : []).map((p) => (p && p.tag === 'food' ? p : { ...p, tag: 'food' }));
 }
 
 function buildLiveFoodHintBlock(places) {
@@ -2781,6 +2912,8 @@ function matchStopsToLivePlaces(stops, livePlaces) {
       businessHours: stop.businessHours || match.businessHours || null,
       address: stop.address || match.address || '',
       coordinateSource: 'google_places_matched',
+      // 命中的是餐廳清單 → 把 tag 帶到站上，讓 isFoodStop 不必靠店名關鍵字猜
+      ...(match.tag === 'food' ? { tag: 'food' } : {}),
       // 餐廳人均消費（若有）隨 stop 帶走，供 planner 卡片/預算顯示
       ...(Number.isFinite(match.costPerPerson) ? { costPerPerson: match.costPerPerson } : {}),
       ...(match.costNote ? { costNote: match.costNote } : {})
@@ -2887,9 +3020,11 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
     }
   }
   // 快取餐廳皆 Places 來源，視為已驗證 → 選中的餐廳站也跳過 Places
+  const _localFoodNames = new Set();
   for (const p of getLocalFoodList(destination)) {
     if (p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))) {
       _localVerifiedByName.set(_cleanName(p.name), p);
+      _localFoodNames.add(_cleanName(p.name));
     }
   }
 
@@ -2913,6 +3048,9 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
       }
       stop.placeVerified = true;
       stop.coordVerified = true; // 本地座標已由 crawler verify:places 校正過 → planner 載入免重驗
+      // 名字在餐廳快取裡＝這站確定是餐廳。這是每一站都會經過的地方，比名稱關鍵字可靠，
+      // 用餐時段錨定與合併閘門都靠這個 tag。
+      if (_localFoodNames.has(_cleanName(name))) stop.tag = 'food';
       return stop;
     }
 
@@ -3637,7 +3775,9 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   _sub('整理路線順序中…');
   // 最後輸出前再重排一次，避免合併/補景點後路線南北來回跑
   const orderedStops = reorderStopsAlongRoute(filledStops, _startCoords, wizardData, _endCoords);
-  const ruledStops = applyTripPlanningRules(orderedStops, wizardData);
+  // 上面兩次排序只看路線順不順，會把晚餐排到第 3 站；這裡把用餐站移回時鐘走到那一餐的位置
+  const mealArrangedStops = placeMealStopsAtMealTimes(orderedStops, wizardData);
+  const ruledStops = applyTripPlanningRules(mealArrangedStops, wizardData);
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
 
   const enrichedWizardData = {
@@ -5185,6 +5325,7 @@ function onDistrictTabClick(e) {
   if (!btn) return;
   activeCat = btn.dataset.k;
   searchQ = '';
+  document.getElementById('searchInput').value = '';
   renderDistrictTabs();
   renderGrid();
 }
@@ -5320,7 +5461,13 @@ function handleSearch() {
   clearTimeout(_searchDebounceTimer);
   _searchDebounceTimer = setTimeout(renderGrid, 250);
 }
-function searchTag(tag) { document.getElementById('searchInput').value = tag; searchQ = tag; renderGrid(); }
+function searchTag(tag) {
+  activeCat = 'all';
+  searchQ = tag;
+  document.getElementById('searchInput').value = tag;
+  renderDistrictTabs();
+  renderGrid();
+}
 
 // ══════════════════════════════════════════════════
 // PREVIEW MODAL
@@ -7258,11 +7405,15 @@ async function _doGeneration(trip, wData) {
     // 餐廳一律即時抓（本地 poi-data 不含餐廳），讓 AI 有用餐站候選——不吃本地、每次都撈最新
     const _foodPromise = fetchGoogleMapsFoodList(_liveDest, _liveCenter).catch(() => []);
     let livePlaces = await _poiPromise;
-    let livePoiHint = _localHint || (livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '');
+    const livePoiHint = _localHint || (livePlaces.length > 0 ? buildLiveMapsPoiHintBlock(livePlaces) : '');
     const _foodPlaces = await _foodPromise;
+    // 餐廳候選必須和景點清單分開送：requestGeminiMicroTravelPlan 會自己重算本地景點快取，
+    // 一旦本地有資料就整塊丟掉 livePoiHint。以前把餐廳併進 livePoiHint，等於在台東/綠島/蘭嶼
+    // 這些有本地快取的目的地把餐廳清單一起丟掉，AI 只看得到景點又被要求「只能從清單挑」→ 排不出用餐站。
+    let foodHint = '';
     if (_foodPlaces.length) {
       livePlaces = livePlaces.concat(_foodPlaces);
-      livePoiHint = [livePoiHint, buildLiveFoodHintBlock(_foodPlaces)].filter(Boolean).join('\n\n');
+      foodHint = buildLiveFoodHintBlock(_foodPlaces);
     }
     _genPerf.mark('step0 景點/餐廳清單');
     setWizGenStep(1);
@@ -7272,6 +7423,7 @@ async function _doGeneration(trip, wData) {
       mode: 'final',
       includeFirebase: !_localHint && livePlaces.length === 0,
       livePoiHint,
+      foodHint,
       useStreaming: true,
       onChunk: (_chunk, fullText) => {
         const names = extractNamesFromStream(fullText);
@@ -7713,12 +7865,15 @@ function renderCollabPanel() {
                   <span class="collab-agg-bar-count">${b.votes}/${agg.total}</span>
                 </div>`).join('')}</div>`
             : `<div class="collab-agg-empty">成員填寫偏好後，這裡會顯示興趣票數統計</div>`;
+          // 節奏（多數決）與預算（平均）都把成員意見「收斂成一個值」，禁忌刻意不收斂——
+          // 任一成員提出就整條保留，不因人數被多數決排除（過敏／宗教／身體狀況不該投票決定）。
+          // 另外兩行都標了方法，這行不標的話，使用者只會看到一串詞，看不出這是刻意的差別待遇。
           const avoidHtml = profile.avoid.length
             ? `<div>避免：${profile.avoid.map(a => {
                 const term = a.term.replace(/^#/, '');
                 const cls = agg.conflictTerms.has(term) ? ' class="collab-agg-conflict"' : '';
                 return `<span${cls}>${escapeHtml(term)}</span>`;
-              }).join('、')}</div>`
+              }).join('、')}（任一人提出就保留）</div>`
             : '';
           const desiredHtml = (profile.desired || []).length
             ? `<div>想去：${profile.desired.map(dd => {

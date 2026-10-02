@@ -4459,9 +4459,13 @@
       window.alert('請先輸入卡通人物名稱。');
       return;
     }
+    // 代理模式下前端「本來就不該有」Gemini 金鑰（金鑰在 server/.env，由後端注入）。
+    // 舊的「沒有 key 就擋下」是改用 proxy 之前留下的關卡，忘了拆 —— 結果是正式站永遠
+    // 在這裡 return，根本走不到下面那段已經寫好的 proxy 分支。只有直連模式才需要金鑰。
+    const vertex = getVertexConfig();
     const apiKey = getGeminiApiKey();
-    if (!apiKey) {
-      window.alert('找不到 Gemini API 金鑰，請先在設定中輸入。');
+    if (!vertex.ready && !apiKey) {
+      window.alert('尚未設定 AI 服務：請在設定中輸入 Gemini API 金鑰，或改用伺服器代理模式。');
       return;
     }
     posterCharacterDraft = character;
@@ -4474,10 +4478,10 @@
     const prompt = buildImagePrompt(character);
     console.log('[行程圖 Prompt]', prompt);
     const imageModel = 'gemini-3.1-flash-image';
-    const vertex = getVertexConfig();
     try {
+      // 代理模式沒有前端金鑰 → 不要掛空的 ?key=（金鑰由後端注入），與其他 Vertex 呼叫一致
       const endpoint = vertex.ready
-        ? `${VERTEX_HOST}/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent?key=${encodeURIComponent(vertex.apiKey)}`
+        ? `${VERTEX_HOST}/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent${vertex.apiKey ? `?key=${encodeURIComponent(vertex.apiKey)}` : ''}`
         : `${GEMINI_API_BASE}/${imageModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
       const res = await fetch(endpoint, {
         method: 'POST',
