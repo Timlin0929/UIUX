@@ -13285,6 +13285,7 @@
   // 管家的範圍限制（harness）：prompt 規則擋語意上的離題，這裡先擋一看就知道的
   // （程式碼、純算式、要它忽略規則），不花 AI 和 Maps 的呼叫。
   const AI_OFF_TOPIC_REPLY = '這部分我幫不上忙，我是這趟旅程的隨行管家，可以問我景點、美食、交通，或請我調整行程喔！';
+  const SERVER_OFF_TOPIC_REPLY = '此服務僅提供旅遊相關功能。';  // 與 server/scope-guard.js 的 OFF_TOPIC_REPLY 一致
   const AI_OFF_TOPIC_RE = [
     /```|console\.log|print\(|#include|\bdef \w+\(|\bfunction\s*\w*\(|\bSELECT\b.+\bFROM\b/i,
     /python|javascript|typescript|c\+\+|leetcode|演算法|程式碼|寫程式/i,  // 不放 debug／除錯：「幫我 debug 一下行程」是旅遊話題
@@ -15147,7 +15148,10 @@
       const applyResult = await applyAiItineraryActions(actions);
 
       const replyLines = [];
-      replyLines.push(String(aiResult.reply || '我幫你整理了一個即時建議。'));
+      // 伺服器端 scope-guard 的範圍外回覆比較生硬，畫面上換成管家的說法
+      const rawReply = String(aiResult.reply || '').trim();
+      const isServerOffTopic = rawReply.replace(/[。.!！\s]/g, '') === SERVER_OFF_TOPIC_REPLY.replace(/[。.!！\s]/g, '');
+      replyLines.push(isServerOffTopic ? AI_OFF_TOPIC_REPLY : (rawReply || '我幫你整理了一個即時建議。'));
       if (applyResult.logs.length) {
         replyLines.push('');
         replyLines.push(`已套用：${applyResult.logs.join('、')}`);
