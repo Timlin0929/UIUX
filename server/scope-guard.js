@@ -3,7 +3,7 @@
 //   1. 請求只留前端真的會送的欄位（contents、generationConfig），tools、cachedContent、
 //      safetySettings、client 自帶的 systemInstruction 一律丟掉
 //   2. maxOutputTokens 上限 8192（前端最大就是 8192）
-//   3. 文字模型一律加上「只做旅遊」的 systemInstruction（Vertex 與 AMD 兩條路都吃這個欄位）
+//   3. 文字模型一律加上「只做旅遊」的 systemInstruction（Vertex 的 generateContent／streamGenerateContent 都吃這個欄位）
 // 這是 prompt 層的限制，模型仍可能被繞過；搭配 vertexLimiter（每 IP 10 分鐘 20 次）與登入驗證一起用。
 'use strict';
 
