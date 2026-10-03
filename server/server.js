@@ -33,6 +33,7 @@ const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const pricing = require('./pricing');
 const genRuns = require('./generation-runs');
 const { createUsageTap, modelIdFromPath } = require('./usage-tap');
+const { guardVertexBody } = require('./scope-guard');
 // 回顧短片後端渲染 job（M8）：獨立模組，掛在既有代理上
 const { mountRecapJobs } = require('./recap-jobs');
 
@@ -956,6 +957,8 @@ app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, async (req, res) =
     console.warn('[proxy] 收到無效的 X-Run-Id，本次不記帳（run 可能已收尾或過期）');
   }
   if (run) genRuns.retain(run);
+
+  req.body = guardVertexBody(req.body, modelIdFromPath(upstreamPath));
 
   let upstream;
   try {
