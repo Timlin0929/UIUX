@@ -3567,6 +3567,15 @@ body.prototype-mode .prototype-id-chip {
 /* 可以在聊天室點擊的 Actionable 卡片 */
 .action-card { margin-top: 12px; border: 1px solid var(--accent); background: var(--accent-light); border-radius: 12px; padding: 12px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: 0.2s; }
 .action-card:hover { background: #e0eee9; }
+.chat-action-confirm { flex: 1; min-width: 0; padding: 14px; border: 1px solid var(--accent); background: var(--surface); border-radius: 16px; box-shadow: var(--shadow-sm); font-size: 13px; }
+.chat-action-title { font-weight: 700; color: var(--accent); margin-bottom: 8px; }
+.chat-action-list { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 7px; }
+.chat-action-list li { display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; text-wrap: pretty; }
+.chat-action-tag { flex-shrink: 0; white-space: nowrap; padding: 1px 6px; border-radius: 6px; background: #e0ecff; color: #1d4ed8; font-weight: 700; }
+.chat-action-confirm p { margin: 8px 0; line-height: 1.55; text-wrap: pretty; }
+.chat-action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.chat-action-buttons .replan-btn { white-space: nowrap; }
+.chat-action-result { border-top: 1px solid var(--border); padding-top: 8px; }
 .ai-input-area { padding: 20px; border-top: 1px solid var(--border); background: var(--surface); }
 .chat-input-box { display: flex; background: var(--bg); border: 1px solid var(--border); border-radius: 100px; padding: 6px 6px 6px 20px; }
 .chat-input-box input { flex: 1; background: transparent; border: none; outline: none; font-size: 14px; }
