@@ -253,6 +253,8 @@
     max-width: 75%; padding: 12px 16px; border-radius: 16px; font-size: 14px; line-height: 1.6;
   }
   .msg.ai .msg-bubble { background: var(--bg); border: 1px solid var(--border); border-top-left-radius: 4px; }
+  .msg.ai .msg-bubble { text-wrap: pretty; }
+  .cjk-w { white-space: nowrap; }
   .msg.user .msg-bubble { background: var(--accent); color: #fff; border-top-right-radius: 4px; }
   .msg-bubble ul { padding-left: 18px; margin-top: 6px; }
   .msg-bubble ul li { margin-bottom: 4px; }
@@ -945,6 +947,42 @@ function showTab(id, btn) {
 }
 
 // Chat responses
+const CJK_SUFFIX = '署館站場區店園山路市縣鄉鎮村港灣湖島橋寺廟宮堂街';
+function wrapCjkWords(root) {
+  if (!root || typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function') return;
+  const segmenter = new Intl.Segmenter('zh-Hant', { granularity: 'word' });
+  const han = /[\u3400-\u9fff]/;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => han.test(node.nodeValue) && !(node.parentElement && node.parentElement.closest('.nowrap, .cjk-w'))
+      ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const parts = [];
+    for (const { segment, isWordLike } of segmenter.segment(node.nodeValue)) {
+      const isHan = isWordLike && han.test(segment);
+      const previous = parts[parts.length - 1];
+      if (isHan && segment.length === 1 && previous && previous.han && CJK_SUFFIX.includes(segment)) previous.text += segment;
+      else if (isHan && segment.length === 1 && previous && previous.han && previous.single) previous.text += segment;
+      else parts.push({ text: segment, han: isHan, single: isHan && segment.length === 1 });
+    }
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (part.han && part.text.length > 1) {
+        const span = document.createElement('span');
+        span.className = 'cjk-w';
+        span.textContent = part.text;
+        fragment.appendChild(span);
+      } else fragment.appendChild(document.createTextNode(part.text));
+    }
+    node.parentNode.replaceChild(fragment, node);
+  }
+}
+const wrapIntroAiText = () => document.querySelectorAll('.msg.ai .msg-bubble').forEach(wrapCjkWords);
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wrapIntroAiText);
+else wrapIntroAiText();
+
 const responses = {
   default: [
     { text: "好的！讓我先確認幾件事，才能排得準。", follow: ["想去哪裡？", "玩多久？", "幾個人、預算多少？"] },
@@ -1071,6 +1109,7 @@ function replyAI(userText) {
       chipsHtml = `<div class="suggestion-chips">${r.follow.map(c => `<button class="chip" onclick="sendChip(this)">${c}</button>`).join('')}</div>`;
     }
     div.innerHTML = `<div class="msg-avatar ai">🤖</div><div><div class="msg-bubble">${formattedText}</div>${chipsHtml}</div>`;
+    wrapCjkWords(div.querySelector('.msg-bubble'));
     msgs.appendChild(div);
     msgs.scrollTop = msgs.scrollHeight;
   }, delay);

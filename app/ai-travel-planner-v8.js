@@ -20840,3 +20840,40 @@
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _flushPendingHeaderAction);
   else _flushPendingHeaderAction();
+
+  // Wrap Chinese words in help cards so narrow columns break between words.
+  const CJK_SUFFIX = '署館站場區店園山路市縣鄉鎮村港灣湖島橋寺廟宮堂街';
+  function wrapCjkWords(root) {
+    if (!root || typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function') return;
+    const segmenter = new Intl.Segmenter('zh-Hant', { granularity: 'word' });
+    const han = /[\u3400-\u9fff]/;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => han.test(node.nodeValue) && !(node.parentElement && node.parentElement.closest('.nowrap, .cjk-w'))
+        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const parts = [];
+      for (const { segment, isWordLike } of segmenter.segment(node.nodeValue)) {
+        const isHan = isWordLike && han.test(segment);
+        const previous = parts[parts.length - 1];
+        if (isHan && segment.length === 1 && previous && previous.han && CJK_SUFFIX.includes(segment)) previous.text += segment;
+        else if (isHan && segment.length === 1 && previous && previous.han && previous.single) previous.text += segment;
+        else parts.push({ text: segment, han: isHan, single: isHan && segment.length === 1 });
+      }
+      const fragment = document.createDocumentFragment();
+      for (const part of parts) {
+        if (part.han && part.text.length > 1) {
+          const span = document.createElement('span');
+          span.className = 'cjk-w';
+          span.textContent = part.text;
+          fragment.appendChild(span);
+        } else fragment.appendChild(document.createTextNode(part.text));
+      }
+      node.parentNode.replaceChild(fragment, node);
+    }
+  }
+  const wrapHelpCardText = () => document.querySelectorAll('.features-shell h3, .features-shell p').forEach(wrapCjkWords);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wrapHelpCardText);
+  else wrapHelpCardText();
