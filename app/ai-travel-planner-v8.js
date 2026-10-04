@@ -12132,6 +12132,7 @@
       removeStaleStopMarkers();
       renderItineraryDisplay();
       refreshRouteDirections();
+      void syncMapToCurrentTrip(true);
       feedbackToast('↩ 已還原，行程維持原樣', 'blue');
     }
     switchView('itinerary');
