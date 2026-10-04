@@ -4012,7 +4012,7 @@ async function saveMicroTripToFirebase(trip) {
       role, members: _m, memberEmails: _me, memberUids: _mu, editorEmails: _ee,
       ownerEmail: _oe, ownerUid: _ou, ownerName: _on,
       guestReadable: _gr, shareToken: _stk, inviteCode: _ivc, maxMembers: _mmx,
-      collabCreatedAt: _ccat,
+      collabCreatedAt: _ccat, cloudSyncedFor: _csf,
       ...cleanTrip
     } = sanitizeTripForFirestore(serializeTripForStorage(trip));
     // merge:true：共編行程的協作欄位（members / inviteCode / memberEmails…）由 collab.js 另外維護，
@@ -4029,6 +4029,9 @@ async function saveMicroTripToFirebase(trip) {
       payload.userEmail = currentUser && currentUser.email ? currentUser.email : 'unknown';
     }
     await tripRef.set(payload, { merge: true });
+    if (!trip.collab && payload.userEmail && payload.userEmail !== 'unknown') {
+      trip.cloudSyncedFor = String(payload.userEmail).toLowerCase();
+    }
     console.log('微旅行已保存到 Firebase:', trip.id);
     return true;
   } catch (error) {
@@ -4110,6 +4113,13 @@ function persistableMyTrips() {
   return myTrips.filter((t) => !(t && t.__transientGuest)).map(serializeTripForStorage);
 }
 
+// Only a confirmed server result may remove a local trip known to have been synced.
+function shouldDropLocalOnlyTrip(trip, meLower) {
+  if (!trip || typeof trip !== 'object') return false;
+  if (trip.collab || trip.__transientGuest || trip.__saving) return false;
+  return !!meLower && trip.cloudSyncedFor === meLower;
+}
+
 function saveState() {
   try {
     localStorage.setItem('wai_user', JSON.stringify({isLoggedIn, currentUser}));
@@ -4149,7 +4159,8 @@ async function loadState() {
         const snapshot = await firebaseDb.collection('micro_trips')
           .where('userEmail', '==', currentUser.email)
           .get();
-        if (!snapshot.empty) {
+        if (!(snapshot.metadata && snapshot.metadata.fromCache)) {
+           const meLower = String(currentUser.email).toLowerCase();
            const _ms = (c) => (c && typeof c.toMillis === 'function') ? c.toMillis() : (c && c.seconds ? c.seconds * 1000 : 0);
            const fbTrips = snapshot.docs
              .slice()
@@ -4161,13 +4172,15 @@ async function loadState() {
                } else if (data.createdAt && typeof data.createdAt === 'object' && data.createdAt.seconds) {
                  data.createdAt = new Date(data.createdAt.seconds * 1000).toLocaleDateString('zh-TW');
                }
+               if (!data.id) data.id = doc.id;
+               if (!data.collab) data.cloudSyncedFor = meLower;
                return data;
            });
            const mergedTrips = [...fbTrips];
            myTrips.forEach(localTrip => {
-              if (!mergedTrips.find(t => t.id === localTrip.id)) {
-                  mergedTrips.push(localTrip);
-              }
+              if (mergedTrips.find(t => t.id === localTrip.id)) return;
+              if (shouldDropLocalOnlyTrip(localTrip, meLower)) return;
+              mergedTrips.push(localTrip);
            });
            myTrips = mergedTrips;
            localStorage.setItem(myTripsStorageKey(), JSON.stringify(persistableMyTrips()));
@@ -5967,21 +5980,79 @@ async function deleteMyTrip(id) {
     ? `要退出共編行程「${tripName}」嗎？\n退出後你將不再看到此行程；擁有者的行程不會被刪除。`
     : `確定要刪除行程「${tripName}」嗎？此動作無法復原。`;
   if (!window.confirm(msg)) return;
-  myTrips = myTrips.filter(x => x.id !== id);
-  if (collabState && collabState.tripId === id) closeCollabPanel(); // 刪到正在看的就先關面板
-  saveState(); renderMyTrips(); renderSideMyTrips();
+  if (t && t.__saving) { showToast('行程還在保存到雲端，請稍候再刪除', 'orange'); return; }
+  const removeLocal = () => {
+    myTrips = myTrips.filter(x => x.id !== id);
+    if (collabState && collabState.tripId === id) closeCollabPanel();
+    saveState(); renderMyTrips(); renderSideMyTrips();
+  };
   // 共編行程：owner 刪除時連遠端一起清（避免孤兒佔 Firestore）；
   // 非 owner 成員則要真正「離開」——把自己從遠端 memberEmails/members 移除，
   // 否則只清本機、email 仍留在 memberEmails，下次登入 fetchMyCollabTrips 又會把行程抓回來。
   if (t && t.collab && firebaseEnabled && firebaseDb && window.WAI_COLLAB) {
+    removeLocal();
     const myEmail = (currentUser && currentUser.email) || '';
+    let failed = false;
     if (t.role === 'owner') {
-      try { await WAI_COLLAB.deleteSharedTrip(id, t.inviteCode); } catch (e) { console.warn('刪除共用行程失敗：', e); }
+      try { await WAI_COLLAB.deleteSharedTrip(id, t.inviteCode); } catch (e) { failed = true; console.warn('刪除共用行程失敗：', e); }
     } else if (myEmail) {
-      try { await WAI_COLLAB.leaveSharedTrip(id, myEmail); } catch (e) { console.warn('離開共用行程失敗：', e); }
+      try { await WAI_COLLAB.leaveSharedTrip(id, myEmail); } catch (e) { failed = true; console.warn('離開共用行程失敗：', e); }
+    }
+    if (failed) {
+      showToast(isLeave ? '⚠️ 雲端退出失敗，重新整理後可能又會出現，請檢查網路後再試' : '⚠️ 雲端刪除失敗，重新整理後可能又會出現，請檢查網路後再試', 'orange');
+      return;
+    }
+    showToast(isLeave ? '👋 已離開共編行程' : '🗑 已刪除行程', 'red');
+    return;
+  }
+  if (t && !t.collab) {
+    let cloud;
+    try { cloud = await deleteOwnTripFromCloud(t); }
+    catch (e) {
+      console.warn('刪除雲端行程失敗：', e);
+      showToast('⚠️ 雲端刪除失敗，行程尚未刪除。請檢查網路後再試', 'orange');
+      return;
+    }
+    if (cloud === 'offline') {
+      showToast('⚠️ 目前無法連線雲端，行程尚未刪除。請連線後再試', 'orange');
+      return;
     }
   }
-  showToast(t && t.collab && t.role !== 'owner' ? '👋 已離開共編行程' : '🗑 已刪除行程', 'red');
+  removeLocal();
+  showToast('🗑 已刪除行程', 'red');
+}
+
+// Delete child documents with the parent in the same batch so rules can still
+// check parent membership. Firestore does not cascade deletes to subcollections.
+async function deleteOwnTripFromCloud(trip) {
+  const authUser = (typeof firebaseAuth !== 'undefined' && firebaseAuth) ? firebaseAuth.currentUser : null;
+  const email = (currentUser && currentUser.email) || '';
+  const ready = firebaseEnabled && firebaseDb && authUser && email && typeof firebase !== 'undefined';
+  if (!ready) return (isLoggedIn && trip.cloudSyncedFor) ? 'offline' : 'local-only';
+
+  const tripRef = firebaseDb.collection('micro_trips').doc(trip.id);
+  const found = await firebaseDb.collection('micro_trips')
+    .where(firebase.firestore.FieldPath.documentId(), '==', trip.id)
+    .where('userEmail', '==', email)
+    .get({ source: 'server' });
+  if (found.empty) return 'local-only';
+
+  const uid = authUser.uid;
+  const refs = [];
+  const photos = await tripRef.collection('photos').get({ source: 'server' });
+  photos.forEach((doc) => refs.push(doc.ref));
+  refs.push(tripRef.collection('memories').doc(uid));
+  refs.push(tripRef.collection('recaps').doc(uid));
+  refs.push(tripRef.collection('presence').doc(uid));
+  refs.push(tripRef.collection('presence').doc(String(email).toLowerCase().replace(/[^a-z0-9]/g, '_')));
+  const CHUNK = 450;
+  for (let i = 0; i < refs.length; i += CHUNK) {
+    const batch = firebaseDb.batch();
+    refs.slice(i, i + CHUNK).forEach((ref) => batch.delete(ref));
+    if (i + CHUNK >= refs.length) batch.delete(tripRef);
+    await batch.commit();
+  }
+  return 'deleted';
 }
 // B2：所有對外分享都使用含 shareToken 的訪客唯讀連結；
 // 單純 ?id=... 只供本人／已加入成員開啟，不具備跨帳號分享權限。
