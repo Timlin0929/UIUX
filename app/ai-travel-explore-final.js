@@ -529,9 +529,31 @@ function attachStopAlternatives(stops, destination) {
   return stops;
 }
 
+// 候選景點：先用目的地半徑「篩」，再依品質「挑」。
+// 原本是資料檔順序（＝依名稱排序）取前 40 個：「台東市」對到全縣那一桶，清單開頭就是
+// 9420（大武）、都歷（成功）、三仙台，prompt 又寫「只能從清單挑選」。
+// 不能改成「依距離由近到遠」：台東市 2km 內就有 35 個小景點，會把加路蘭、卑南遺址擠出清單。
+// 沒有評分的景點當 4.0（不懲罰沒被評過的地方，例如利吉惡地），Places 驗證過的稍微加分，同分再比距離。
+function rankPoisByDestination(pois, destination) {
+  const center = getDestinationCenter(destination);
+  if (!center || !Array.isArray(pois)) return pois || [];
+  const maxM = getDestinationMaxDistanceMeters(destination);
+  const scored = pois
+    .map((poi) => ({
+      poi,
+      d: haversineM(center, { lat: Number(poi.lat), lng: Number(poi.lng) }),
+      q: (Number(poi.rating) || 4.0) + (poi.placeVerified ? 0.1 : 0)
+    }))
+    .filter((x) => Number.isFinite(x.d));
+  const inside = scored.filter((x) => x.d <= maxM);
+  // 範圍內太少（資料不足）時退回「最近的那幾個」，總比給 AI 一份太短的清單好
+  if (inside.length < 8) return scored.sort((a, b) => a.d - b.d).map((x) => x.poi);
+  return inside.sort((a, b) => b.q - a.q || a.d - b.d).map((x) => x.poi);
+}
+
 // 用本地景點清單組「【已驗證景點快取】」hint（格式與 buildFirebasePoiHintBlock 一致），交給 AI 只做排序。
 function buildLocalPoiHintBlock(destination) {
-  const pois = getLocalPoiList(destination);
+  const pois = rankPoisByDestination(getLocalPoiList(destination), destination);
   if (!pois.length) return '';
   const poiLines = pois.slice(0, 40).map((poi) => {
     const poiLat = Number(poi.lat);
@@ -1695,7 +1717,32 @@ async function requestGeminiMicroTravelPlan(wizardData, options = {}) {
       text = await requestOnce(GEMINI_MODEL, false);
     }
   }
-  return parsePlanJsonFromText(text);
+  return normalizeAiPlanStops(parsePlanJsonFromText(text), hintBlock);
+}
+
+// 把 AI 回的站名對回 prompt 裡給的候選清單，並丟掉格式錯誤的「A → B」路段。
+// 名稱寫短（「榕樹下米苔目(中華路創始老店-別無分店)」→「榕樹下米苔目」）就會對不上本地資料、改走 Places 驗證。
+// 只在「唯一」對得上時才改名，對到兩個以上就保留原名，交給後面原本的驗證流程。
+function normalizeAiPlanStops(plan, hintBlock) {
+  if (!plan || !Array.isArray(plan.stops)) return plan;
+  const norm = (s) => String(s || '').replace(/臺/g, '台').replace(/[\s()（）【】\[\]・·\*＊、,，.。'’"「」\-－—\_]/g, '').toLowerCase();
+  const candidates = [...String(hintBlock || '').matchAll(/(?:^|\n)(?:景點名稱|餐廳名稱)：([^\n]+)/g)]
+    .map((m) => m[1].replace(/^[^\p{L}\p{N}]+/u, '').trim())   // 景點名稱前可能帶 emoji
+    .filter(Boolean);
+  if (!candidates.length) return plan;
+  const exact = new Set(candidates);
+  const byNorm = candidates.map((name) => ({ name, n: norm(name) }));
+  const stops = plan.stops.filter((stop) => !/→|->|➡|⇒/.test(String((stop && stop.name) || '')));
+  for (const stop of stops) {
+    const name = String((stop && stop.name) || '').trim();
+    if (!name || exact.has(name)) continue;
+    const n = norm(name);
+    if (n.length < 3) continue;
+    const hits = byNorm.filter((c) => c.n === n || c.n.startsWith(n) || n.startsWith(c.n));
+    if (hits.length === 1) stop.name = hits[0].name;
+  }
+  if (stops.length !== plan.stops.length) stops.forEach((stop, i) => { if (stop && 'order' in stop) stop.order = i + 1; });
+  return { ...plan, stops };
 }
 
 function getStopCoordinate(stop) {
@@ -1956,6 +2003,9 @@ function getDestinationMaxDistanceMeters(destinationText) {
   if (!lookup) return 45000;
   if (/日本|韓國|歐洲/.test(lookup)) return 120000;
   if (/台北|新北|桃園|台中|台南|高雄|基隆|新竹/.test(lookup)) return 40000;
+  // 「台東市」是市區不是全縣：落到下一行的縣級 55km，prompt 就會寫「有效半徑約 55 公里」，
+  // 49km 外的三仙台也算範圍內（見 rankPoisByDestination）。
+  if (/^台東市(區)?$/.test(String(lookup).replace(/臺/g, '台'))) return 15000;
   if (/台東|花蓮|宜蘭|屏東|南投|嘉義|苗栗/.test(lookup)) return 55000;
   if (/土坂|達仁/.test(lookup)) return 8000;
   // 離島：地域極小，嚴格限縮半徑防止 AI 座標嚴重偏移通過驗證
@@ -3906,6 +3956,42 @@ function sanitizeTripForFirestore(value) {
       .map(([key, item]) => [key, sanitizeTripForFirestore(item)]));
   }
   return value; // 保留 Timestamp、GeoPoint、Date 與 FieldValue 等 SDK 型別。
+}
+
+// 生成後第一次存檔就給每站穩定的共編身分；演算法須與 planner 一致。
+function stableCollabStopId(stop, index) {
+  const existing = stop && (stop.collabStopId || stop.stopId);
+  if (existing) return String(existing);
+  const seed = [stop && stop.type || '', stop && stop.name || '', Number(index) || 0].join('|').toLowerCase();
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `cstop-${(hash >>> 0).toString(36)}`;
+}
+
+function assignCollabStopIds(stops) {
+  if (!Array.isArray(stops)) return stops;
+  // 第一輪保留既有 id，避免新站碰撞時改掉別的裝置正在使用的身分。
+  const used = new Set();
+  stops.forEach((stop) => {
+    const existing = stop && typeof stop === 'object' && (stop.collabStopId || stop.stopId);
+    if (existing) {
+      stop.collabStopId = String(existing);
+      used.add(stop.collabStopId);
+    }
+  });
+  // 第二輪只替新站配 id；碰撞時依序加 -2、-3。
+  stops.forEach((stop, i) => {
+    if (!stop || typeof stop !== 'object' || stop.collabStopId) return;
+    const base = stableCollabStopId(stop, i);
+    let id = base;
+    for (let n = 2; used.has(id); n += 1) id = `${base}-${n}`;
+    stop.collabStopId = id;
+    used.add(id);
+  });
+  return stops;
 }
 
 async function saveMicroTripToFirebase(trip) {
@@ -7466,6 +7552,8 @@ async function _doGeneration(trip, wData) {
     if (!Array.isArray(trip.stops) || trip.stops.length === 0) {
       throw new Error('這次沒有產生景點，原本的規劃偏好已保留，請重試生成。');
     }
+    // 在本機與 Firestore 存檔前配置，同一站兩邊會拿到同一個 id。
+    assignCollabStopIds(trip.stops);
     _genPerf.mark('step2 後處理');
     _genPerf.table('行程生成');
 
