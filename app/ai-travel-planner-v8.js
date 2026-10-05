@@ -12109,6 +12109,9 @@
     isReplanning = false;
     activeStopMenuId = null;
     chatActionSnapshot = null;
+    if (settleAppliedChatActionCards('已確認修改建議：目前行程已更新。')) {
+      aiConversationHistory.push({ role: 'ai', text: '使用者已確認修改建議，目前行程已更新。' });
+    }
     closeModifyWindow();
     removeStaleStopMarkers();
     renderItineraryDisplay();
@@ -12129,6 +12132,8 @@
     if (chatActionSnapshot) {
       replanStops = chatActionSnapshot;
       chatActionSnapshot = null;
+      settleAppliedChatActionCards('已還原：行程維持原樣。');
+      aiConversationHistory.push({ role: 'ai', text: '使用者選擇維持原行程，先前的修改建議已還原。' });
       removeStaleStopMarkers();
       renderItineraryDisplay();
       refreshRouteDirections();
@@ -13462,6 +13467,15 @@
     return JSON.stringify((replanStops || []).map((s) => [s.id, s.name, s.stayMin, s.manualStartMin, s.manualEndMin, s.dayIndex]));
   }
 
+  function settleAppliedChatActionCards(message) {
+    const notes = document.querySelectorAll('.chat-action-result[data-chat-action-stage="preview"]');
+    notes.forEach((note) => {
+      note.textContent = message;
+      note.dataset.chatActionStage = 'settled';
+    });
+    return notes.length;
+  }
+
   function appendChatActionConfirmCard(actions) {
     const area = document.getElementById('aiChatArea');
     if (!area) return;
@@ -13477,10 +13491,12 @@
     </article>`;
     const buttons = wrap.querySelectorAll('button[data-act]');
     const finish = (title, detail) => {
-      buttons.forEach((button) => { button.disabled = true; });
+      wrap.querySelector('.chat-action-buttons')?.remove();
+      wrap.querySelector('.chat-action-confirm > p')?.remove();
       const note = document.createElement('p');
       note.className = 'chat-action-result';
       note.textContent = detail ? `${title}：${detail}` : title;
+      if (title === '已套用到重新規劃畫面') note.dataset.chatActionStage = 'preview';
       wrap.querySelector('article').appendChild(note);
       area.scrollTop = area.scrollHeight;
     };
@@ -13522,7 +13538,12 @@
       .replace(/(?:我)?已(?:經)?(?:將|把)/g, '建議')
       .replace(/已(?:經)?(?:幫您|幫你)?(替換|換成|新增|加入|刪除|移除|調整|更新|修改|套用)/g, '建議$1')
       .replace(/已(?:經)?(?:改好|完成修改|完成調整)/g, '建議這樣修改');
-    return text + '\n（以上是建議，還沒改到你的行程，按下方「套用」才會修改。）';
+    // 確認卡獨自說明是否已改動、何時按「套用」；回覆只保留建議內容。
+    const suggestion = (text.match(/[^。！？\n]+[。！？]?|\n/g) || [])
+      .filter((sentence) => !/套用/.test(sentence)
+        && !/(?:尚未|還沒|沒有|未).{0,12}(?:變動|更動|修改|加入|改動|改到)/.test(sentence))
+      .join('').trim();
+    return suggestion || '我整理了以下修改建議。';
   }
 
   const ISLAND_SEA_NOTICE = '離島海況請以航班公告為準。';
@@ -15794,17 +15815,20 @@
       // 問「有沒有 7-11」是在詢問資訊；模型偶爾仍回 add_stop，不能擅自改行程。
       const rawActions = Array.isArray(aiResult.actions) ? aiResult.actions : [];
       const noWeatherData = chatWeatherUnavailableForQuestion(userMessage, weatherHint);
-      const actions = noWeatherData || isInformationalTravelQuestion(userMessage) ? [] : normalizeChatActions(rawActions);
-
-      const replyLines = [];
       // 伺服器端 scope-guard 的範圍外回覆比較生硬，畫面上換成管家的說法
       const rawReply = String(aiResult.reply || '').trim();
-      const isServerOffTopic = rawReply.replace(/[。.!！\s]/g, '') === SERVER_OFF_TOPIC_REPLY.replace(/[。.!！\s]/g, '');
+      const normalizedReply = rawReply.replace(/[。.!！\s]/g, '');
+      const isServerOffTopic = normalizedReply === SERVER_OFF_TOPIC_REPLY.replace(/[。.!！\s]/g, '');
+      const isOffTopicReply = isServerOffTopic || normalizedReply === AI_OFF_TOPIC_REPLY.replace(/[。.!！\s]/g, '');
+      const actions = noWeatherData || isOffTopicReply || isInformationalTravelQuestion(userMessage) ? [] : normalizeChatActions(rawActions);
+
+      const replyLines = [];
       let replyText = isServerOffTopic ? AI_OFF_TOPIC_REPLY : (rawReply || '我幫你整理了一個即時建議。');
       if (noWeatherData) replyText = '目前查不到這天的預報。請稍後再試，或查看「天氣」分頁。';
-      if (actions.length) replyText = softenAppliedClaims(replyText);
+      if (rawActions.length && !noWeatherData && !isOffTopicReply) replyText = softenAppliedClaims(replyText);
       replyLines.push(ensureIslandSeaNotice(userMessage, replyText));
-      if (rawActions.length && !actions.length && !noWeatherData) {
+      if (rawActions.length && !actions.length && !noWeatherData && !isOffTopicReply
+          && !/(?:尚未|還沒|沒有|未).{0,12}(?:變動|更動|修改|加入|套用|改動|改到)/.test(replyText)) {
         // 模型的 reply 可能寫了「已幫你加入」，但動作被擋下了，要講清楚行程沒變
         replyLines.push('');
         replyLines.push('（行程還沒有變動。想加進行程的話，跟我說「幫我加入○○」就好。）');
