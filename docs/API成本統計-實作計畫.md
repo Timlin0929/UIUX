@@ -73,7 +73,7 @@ generation_runs/{runId}
 建立費率表模組（**per-model**，不是單一組數字）：
 
 - `gemini-3-flash-preview`：輸入 / 輸出含推理 兩種單價
-- `gemini-3.1-flash-image`：**圖片模型計價與文字不同**，不可套用文字公式
+- `gemini-3-pro-image`：**圖片模型計價與文字不同**，不可套用文字公式
 - Places (New)：依 endpoint + Field Mask 對應 SKU
 
 **驗收**

@@ -4434,21 +4434,26 @@
     const title = currentTripTitle || '我的旅遊行程';
     const dateRange = (currentTripWindow.start && currentTripWindow.end)
       ? `（行程時間：${currentTripWindow.start} ～ ${currentTripWindow.end}）` : '';
+    // 編號清單：讓模型在圖上標 1、2、3…，使用者看編號就知道順序
     const stopList = schedule.length
-      ? schedule.map(s => `${s.emoji || ''}${s.name}`).join('、')
+      ? schedule.map((s, i) => `${i + 1}. ${s.emoji || ''}${s.name}`).join('\n')
       : '（尚未建立行程）';
 
+    // 沒有明確要求「地圖底圖」時，台東市這類沒有明顯輪廓的行程會被畫成白底拼貼（綠島則因島形自然成圖）。
+    // 不給座標／距離：模型會把數字畫進圖裡，市區站又密，照真實位置排會擠成一團 → 用示意地圖。
     const lines = [
       `請幫我繪製一張「${title}」旅遊地圖插畫。${dateRange}`,
       '',
       `主角是「${character}」，以可愛卡通造型出現在旅途中，扮演嚮導或旅伴角色。`,
       '',
-      '行程如下：',
+      '行程如下（依序）：',
       stopList,
       '',
-      '請根據我的行程規劃，加入適當的細節插圖。',
-      '根據行程依序畫成一張日式雜誌插畫的旅遊行程圖，我提到的地點、環境、景觀、食物、餐廳，都要在圖中提到，且儘可能的擬真。插圖的比例為 16:9。',
-      '整體要給人可愛、清新的氛圍，字體清晰容易閱讀、並確保內容都是「繁體中文」無錯字。'
+      '畫面以俯瞰的手繪示意地圖為底：背景要有海岸線與海、山脈、綠地與道路等地圖元素，看起來像一張旅遊地圖，而不是白底拼貼。各站標上編號 1、2、3…；位置示意即可，不需要符合真實比例，各站平均分布、標籤不要重疊。',
+      `用一條不中斷的連續虛線路線，嚴格依 1→2→3→…→${schedule.length || 1} 的順序把相鄰編號的站依序連起來：每一站只連到前一站和下一站，路線不可跳站、分岔或斷開，也不要畫出與順序無關的連線。`,
+      '每一站旁邊放一個小插圖，表現該站的景觀或食物；地圖與路線是主體，插圖是點綴。',
+      '整體是日式雜誌插畫風格，比例 16:9，可愛、清新，字體清晰容易閱讀，並確保內容都是「繁體中文」無錯字。',
+      '圖中只標示上述行程提到的地點名稱，不要自行加入行程以外的店名、餐廳或景點名稱。'
     ];
     return lines.join('\n');
   }
@@ -4478,7 +4483,7 @@
 
     const prompt = buildImagePrompt(character);
     console.log('[行程圖 Prompt]', prompt);
-    const imageModel = 'gemini-3.1-flash-image';
+    const imageModel = 'gemini-3-pro-image';
     try {
       // 代理模式沒有前端金鑰 → 不要掛空的 ?key=（金鑰由後端注入），與其他 Vertex 呼叫一致
       const endpoint = vertex.ready
@@ -4501,7 +4506,8 @@
         throw new Error(errBody.error?.message || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      const part = data.candidates?.[0]?.content?.parts?.[0];
+      // Pro 會在圖片前夾帶文字／thought part，不能只看 parts[0]
+      const part = (data.candidates?.[0]?.content?.parts || []).find(p => p.inlineData?.data && !p.thought);
       if (!part?.inlineData?.data) { throw new Error('未收到圖片資料。回應：' + JSON.stringify(data).slice(0, 200)); }
       posterGeneratedImageBase64 = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
       if (firebaseStorage) {
@@ -8323,7 +8329,7 @@
               ${posterImageGenerating ? '生成中…' : '生成插圖'}
             </button>
           </div>
-          ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">✨ AI 正在繪製插圖，請稍候（約 10–30 秒）…</div>` : ''}
+          ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">✨ AI 正在繪製插圖，請稍候（約 20–40 秒）…</div>` : ''}
           ${posterGeneratedImageBase64 ? `
             <img id="posterGeneratedImg"
                  src="${posterGeneratedImageBase64}"
@@ -18196,7 +18202,28 @@
   let _osmInFlight = Promise.resolve();
   function _osmSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // 代理模式：交給同源 /api/overpass（伺服器帶 User-Agent 換端點、快取）。
+  // 瀏覽器直連時端點常回 406/500 且錯誤頁不帶 CORS 標頭，F12 會一片紅；
+  // 代理在全部端點失敗時回 200＋{ ok:false }，這裡視同失敗（不快取、畫近似色塊）。
+  async function _overpassViaProxy(q) {
+    try {
+      const res = await fetch(`${VERTEX_PROXY_BASE}/overpass`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: q,
+        signal: AbortSignal.timeout(70000) // 代理最多輪詢 3 個端點 × 20 秒
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      return data && data.ok !== false ? data : null;
+    } catch (e) { return null; }
+  }
+
   function _overpassRequest(q) {
+    if (VERTEX_PROXY_BASE) {
+      _osmInFlight = _osmInFlight.then(() => _overpassViaProxy(q), () => _overpassViaProxy(q));
+      return _osmInFlight;
+    }
     const run = async () => {
       for (let attempt = 0; attempt < _OVERPASS_ENDPOINTS.length * 2; attempt++) {
         const ep = _OVERPASS_ENDPOINTS[attempt % _OVERPASS_ENDPOINTS.length];
