@@ -1334,3 +1334,6 @@ button.notif-item{cursor:pointer;}
 .hero-link-tertiary:hover{color:#fff;}
 .hero-link-tertiary:focus-visible{outline:2px solid #fff;outline-offset:3px;border-radius:6px;}
 @media(max-width:900px){ .hero-link-tertiary{margin-left:0;} }
+
+/* Facebook 登入未通過 Meta 商家驗證前預設隱藏；TRAVEL_APP_CONFIG.FACEBOOK_LOGIN_ENABLED=true 才顯示（.lm-social-btn 的 display:flex 會蓋過 hidden 屬性） */
+[data-auth-provider][hidden]{display:none !important;}

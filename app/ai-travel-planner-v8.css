@@ -8656,3 +8656,6 @@ button.notif-item { cursor: pointer; }
    syncMapControlPosition() 把整組控制項換到 RIGHT_CENTER 處理
    （用 Maps 官方的 controlOptions，不靠 CSS 硬推）。
    這裡原本那條 margin-bottom 只推得動自訂按鈕、推不動內建縮放鍵，已移除。 */
+
+/* Facebook 登入未通過 Meta 商家驗證前預設隱藏；TRAVEL_APP_CONFIG.FACEBOOK_LOGIN_ENABLED=true 才顯示（.lm-social-btn 的 display:flex 會蓋過 hidden 屬性） */
+[data-auth-provider][hidden]{display:none !important;}
