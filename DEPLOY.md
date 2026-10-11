@@ -140,6 +140,16 @@ http {
             proxy_read_timeout 300s;      # AI 生成較久
         }
 
+        # Firebase Auth 處理頁掛在自有網域（authDomain，見 Step 4 方案 C-3 第 4 點）
+        # ^~ 優先於下面的 regex location（靜態快取、隱藏檔）
+        location ^~ /__/ {
+            proxy_pass https://project-720a680b-3ad1-40d1-b07.firebaseapp.com;
+            proxy_set_header Host project-720a680b-3ad1-40d1-b07.firebaseapp.com;
+            proxy_ssl_server_name on;
+            proxy_ssl_name project-720a680b-3ad1-40d1-b07.firebaseapp.com;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+
         # 靜態資源快取（CSS/圖片/字型；不含 .js — 見下方說明）
         location ~* \.(css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
             expires 7d;
@@ -248,6 +258,13 @@ Firebase Web API key（`FIREBASE_CONFIG.apiKey`，`AIzaSyDp9...`）本質是識�
    - ⚠️ **裸 IP 的坑**：授權網域主要管 **OAuth 彈窗登入（Google 登入）**。有些專案**不接受裸 IP**、或 Google 彈窗從 IP 開會失敗。若遇到，**Email/密碼登入不受影響**照常可用；要讓 Google 登入也能用，就得用網域——**這也是建議做 DuckDNS 的原因**：改加 `travel-link-ai.duckdns.org` 到授權網域（配合 Step 5 的 SSL）。
 2. **Firestore 安全規則**：這是資料庫的真正門鎖。[firestore.rules](firestore.rules) 已限制「只有登入者/資料擁有者可讀寫」，**已於 2026-07 部署並實測通過**（匿名寫入、跨使用者讀取皆被擋；本人讀寫、訪客讀分享行程正常）。更新規則：Console → Firestore → 規則，或 `firebase deploy --only firestore:rules`。**別讓規則退回「任何人可讀寫」的預設。**
 3. （選配）Cloud Console → 憑證 → 這把 Browser key → 「API 限制」只勾 Firebase 用到的（Identity Toolkit API、Token Service API、Cloud Firestore API）。
+4. **Google 登入畫面顯示自有網域（authDomain，2026-10-11 起）**：預設 `authDomain` 是 `project-720a680b-3ad1-40d1-b07.firebaseapp.com`，Google 的「選擇帳戶」與同意畫面會顯示「繼續使用「…firebaseapp.com」」。改成顯示 `travel-link-ai.duckdns.org` 需要三處一起設定，**順序不能反**：
+   1. **nginx**：加上 Step 2 的 `location ^~ /__/` 區塊，把 Firebase Auth 處理頁代理到 firebaseapp.com，`nginx -t` 後 reload。驗證：`https://travel-link-ai.duckdns.org/__/auth/handler` 回 200。（`/__/firebase/init.json` 回 404 是正常的——直連 firebaseapp.com 也是 404，登入用不到。）
+   2. **Google Cloud Console → API 和服務 → 憑證**：打開**網站用的那個** OAuth 用戶端（Web client (auto created by Google Service)，用戶端 ID 開頭 `62101`），在「**已授權的重新導向 URI**」（不是上面的「已授權的 JavaScript 來源」）加入 `https://travel-link-ai.duckdns.org/__/auth/handler`，儲存後等幾分鐘生效。原本的 firebaseapp.com 那條保留。
+   3. **`app/weather.env.js`**（gitignored，換機器要手動改）：`FIREBASE_CONFIG.authDomain` 改成 `'travel-link-ai.duckdns.org'`。這個檔是 `no-cache`，改完重新整理即生效，不用跳版本號。
+   - 順序反了（先改 authDomain、URI 還沒加）會出現 `400 redirect_uri_mismatch`，**所有人都登不進去**；把 `authDomain` 改回 firebaseapp.com 即可立刻還原。錯誤頁的「錯誤詳細資料」會寫出實際送出的 `redirect_uri`，用來比對。
+   - 之後開放 Facebook 登入時，Meta App 的「有效的 OAuth 重新導向 URI」也要加同一條。
+   - 要顯示「TravelLinkAI」名稱與 logo（而非網域）是另一件事：Google Auth Platform → 品牌塑造，並通過品牌驗證（需在 Search Console 驗證網域）。
 
 #### C-4. TDX / CWA（低風險，選配）
 
@@ -458,6 +475,7 @@ Register-ScheduledTask -TaskName "Nginx Auto Block" -Action $action -Trigger $tr
 □ 9. Firebase 授權網域已加 IP、Firestore 規則已限制（方案 C-3）
 □ 10. Google Maps 地圖正常顯示、Firebase 登入正常、AI 行程生成正常
 □ 11. 手機（行動網路）可正常開啟
+□ 12. /__/auth/handler → 回 200；Google 登入畫面顯示 travel-link-ai.duckdns.org（方案 C-3 第 4 點）
 ```
 
 > 3~6 可本機快速驗證（nginx + 代理啟動後）：
