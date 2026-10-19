@@ -16,6 +16,8 @@ const os = require('os');
 const crypto = require('crypto');
 
 const MANIFEST = require(path.join(__dirname, '..', 'app', 'recap-manifest.js'));
+const TEMPLATES = require(path.join(__dirname, '..', 'app', 'recap-templates.js'));
+const TIMELINE = require(path.join(__dirname, '..', 'app', 'recap-timeline.js'));
 const { renderRecapVideo } = require('./recap-renderer.js');
 
 const OUT_DIR = path.join(os.tmpdir(), 'wai-recap-jobs');
@@ -23,6 +25,7 @@ const JOB_TTL_MS = 30 * 60 * 1000;      // 產物與 job 記錄保留 30 分鐘
 const MAX_QUEUE = 4;                     // 佇列上限（含正在跑的那支）
 const MAX_STOPS = 40;
 const MAX_TOTAL_MS = 60 * 1000;          // 影片長度硬上限 60s
+const MAX_TIMELINE_CLIPS = 200;          // 時間軸片段數上限（40 站的行程也遠低於此）
 const FPS = 30;
 
 try { fs.mkdirSync(OUT_DIR, { recursive: true }); } catch (e) {}
@@ -81,11 +84,25 @@ function sanitizeRoutePoints(raw, segCount) {
 
 function badReq(msg) { const e = new Error(msg); e.status = 400; return e; }
 
-function buildManifest(trip, mediaCount, routePoints, mediaStopIndices) {
-  const manifest = MANIFEST.buildRecapManifest(trip, {
-    mediaCount: Math.max(0, Math.min(12, finite(mediaCount) || 0)),
-    mediaStopIndices: Array.isArray(mediaStopIndices) ? mediaStopIndices : []
-  });
+// 樣板只接受伺服器認得的 id；時間軸（前端推薦版或之後編輯過的版本）由 recap-timeline.js
+// 重新驗證：只採用對得回這趟行程的片段、時長夾在範圍內，照片只能用這次一起送來的那幾張。
+function resolveManifestOptions(trip, photos, rawTemplateId, rawTimeline) {
+  const templateId = TEMPLATES.hasTemplate(rawTemplateId) ? String(rawTemplateId) : TEMPLATES.DEFAULT_ID;
+  if (rawTimeline != null) {
+    if (typeof rawTimeline !== 'object' || !Array.isArray(rawTimeline.clips)) throw badReq('invalid timeline');
+    if (rawTimeline.clips.length > MAX_TIMELINE_CLIPS) throw badReq('timeline too long');
+    const opts = TIMELINE.compileTimeline(trip, rawTimeline, photos);
+    opts.template = templateId;
+    return opts;
+  }
+  return { template: templateId, mediaCount: photos.length, mediaStopIndices: photos.map((p) => p.stopIndex) };
+}
+
+function buildManifest(trip, options, routePoints) {
+  const opts = Object.assign({}, options);
+  opts.mediaCount = Math.max(0, Math.min(12, finite(opts.mediaCount) || 0));
+  opts.mediaStopIndices = Array.isArray(opts.mediaStopIndices) ? opts.mediaStopIndices : [];
+  const manifest = MANIFEST.buildRecapManifest(trip, opts);
   if (manifest.timeline.totalMs > MAX_TOTAL_MS) throw badReq('video too long');
   if (routePoints) {
     const pts = sanitizeRoutePoints(routePoints, manifest.segments.length);
@@ -264,8 +281,8 @@ function mountRecapJobs(app, deps) {
     try {
       const trip = sanitizeTrip(req.body && req.body.trip);
       photos = sanitizePhotos(req.body && req.body.photos, trip.stops.length);
-      const mediaStopIndices = photos.map((p) => p.stopIndex);
-      manifest = buildManifest(trip, photos.length, req.body && req.body.routePoints, mediaStopIndices);
+      const opts = resolveManifestOptions(trip, photos, req.body && req.body.templateId, req.body && req.body.timeline);
+      manifest = buildManifest(trip, opts, req.body && req.body.routePoints);
     } catch (err) {
       return res.status(err.status || 400).json({ error: 'invalid input', message: err.message });
     }
@@ -296,4 +313,4 @@ function mountRecapJobs(app, deps) {
   console.log('[recap] job 端點已掛載：POST /api/recap/render、GET /api/recap/jobs/:id[/download]');
 }
 
-module.exports = { mountRecapJobs: mountRecapJobs, _internals: { sanitizeTrip, buildManifest, fetchBasemap } };
+module.exports = { mountRecapJobs: mountRecapJobs, _internals: { sanitizeTrip, sanitizePhotos, resolveManifestOptions, buildManifest, fetchBasemap } };

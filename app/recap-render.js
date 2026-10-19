@@ -231,7 +231,8 @@
     for (var i = 1; i < n; i++) {
       var d0 = timing.depart[i - 1], a1 = timing.arrive[i];
       if (tMs < a1) { // 在第 i 段移動中：沿折線走 progLen
-        var f = ease((tMs - d0) / Math.max(1, a1 - d0));
+        var raw = clamp((tMs - d0) / Math.max(1, a1 - d0), 0, 1);
+        var f = (manifest.template && manifest.template.segmentEase === 'linear') ? raw : ease(raw);
         var dist = segStart[i - 1] + (segStart[i] - segStart[i - 1]) * f;
         var pm = at(dist);
         return { x: pm.x, y: pm.y, ang: pm.ang, reached: i - 1, heading: i, dwelling: false, pulse: 0, progLen: dist };
@@ -251,7 +252,9 @@
     var fit = { cx: world.center.x, cy: world.center.y, scale: world.fitScale };
     var follow = { cx: carPos.x, cy: carPos.y, scale: world.followScale };
     var cam;
-    if (tMs < timing.routeStart) {
+    if (tMs < timing.routeStart && manifest.cover && manifest.cover.style === 'photoCut') {
+      cam = fit;
+    } else if (tMs < timing.routeStart) {
       // 開頭：從台灣全景「俯衝」到整條行程路線（fit）。前 18% 停在全景讓觀眾看清楚，再一路 zoom in。
       // 終點停在路線全景（而非鑽到單一站）→ 落點是清晰的路線細圖，避免中段鑽太深只剩放大的低倍圖。
       var tw = world.taiwan || fit;
@@ -399,6 +402,24 @@
     drawShape(ctx, mode, col); ctx.restore();
   }
 
+  function drawCoverPhoto(ctx, img, m, W, H, progress) {
+    ctx.save();
+    ctx.fillStyle = '#0a1214'; ctx.fillRect(0, 0, W, H);
+    var z = 1.04 + progress * 0.06;
+    var s = Math.max(W / img.width, H / img.height) * z;
+    var dw = img.width * s, dh = img.height * s;
+    ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    var g = ctx.createLinearGradient(0, H * 0.55, 0, H);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.72)');
+    ctx.fillStyle = g; ctx.fillRect(0, H * 0.55, W, H * 0.45);
+    ctx.textAlign = 'left';
+    ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 18;
+    ctx.fillStyle = '#fff'; ctx.font = '800 112px ' + SANS; ctx.fillText(m.trip.title, 84, H * 0.84);
+    var sub = [m.trip.region, m.trip.dateLabel].filter(Boolean).join(' · ');
+    if (sub) { ctx.fillStyle = '#9fe3c8'; ctx.font = '600 52px ' + SANS; ctx.fillText(sub, 84, H * 0.84 + 84); }
+    ctx.restore();
+  }
+
   // ── 字卡 ──
   function titleCard(ctx, m, W, H, a) {
     ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
@@ -451,7 +472,15 @@
     drawBg(ctx, W, H, world, cam, basemap);   // 底圖需要鏡頭，故先算 car/cam
     var screenPts = world.points.map(function (p) { return cam.toScreen(p); });
     var carScreen = cam.toScreen({ x: car.x, y: car.y });
-    if (tMs < tl.coverMs) {
+    var coverImg = (m.cover && m.cover.style === 'photoCut' && media && media.images) ? media.images[m.cover.photoStopIndex] : null;
+    if (tMs < tl.coverMs && coverImg && tMs < m.cover.photoMs) {
+      // 電影感開場：實景照片 → 在 photoMs 硬切（不淡出）
+      drawCoverPhoto(ctx, coverImg, m, W, H, tMs / Math.max(1, m.cover.photoMs));
+    } else if (tMs < tl.coverMs && m.cover && m.cover.style === 'photoCut') {
+      // 硬切後停半拍：只有地圖與淡淡的路線底，路線還沒開始畫（照片抓不到時這段也當開場）
+      drawRouteBase(ctx, world, cam);
+      if (!coverImg) titleCard(ctx, m, W, H, 1);
+    } else if (tMs < tl.coverMs) {
       drawRouteBase(ctx, world, cam);
       var ca = tMs < 400 ? tMs / 400 : (tMs > tl.coverMs - 400 ? Math.max(0, (tl.coverMs - tMs) / 400) : 1);
       titleCard(ctx, m, W, H, ca);

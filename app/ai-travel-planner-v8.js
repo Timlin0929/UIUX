@@ -9133,6 +9133,8 @@
         <label><input type="radio" name="memoryAudioMode" value="original" ${memoryStudioState.audioMode === 'original' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 保留片段原聲</label>
         <label><input type="radio" name="memoryAudioMode" value="muted" ${memoryStudioState.audioMode === 'muted' ? 'checked' : ''} onchange="memorySetAudioMode(this.value)"> 靜音</label>
       </fieldset>` : ''}
+      ${renderRecapTemplatePicker()}
+      <div id="recapTimelinePreview">${renderRecapTimelinePreview()}</div>
       <div class="memory-video-status" role="status">
         <button type="button" id="recapGenerateBtn" class="memory-primary-btn" onclick="startRecapVideo()">▶ 產生回顧短片</button>
         <p id="recapVideoStatusText" class="memory-video-status-line" aria-live="polite"></p>
@@ -9140,6 +9142,126 @@
         <p class="memory-video-note">依景點順序、交通工具外型與旅程數據自動生成；有打卡照片的景點會在到站時插入照片。產生後可預覽、下載或分享 mp4，並會保留在雲端，換裝置、組員、App 端下次開啟都看得到。（影片片段插入為後續版本）</p>
       </div>`;
     hydrateRecapFromCache();
+    // 模組還沒載入：載完後若仍停在這一步，重畫一次讓樣板與推薦版本出現
+    if (!window.WAI_RECAP_TIMELINE) {
+      ensureRecapModules().then((ok) => {
+        if (ok && memoryStudioState && memoryStudioState.step === 'video') {
+          const slot = document.getElementById('recapTemplatePickerSlot');
+          if (slot) slot.outerHTML = renderRecapTemplatePicker();
+          const box = document.getElementById('recapTimelinePreview');
+          if (box) box.innerHTML = renderRecapTimelinePreview();
+        }
+      });
+    }
+  }
+
+  // ── 回顧短片：節奏樣板與推薦版時間軸（app/recap-templates.js、recap-timeline.js）──
+  const RECAP_TEMPLATE_STORAGE = 'wai_recap_template';
+  // 樣板／時間軸模組只在打開「回顧短片」時才載入：頁面初次載入已有 70 多個檔案，
+  // 再多幾支 script 容易撞到 nginx 的速率限制（503）。載入失敗時影片照樣能產生（後端用標準樣板）。
+  const RECAP_MODULES = [
+    ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261019-recap1'],
+    ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261019-recap2'],
+    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261019-recap1']
+  ];
+  let recapModulesPromise = null;
+
+  function ensureRecapModules() {
+    if (RECAP_MODULES.every(([name]) => window[name])) return Promise.resolve(true);
+    if (recapModulesPromise) return recapModulesPromise;
+    const loadOne = ([name, src]) => window[name] ? Promise.resolve() : new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.onload = () => resolve();
+      el.onerror = () => { el.remove(); reject(new Error('load failed: ' + src)); };
+      document.head.appendChild(el);
+    });
+    // 依序載入：manifest 依賴 templates、timeline 依賴 manifest（UMD 在載入當下讀全域）
+    recapModulesPromise = RECAP_MODULES.reduce((p, mod) => p.then(() => loadOne(mod)), Promise.resolve())
+      .then(() => true)
+      .catch((e) => { console.warn('[recap] 樣板模組載入失敗，改用標準樣板：', e && e.message); recapModulesPromise = null; return false; });
+    return recapModulesPromise;
+  }
+
+  function recapTemplateId() {
+    const lib = window.WAI_RECAP_TEMPLATES;
+    let id = memoryStudioState && memoryStudioState.recapTemplateId;
+    if (!id) { try { id = localStorage.getItem(RECAP_TEMPLATE_STORAGE) || ''; } catch (_e) { id = ''; } }
+    return lib && lib.hasTemplate(id) ? id : (lib ? lib.DEFAULT_ID : 'standard');
+  }
+
+  function memorySetRecapTemplate(id) {
+    if (!memoryStudioState) return;
+    memoryStudioState.recapTemplateId = id;
+    try { localStorage.setItem(RECAP_TEMPLATE_STORAGE, id); } catch (_e) {}
+    const box = document.getElementById('recapTimelinePreview');
+    if (box) box.innerHTML = renderRecapTimelinePreview();
+    document.querySelectorAll('.recap-template-option').forEach((el) => {
+      el.classList.toggle('active', el.dataset.templateId === id);
+    });
+  }
+
+  function renderRecapTemplatePicker() {
+    const lib = window.WAI_RECAP_TEMPLATES;
+    if (!lib) return '<div id="recapTemplatePickerSlot" class="memory-title-hint">載入影片節奏選項…</div>';
+    const current = recapTemplateId();
+    return `
+      <fieldset class="recap-template-field">
+        <legend>影片節奏</legend>
+        <div class="recap-template-options">
+          ${lib.listTemplates().map((t) => `
+            <label class="recap-template-option${t.id === current ? ' active' : ''}" data-template-id="${escapeHtml(t.id)}">
+              <input type="radio" name="recapTemplate" value="${escapeHtml(t.id)}" ${t.id === current ? 'checked' : ''}
+                onchange="memorySetRecapTemplate(this.value)">
+              <span class="recap-template-name">${escapeHtml(t.label)}</span>
+              <span class="recap-template-desc">${escapeHtml(t.desc)}</span>
+            </label>`).join('')}
+        </div>
+      </fieldset>`;
+  }
+
+  // 預覽用的照片清單：與 collectRecapPhotos 同一套規則（每站第一張雲端照片），但只讀本機、不做跨端合併，
+  // 讓切換樣板時能立刻算出推薦版本。真正產生影片時仍走 collectRecapPhotos（會先合併旅伴照片）。
+  function recapPreviewPhotos(recapTrip) {
+    const tripId = String(currentItineraryId || '');
+    if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
+    const byName = {};
+    getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId).forEach((r) => {
+      const k = visitedPlaceNameKey(r.name);
+      if (!byName[k]) byName[k] = r;
+    });
+    const out = [];
+    recapTrip.stops.forEach((stop, idx) => {
+      const rec = byName[visitedPlaceNameKey(stop.name)];
+      const first = rec && (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url && /^https?:\/\//i.test(String(ph.url)));
+      if (first) out.push({ stopIndex: idx, url: String(first.url), photoId: first.photoId || first.id || '' });
+    });
+    return out;
+  }
+
+  function buildRecapRecommendedTimeline(trip, photos) {
+    const lib = window.WAI_RECAP_TIMELINE;
+    if (!lib || !trip || trip.stops.length < 2) return null;
+    try { return lib.buildRecommendedTimeline(trip, { templateId: recapTemplateId(), photos }); }
+    catch (e) { console.warn('[recap] 推薦時間軸計算失敗：', e && e.message); return null; }
+  }
+
+  function renderRecapTimelinePreview() {
+    const lib = window.WAI_RECAP_TIMELINE;
+    if (!lib) return '';
+    const trip = collectRecapTrip();
+    const timeline = buildRecapRecommendedTimeline(trip, recapPreviewPhotos(trip));
+    if (!timeline) return '<p class="memory-title-hint">至少要有兩個有座標的景點，才能排出推薦版本。</p>';
+    const sum = lib.summarizeTimeline(timeline);
+    const photoCount = timeline.clips.filter((c) => c.type === 'photo').length;
+    return `
+      <details class="recap-timeline-preview">
+        <summary>推薦版本：共 ${sum.totalSeconds} 秒 · ${sum.rows.length} 段${photoCount ? ` · ${photoCount} 張照片` : '（沒有打卡照片，以路線為主）'}</summary>
+        <ol class="recap-timeline-list">
+          ${sum.rows.map((r) => `<li class="recap-clip recap-clip-${r.type}"><span class="recap-clip-icon" aria-hidden="true">${r.icon}</span><span class="recap-clip-text">${escapeHtml(r.text)}</span><span class="recap-clip-sec">${r.seconds} 秒</span></li>`).join('')}
+        </ol>
+        <p class="memory-title-hint">依景點順序、距離與打卡照片自動排出；片長依照片數調整，素材少就做短一點，不會用假畫面補長度。</p>
+      </details>`;
   }
 
   function memorySetAudioMode(mode) {
@@ -9466,7 +9588,7 @@
         .join(',');
       const audio = (memoryStudioState && memoryStudioState.audioMode) || 'original';
       const title = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
-      return `${(trip.stops || []).length}#${audio}#${title}#${stopSig}#${photoSig}`;
+      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${stopSig}#${photoSig}`;
     } catch (_e) { return ''; }
   }
 
@@ -9671,7 +9793,10 @@
       try { routePoints = await resolveRecapRoutePoints(trip); } catch (_e) { routePoints = null; }
       const token = await user.getIdToken();
       const authHeaders = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
-      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints }) });
+      await ensureRecapModules();
+      const templateId = recapTemplateId();
+      const timeline = buildRecapRecommendedTimeline(trip, photos);
+      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline }) });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.message || ('建立失敗（' + r.status + '）'));
@@ -9749,6 +9874,7 @@
     memoryOpenGuide,
     memorySetAudioMode,
     memorySetRecapTitle,
+    memorySetRecapTemplate,
     memoryResetLayout,
     memoryToggleCropMode,
     memorySetTemplate,
