@@ -108,8 +108,11 @@ http {
     # 注意：include 相對路徑是相對於 conf/ 目錄，寫 blocklist.conf（不是 conf/blocklist.conf）
     include       blocklist.conf;
 
-    # 限制請求速率（防掃描/DDoS）：每個 IP 每秒最多 10 個請求
+    # 限制請求速率（每個 IP）：
+    #   general：/api 與「非已知靜態類型」的路徑（掃描探測、未知路徑）— 嚴格 10r/s
+    #   static ：已知靜態檔類型 — 一次冷載入就要抓約 75 個同源檔，需要寬鬆的 burst
     limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=static:10m rate=30r/s;
 
     server {
         listen       80;
@@ -132,7 +135,9 @@ http {
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(self)" always;
 
         # 後端代理：Vertex(Gemini) 走 Node，金鑰不進瀏覽器（見 Step 4 方案 B）
-        location /api/ {
+        # ^~：避免下方靜態副檔名 regex 搶走 /api/*.json 之類的路徑
+        location ^~ /api/ {
+            limit_req zone=general burst=20 nodelay;   # Node 端另有各端點的 express-rate-limit（429）
             proxy_pass http://127.0.0.1:3001;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
@@ -152,11 +157,19 @@ http {
 
         # 靜態資源快取（CSS/圖片/字型；不含 .js — 見下方說明）
         location ~* \.(css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+            limit_req zone=static burst=200 nodelay;
             expires 7d;
             add_header Cache-Control "public, immutable";
         }
 
-        # 主要路由：靜態檔案服務
+        # 每次都重新驗證的靜態檔（JS/HTML/資料檔，沿用 server 層 expires -1）
+        # burst 200：沒快取的首次載入（約 75 檔）加上連續重新整理都不會被回 503
+        location ~* \.(js|mjs|json|html|htm|map|txt|webp|avif|mp4|webm|ttf|otf|webmanifest)$ {
+            limit_req zone=static burst=200 nodelay;
+            try_files $uri =404;
+        }
+
+        # 主要路由：目錄、未知類型、掃描探測 — 維持嚴格限制
         location / {
             limit_req zone=general burst=20 nodelay;
             try_files $uri $uri/ =404;
@@ -168,6 +181,8 @@ http {
 > **為什麼不擋 `weather.env.js`？** 它是前端檔，網頁用 `<script src="weather.env.js">` 載入才能取得金鑰；擋掉會讓 app 壞掉。金鑰的正確防護見 Step 4——client-side 的金鑰一定會到瀏覽器，藏不住，靠 console 網域限制。
 >
 > **為什麼快取不含 `.js`？** 更新頻繁時把 `.js` 設 `immutable` 會讓瀏覽器抓到舊版；穩定後再自行加回。
+>
+> **為什麼靜態檔另設 `static` zone？**（2026-10-19）原本只有 `location /` 套 `general`（10r/s、burst 20），所有 `.js`/`.html` 都落在這裡；`ai-travel-planner-v8.html` 冷載入約 75 個同源檔，超過 burst 的部分被回 **503**，頁面整個壞掉（沒快取的首次造訪者也會中）。現在已知靜態類型改走 `static`（30r/s、burst 200），`/api/` 與其他路徑仍是 `general`。實測：同一 IP 同時抓 80 個靜態檔連打三輪全部 200；`/api/health` 60 連發約 30 個回 503；`/wp-login.php` 60 連發約 30 個回 503。代價是掃描器拿 `*.js/*.html` 檔名亂猜時上限放寬到 30r/s（只會拿到 404，成本很低）。
 >
 > **實測小坑（Windows）：**
 > - 用 PowerShell 寫 `nginx.conf` **不要用 `Set-Content -Encoding UTF8`**（會加 BOM，nginx 報 `unknown directive "﻿worker_processes"`）。改用 `[System.IO.File]::WriteAllText($path,$text,(New-Object System.Text.UTF8Encoding($false)))`。**也不要 `Get-Content` 讀回再改寫**（中文註解會亂碼、甚至吃掉換行把指令變成註解）。建議註解用英文，整份一次覆寫。
@@ -396,7 +411,7 @@ Remove-Item "$s\WanderAI-nginx-autostart.vbs","$s\WanderAI-proxy-autostart.vbs" 
 | 1 | `root=app/` | 專案敏感檔（.claude / crawler / .git / *.md）天然不在網站根目錄，一律 404 |
 | 2 | IP 封鎖清單（`blocklist.conf`） | 拒絕已知惡意 IP |
 | 3 | 隱藏檔封鎖（`location ~ /\.`） | 點開頭檔案回 404（防呆） |
-| 4 | 速率限制（`limit_req`） | 每 IP 每秒最多 10 次，防掃描/DDoS |
+| 4 | 速率限制（`limit_req`） | `/api/` 與未知路徑：每 IP 10r/s（burst 20），防掃描/DDoS；已知靜態檔：30r/s（burst 200），避免冷載入約 75 檔時被 503 |
 | 5 | 隱藏版本號（`server_tokens off`） | 不洩漏 nginx 版本 |
 | 6 | 安全標頭 | 防點擊劫持 / MIME 嗅探 |
 | 7 | Body 大小限制（`client_max_body_size`） | 防大檔攻擊 |
