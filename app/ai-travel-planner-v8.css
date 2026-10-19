@@ -8665,3 +8665,145 @@ button.notif-item { cursor: pointer; }
 
 /* Facebook 登入未通過 Meta 商家驗證前預設隱藏；TRAVEL_APP_CONFIG.FACEBOOK_LOGIN_ENABLED=true 才顯示（.lm-social-btn 的 display:flex 會蓋過 hidden 屬性） */
 [data-auth-provider][hidden]{display:none !important;}
+
+/* ── AI 插圖：自備金鑰（BYOK）── */
+.byok-panel {
+  display: grid; gap: 8px;
+  margin: 4px 0 10px; padding: 10px 12px;
+  border: 1px solid var(--border, #e0dbd2); border-radius: 12px;
+  background: var(--surface2, #f6f3ee);
+}
+.byok-label { font-size: 12px; font-weight: 700; color: var(--ink2, #4a463f); }
+.byok-select {
+  width: 100%; padding: 8px 10px; font-size: 14px;
+  border: 1px solid var(--border, #e0dbd2); border-radius: 10px;
+  background: var(--surface, #fff); color: var(--ink, #22201d);
+}
+.byok-key-row { display: flex; gap: 8px; align-items: stretch; }
+.byok-key-row .travel-input { flex: 1; min-width: 0; margin: 0; }
+.byok-key-row .travel-btn { flex: none; white-space: nowrap; }
+.byok-saved {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between;
+  font-size: 13px; color: var(--ink, #22201d);
+}
+.byok-saved code { font-size: 12px; padding: 1px 6px; border-radius: 6px; background: var(--surface, #fff); }
+.byok-link-btn {
+  border: none; background: none; padding: 2px 4px; cursor: pointer;
+  font-size: 12px; font-weight: 700; color: #2e7d6d; text-decoration: underline; white-space: nowrap;
+}
+.byok-link-btn:disabled { opacity: .5; cursor: default; }
+.byok-privacy { margin: 0; }
+
+/* ── 互動插圖：站框疊在插圖上（box 為 0～1000 → 百分比定位）── */
+.poster-map { display: grid; gap: 6px; }
+.poster-map-banner {
+  font-size: 13px; font-weight: 600; line-height: 1.5;
+  padding: 8px 10px; border-radius: 10px;
+  background: #edf6f4; color: #225f52; border: 1px solid #cce5de;
+  overflow-wrap: anywhere; word-break: keep-all;
+}
+.poster-map-stage {
+  position: relative; line-height: 0;
+  border-radius: 16px; overflow: hidden; border: 1px solid var(--border, #e0dbd2);
+}
+.poster-map-stage img { width: 100%; height: auto; display: block; user-select: none; }
+.poster-stop-hit {
+  position: absolute; padding: 0; margin: 0; cursor: pointer;
+  min-width: 28px; min-height: 28px;
+  border: 2px dashed rgba(46,125,109,.35); border-radius: 10px;
+  background: transparent;
+  transition: background .15s, border-color .15s, box-shadow .15s;
+}
+.poster-stop-hit:hover,
+.poster-stop-hit:focus-visible { border-color: #2e7d6d; border-style: solid; background: rgba(46,125,109,.12); outline: none; }
+.poster-stop-hit.done { background: rgba(255,255,255,.55); border-color: rgba(120,120,120,.3); }
+.poster-stop-hit.next { border: 2px solid #f07b3f; background: rgba(240,123,63,.10); }
+.poster-stop-hit.at {
+  border: 3px solid #2e7d6d; background: rgba(46,125,109,.16);
+  animation: posterStopPulse 1.6s ease-out infinite;
+}
+.poster-stop-hit.selected { border: 3px solid #f07b3f; border-style: solid; background: rgba(240,123,63,.14); }
+@keyframes posterStopPulse {
+  0% { box-shadow: 0 0 0 0 rgba(46,125,109,.55); }
+  100% { box-shadow: 0 0 0 12px rgba(46,125,109,0); }
+}
+@media (prefers-reduced-motion: reduce) { .poster-stop-hit.at { animation: none; } }
+.poster-map-foot {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--ink3, #8a857c);
+}
+.poster-stop-card {
+  position: relative; padding: 12px 40px 12px 14px;
+  border-radius: 14px; border: 1px solid #f3c8b1; background: #fdf7f3;
+}
+.poster-stop-card-title { font-size: 15px; font-weight: 800; color: var(--ink, #22201d); line-height: 1.5; word-break: keep-all; overflow-wrap: anywhere; }
+.poster-stop-card-meta { display: grid; gap: 2px; margin: 6px 0 4px; font-size: 13px; color: var(--ink2, #4a463f); }
+.poster-stop-card-close {
+  position: absolute; top: 8px; right: 8px; width: 28px; height: 28px;
+  border: none; border-radius: 50%; background: rgba(0,0,0,.06); cursor: pointer; font-size: 13px;
+}
+.poster-stop-tag {
+  display: inline-block; margin-left: 4px; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; white-space: nowrap; vertical-align: middle;
+}
+.poster-stop-tag.at { background: #2e7d6d; color: #fff; }
+.poster-stop-tag.next { background: #f07b3f; color: #fff; }
+.poster-stop-tag.done { background: #e8e4dd; color: #5d5950; }
+.poster-missing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.poster-missing-label { color: var(--ink3, #8a857c); font-weight: 600; }
+.poster-missing-chip {
+  padding: 4px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  font-size: 12px; font-weight: 700; color: #225f52;
+  background: #edf6f4; border: 1px dashed #2e7d6d;
+}
+.poster-missing-chip.selected { background: #fdf2ed; border: 1px solid #f07b3f; color: #b4532a; }
+
+
+/* ── 地圖區：Google 地圖 ↔ 互動插圖 切換 ── */
+.map-mode-toggle {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 96;
+  display: flex; gap: 2px; padding: 3px;
+  background: rgba(255,255,255,.97); border: 1px solid var(--border, #e0dbd2);
+  border-radius: 999px; box-shadow: var(--shadow-lg);
+}
+.map-mode-toggle[hidden] { display: none; }
+.map-mode-toggle button {
+  border: none; background: none; cursor: pointer; white-space: nowrap;
+  padding: 7px 14px; border-radius: 999px;
+  font-size: 13px; font-weight: 700; color: var(--ink2, #4a463f);
+}
+.map-mode-toggle button.active { background: #2e7d6d; color: #fff; }
+.poster-mapview {
+  position: absolute; inset: 0; z-index: 94; overflow-y: auto; cursor: default;
+  padding: 64px 16px 16px; background: var(--bg, #faf9f6);
+}
+.poster-mapview[hidden] { display: none; }
+.poster-mapview-inner { max-width: 1200px; margin: 0 auto; }
+body.poster-map-mode .map-time-banner,
+body.poster-map-mode #directionsPanel,
+body.poster-map-mode #directionsPanelHandle,
+body.poster-map-mode .mobile-route-sheet,
+body.poster-map-mode .map-info-card { display: none !important; }
+@media (max-width: 700px) {
+  /* 手機右上角有總時間橫幅：切換鈕靠左，避免疊在一起 */
+  .map-mode-toggle { left: 12px; transform: none; }
+  .map-mode-toggle button { padding: 6px 12px; }
+  .poster-mapview { padding: 60px 12px 96px; }
+}
+.poster-mapview-empty {
+  max-width: 420px; margin: 8vh auto 0; padding: 24px 20px; text-align: center;
+  border: 1px solid var(--border, #e0dbd2); border-radius: 18px; background: var(--surface, #fff);
+}
+.poster-mapview-empty-icon { font-size: 40px; line-height: 1; }
+.poster-mapview-empty-title { margin: 10px 0 6px; font-size: 16px; font-weight: 800; color: var(--ink, #22201d); }
+.poster-mapview-empty .travel-action-row { justify-content: center; }
+
+/* ── 多日行程：每天一張插圖的切換 ── */
+.poster-day-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.poster-day-tab {
+  padding: 6px 14px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  font-size: 13px; font-weight: 700; color: var(--ink2, #4a463f);
+  background: var(--surface, #fff); border: 1px solid var(--border, #e0dbd2);
+}
+.poster-day-tab.active { background: #2e7d6d; border-color: #2e7d6d; color: #fff; }
+.poster-map-foot-actions { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; justify-content: flex-end; }

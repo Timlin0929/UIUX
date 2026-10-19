@@ -76,6 +76,25 @@
   let posterImageUploadUrl = null;
   let posterImageUploading = false;
   let posterImageUploadPromise = null;
+  // 互動插圖：插圖屬於哪趟行程、生成時的站序（＝插圖上的編號），以及 detect_stop_boxes 回來的站框
+  let posterTripId = null;
+  let posterStopsSnapshot = [];
+  let posterStopBoxes = null;        // { imageUrl, boxes: [{ stopId, name, box, point }] }
+  let posterBoxesStatus = 'idle';    // idle | loading | ready | failed | unavailable
+  let posterBoxesNote = '';
+  let posterSelectedBoxIndex = -1;
+  let posterSelectedMissingIndex = -1; // 圖上找不到框的站（列在插圖下方），值為 replanStops 索引
+  let plannerMapMode = 'google';     // 地圖區顯示 'google' 地圖或 'poster' 互動插圖
+  let posterGeneratingPhase = '';    // drawing | composing：生成中顯示哪段進度
+  let posterGeneratingNote = '';     // 多日行程：正在畫第幾天（顯示在進度文字）
+  // 多日行程每天一張插圖。全域的 posterGeneratedImageBase64／posterStopBoxes… 永遠代表「目前顯示的那一天」，
+  // 其他天暫存在 items；切換天數時先存回再載入。單日行程為 null，流程和以前一樣。
+  let posterDays = null;             // { list: [1, 2, 3], active: 1, items: { [day]: { dataUrl, uploadUrl, stopBoxes, snapshot, label, status, note } } }
+  let posterModelLabel = '';
+  let posterLoadToken = 0;
+  let posterCloudCheckedKey = '';   // 已為哪個「行程｜帳號」查過雲端插圖，避免每次重繪都讀一次 Firestore
+  let posterByokDraftKey = '';
+  let posterByokTesting = false;
   let importedTravelPinSerial = 0;
   let replanStopSerial = 0;
   const GEMINI_MODEL = 'gemini-3-flash-preview';
@@ -4429,36 +4448,141 @@
     `;
   }
 
-  function buildImagePrompt(character) {
-    const schedule = buildReplanSchedule();
-    const title = currentTripTitle || '我的旅遊行程';
-    const dateRange = (currentTripWindow.start && currentTripWindow.end)
-      ? `（行程時間：${currentTripWindow.start} ～ ${currentTripWindow.end}）` : '';
-    // 編號清單：讓模型在圖上標 1、2、3…，使用者看編號就知道順序
-    const stopList = schedule.length
-      ? schedule.map((s, i) => `${i + 1}. ${s.emoji || ''}${s.name}`).join('\n')
-      : '（尚未建立行程）';
+  // ── AI 插圖：先定位置 → AI 畫「沒有文字」的底圖 → 程式疊上編號與站名 ──
+  // 以前是請 AI 連站名一起畫，再用 detect_stop_boxes 找框：AI 常把站名標錯、漏畫或寫成簡體字，
+  // 找不到的站在圖上就點不到。改成位置由程式決定（依行程順序排成一圈），AI 照構圖草稿畫底圖，
+  // 編號與站名由程式疊上 → 站名一定正確、每一站一定點得到，站框也是現成的，不必再辨識或重畫。
+  // 實驗與比較見 prototypes/poster-layout-experiment/。
+  const POSTER_FONT = '"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif';
 
-    // 沒有明確要求「地圖底圖」時，台東市這類沒有明顯輪廓的行程會被畫成白底拼貼（綠島則因島形自然成圖）。
-    // 不給座標／距離：模型會把數字畫進圖裡，市區站又密，照真實位置排會擠成一團 → 用示意地圖。
-    const lines = [
-      `請幫我繪製一張「${title}」旅遊地圖插畫。${dateRange}`,
-      '',
-      `主角是「${character}」，以可愛卡通造型出現在旅途中，扮演嚮導或旅伴角色。`,
-      '',
-      '行程如下（依序）：',
-      stopList,
-      '',
-      '畫面以俯瞰的手繪示意地圖為底：背景要有海岸線與海、山脈、綠地與道路等地圖元素，看起來像一張旅遊地圖，而不是白底拼貼。各站標上編號 1、2、3…；位置示意即可，不需要符合真實比例，各站平均分布、標籤不要重疊。',
-      `用一條不中斷的連續虛線路線，嚴格依 1→2→3→…→${schedule.length || 1} 的順序把相鄰編號的站依序連起來：每一站只連到前一站和下一站，路線不可跳站、分岔或斷開，也不要畫出與順序無關的連線。`,
-      '每一站旁邊放一個小插圖，表現該站的景觀或食物；地圖與路線是主體，插圖是點綴。',
-      '整體是日式雜誌插畫風格，比例 16:9，可愛、清新，字體清晰容易閱讀，並確保內容都是「繁體中文」無錯字。',
-      '圖中只標示上述行程提到的地點名稱，不要自行加入行程以外的店名、餐廳或景點名稱。'
-    ];
-    return lines.join('\n');
+  // 同名站（例如起點＝終點）只放一個標記，編號寫成「1／11」
+  function buildPosterLayout(schedule, W, H) {
+    const places = [];
+    schedule.forEach((s, i) => {
+      const key = posterNameKey(s.name);
+      const found = key ? places.find((pl) => pl.key === key) : null;
+      if (found) { found.numbers.push(i + 1); found.stopIds.push(posterStopIdOf(s)); return; }
+      places.push({ key, name: String(s.name || '景點'), emoji: s.emoji || '', numbers: [i + 1], stopIds: [posterStopIdOf(s)] });
+    });
+    const n = places.length;
+    places.forEach((pl, k) => {
+      if (n === 1) { pl.x = W / 2; pl.y = H / 2; return; }
+      const a = Math.PI - (k / n) * Math.PI * 2; // 從左邊開始、順時針
+      pl.x = W / 2 + Math.cos(a) * W * 0.369;
+      pl.y = H / 2 - Math.sin(a) * H * 0.333 + H * 0.022;
+    });
+    return { W, H, places, order: schedule.map((s) => places.findIndex((pl) => pl.key === posterNameKey(s.name))) };
   }
 
-  async function generateItineraryImage() {
+  // 構圖草稿：紅色編號圓點＋灰色虛線路線，送給 AI 當構圖參考（不會出現在成品上）
+  function renderPosterSketch(layout) {
+    const c = document.createElement('canvas');
+    c.width = layout.W; c.height = layout.H;
+    const g = c.getContext('2d');
+    g.fillStyle = '#f4f1ea'; g.fillRect(0, 0, c.width, c.height);
+    g.setLineDash([18, 14]); g.lineWidth = 6; g.strokeStyle = '#8a857c'; g.beginPath();
+    layout.order.forEach((idx, i) => { const pl = layout.places[idx]; if (pl) (i ? g.lineTo(pl.x, pl.y) : g.moveTo(pl.x, pl.y)); });
+    g.stroke(); g.setLineDash([]);
+    layout.places.forEach((pl) => {
+      g.fillStyle = '#e0452b'; g.beginPath(); g.arc(pl.x, pl.y, 40, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#fff'; g.font = 'bold 40px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(String(pl.numbers[0]), pl.x, pl.y + 2);
+    });
+    return c.toDataURL('image/png');
+  }
+
+  function buildPosterBasePrompt(layout, character, dayLabel = '') {
+    const area = `${currentTripRegion || currentTripTitle || '這趟旅程的目的地'}${dayLabel ? `（${dayLabel}）` : ''}`;
+    const list = layout.places.map((pl) => `圓點 ${pl.numbers[0]}：${pl.emoji || ''}${pl.name}`).join('\n');
+    return [
+      `請以附圖為「構圖草稿」，繪製一張「${area}」旅遊地圖插畫（底圖）。`,
+      '附圖說明：紅色編號圓點是各站的位置，灰色虛線是行程路線。',
+      '',
+      '【位置】每一站的小插圖，中心必須正好畫在草稿上對應圓點的位置：不要往外移、不要移到畫面中央、也不要和其他站交換位置。路線用一條連續的手繪虛線，沿著草稿虛線依序連接各站。',
+      `【內容】背景是俯瞰的手繪示意地圖，依「${area}」的特色畫出地形（例如海岸線與海、山脈、綠地、街道或道路）。每一站畫一個表現該地點景觀或食物的小插圖。主角是可愛的卡通「${character}」，在其中兩三站旁邊當嚮導或旅伴。日式雜誌插畫風格，可愛、清新，比例 ${layout.W > layout.H * 1.6 ? '16:9' : '3:2'}。`,
+      '【絕對禁止】整張圖不能有任何文字：不要寫站名、不要寫標題、不要任何中文（繁體或簡體）、英文、數字或編號；也不要畫空白的標籤框、文字底板、圖例或紅色圓點。站名與編號之後會由程式另外疊上，圖上只要有插畫。',
+      '',
+      '各圓點要畫的內容（只用來決定插圖內容，不要寫進圖裡）：',
+      list
+    ].join('\n');
+  }
+
+  function loadImageElement(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('插圖讀取失敗'));
+      img.src = src;
+    });
+  }
+
+  // 把 AI 底圖疊上標題、編號圓點與站名，回傳合成後的 PNG 與每一站的點選範圍（0～1000，與 App 的站框格式相同）
+  async function composePosterImage(baseDataUrl, layout, schedule, titleSuffix = '') {
+    const img = await loadImageElement(baseDataUrl);
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    const sx = c.width / layout.W, sy = c.height / layout.H, s = Math.min(sx, sy);
+    const boxes = [];
+    const toBox = (x0, y0, x1, y1) => [
+      Math.max(0, Math.round(y0 / c.height * 1000)), Math.max(0, Math.round(x0 / c.width * 1000)),
+      Math.min(1000, Math.round(y1 / c.height * 1000)), Math.min(1000, Math.round(x1 / c.width * 1000))
+    ];
+    const crowded = layout.places.length > 10;
+    layout.places.forEach((pl) => {
+      const x = pl.x * sx, y = pl.y * sy;
+      const num = pl.numbers.join('／');
+      const wide = num.length > 2;
+      const r = 22 * s * (wide ? 1.25 : 1);
+      g.save();
+      g.shadowColor = 'rgba(0,0,0,.25)'; g.shadowBlur = 6 * s;
+      g.fillStyle = '#f07b3f'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      g.restore();
+      g.lineWidth = 4 * s; g.strokeStyle = '#fff'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke();
+      g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.font = `bold ${Math.round((wide ? 17 : 24) * s)}px ${POSTER_FONT}`;
+      g.fillText(num, x, y + 1 * s);
+      // 站名標籤：圓點下方；站多時名字過長就截斷，避免和隔壁站的標籤疊在一起
+      const maxChars = crowded ? 9 : 14;
+      const label = pl.name.length > maxChars ? pl.name.slice(0, maxChars - 1) + '…' : pl.name;
+      g.font = `bold ${Math.round(22 * s)}px ${POSTER_FONT}`;
+      const ph = 34 * s, pw = g.measureText(label).width + 22 * s;
+      const lx = Math.max(6 * s, Math.min(c.width - pw - 6 * s, x - pw / 2));
+      const ly = Math.min(c.height - ph - 6 * s, y + r + 8 * s);
+      g.fillStyle = 'rgba(255,255,255,.93)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 2.5 * s;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(lx, ly, pw, ph, ph / 2); else g.rect(lx, ly, pw, ph);
+      g.fill(); g.stroke();
+      g.fillStyle = '#22201d'; g.fillText(label, lx + pw / 2, ly + ph / 2 + 1 * s);
+      // 點選範圍＝圓點＋標籤，外加一點邊距方便手指點
+      const pad = 10 * s;
+      const box = toBox(Math.min(x - r, lx) - pad, y - r - pad, Math.max(x + r, lx + pw) + pad, ly + ph + pad);
+      const point = [Math.round(y / c.height * 1000), Math.round(x / c.width * 1000)];
+      pl.stopIds.forEach((stopId) => boxes.push({ stopId, name: pl.name, box, point }));
+    });
+    // 標題（左上角）：行程名稱與時間
+    const title = `${currentTripTitle || '我的旅遊行程'}${titleSuffix ? `・${titleSuffix}` : ''}`;
+    const first = schedule[0], last = schedule[schedule.length - 1];
+    const range = first && last ? `${minutesToClock(first.start)} – ${minutesToClock(last.end)}` : '';
+    g.textAlign = 'left'; g.textBaseline = 'middle';
+    g.font = `800 ${Math.round(30 * s)}px ${POSTER_FONT}`;
+    const tw = g.measureText(title).width;
+    g.font = `600 ${Math.round(18 * s)}px ${POSTER_FONT}`;
+    const rw = range ? g.measureText(range).width : 0;
+    const bw = Math.max(tw, rw) + 36 * s, bh = (range ? 78 : 52) * s;
+    g.fillStyle = 'rgba(255,255,255,.9)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 2.5 * s;
+    g.beginPath();
+    if (g.roundRect) g.roundRect(14 * s, 14 * s, bw, bh, 16 * s); else g.rect(14 * s, 14 * s, bw, bh);
+    g.fill(); g.stroke();
+    g.fillStyle = '#22201d'; g.font = `800 ${Math.round(30 * s)}px ${POSTER_FONT}`;
+    g.fillText(title, 32 * s, (range ? 42 : 40) * s);
+    if (range) { g.fillStyle = '#2e7d6d'; g.font = `600 ${Math.round(18 * s)}px ${POSTER_FONT}`; g.fillText(range, 32 * s, 74 * s); }
+    return { dataUrl: c.toDataURL('image/png'), boxes };
+  }
+
+  // onlyDay：多日行程只重畫某一天（其他天保留）
+  async function generateItineraryImage(onlyDay) {
     const input = document.getElementById('posterCharacterInput');
     const character = (input ? input.value : posterCharacterDraft).trim();
     if (!character) {
@@ -4468,55 +4592,65 @@
     // 代理模式下前端「本來就不該有」Gemini 金鑰（金鑰在 server/.env，由後端注入）。
     // 舊的「沒有 key 就擋下」是改用 proxy 之前留下的關卡，忘了拆 —— 結果是正式站永遠
     // 在這裡 return，根本走不到下面那段已經寫好的 proxy 分支。只有直連模式才需要金鑰。
+    // 使用者自備金鑰（BYOK）：選了自己的 Gemini／OpenAI 就直接從瀏覽器呼叫該服務，不經我們的代理。
+    const byok = getPosterByokState();
+    const byokEntry = byok.provider !== 'default' ? byok[byok.provider] : null;
+    if (byok.provider !== 'default' && !(byokEntry && byokEntry.key)) {
+      window.alert('你選了使用自己的金鑰，但還沒儲存金鑰。請先貼上金鑰並按「測試並儲存」，或把畫圖服務改回預設。');
+      return;
+    }
     const vertex = getVertexConfig();
     const apiKey = getGeminiApiKey();
-    if (!vertex.ready && !apiKey) {
+    if (!byokEntry && !vertex.ready && !apiKey) {
       window.alert('尚未設定 AI 服務：請在設定中輸入 Gemini API 金鑰，或改用伺服器代理模式。');
       return;
     }
+    const schedule = buildReplanSchedule();
+    if (!schedule.length) {
+      window.alert('行程裡還沒有景點，先加入景點再生成插圖。');
+      return;
+    }
+    const dayList = posterTripDayList(schedule);
+    if (dayList) {
+      posterCharacterDraft = character;
+      await generatePosterDays({ schedule, dayList, onlyDay, character, byok, byokEntry, vertex, apiKey });
+      return;
+    }
+    posterDays = null;
     posterCharacterDraft = character;
     posterImageGenerating = true;
+    posterGeneratingNote = '';
+    posterGeneratingPhase = 'drawing';
     posterGeneratedImageBase64 = null;
     posterImageUploadUrl = null;
     posterImageUploadPromise = null;
+    // 新插圖：清掉舊站框，記下這張圖的站序（插圖上的編號 1、2、3… 就是這個順序）
+    posterLoadToken++;
+    const tripId = currentItineraryId;
+    posterTripId = tripId;
+    posterStopsSnapshot = schedule.map((s) => ({ stopId: posterStopIdOf(s), name: String(s.name || '') }));
+    posterStopBoxes = null;
+    posterBoxesStatus = 'idle';
+    posterBoxesNote = '';
+    posterSelectedBoxIndex = -1;
+    posterSelectedMissingIndex = -1;
+    posterModelLabel = '';
     renderTravelTools();
 
-    const prompt = buildImagePrompt(character);
-    console.log('[行程圖 Prompt]', prompt);
-    const imageModel = 'gemini-3-pro-image';
     try {
-      // 代理模式沒有前端金鑰 → 不要掛空的 ?key=（金鑰由後端注入），與其他 Vertex 呼叫一致
-      const endpoint = vertex.ready
-        ? `${VERTEX_HOST}/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent${vertex.apiKey ? `?key=${encodeURIComponent(vertex.apiKey)}` : ''}`
-        : `${GEMINI_API_BASE}/${imageModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: await vertexAuthHeaders(),
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseModalities: ["IMAGE"],
-            imageConfig: { aspectRatio: '16:9' }
-          }
-        })
-      });
-      if (res.status === 401 || res.status === 429) throw vertexHttpError(res.status, '圖片生成失敗');
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error?.message || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      // Pro 會在圖片前夾帶文字／thought part，不能只看 parts[0]
-      const part = (data.candidates?.[0]?.content?.parts || []).find(p => p.inlineData?.data && !p.thought);
-      if (!part?.inlineData?.data) { throw new Error('未收到圖片資料。回應：' + JSON.stringify(data).slice(0, 200)); }
-      posterGeneratedImageBase64 = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-      if (firebaseStorage) {
-        posterImageUploadPromise = uploadPosterToStorage();
-      }
+      const drawn = await drawComposedPoster({ schedule, character, byok, byokEntry, vertex, apiKey });
+      if (currentItineraryId !== tripId) return;
+      posterGeneratedImageBase64 = drawn.dataUrl;
+      posterModelLabel = drawn.label;
+      // 站框是程式自己放的 → 不必辨識，畫好就能點；存回行程時一併寫給 App 用
+      posterStopBoxes = drawn.stopBoxes;
+      posterBoxesStatus = 'ready';
+      if (firebaseStorage) posterImageUploadPromise = uploadPosterToStorage();
     } catch (e) {
       window.alert(`圖片生成失敗：${e.message}`);
     } finally {
       posterImageGenerating = false;
+      posterGeneratingPhase = '';
       renderTravelTools();
       setTimeout(() => {
         const el = document.getElementById('posterGeneratedImg');
@@ -4525,11 +4659,234 @@
     }
   }
 
+  // 畫一張：草稿 → AI 底圖 → 疊標籤。回傳合成圖、站框（已整理）、原始站框與模型標示
+  async function drawComposedPoster({ schedule, character, byok, byokEntry, vertex, apiKey, dayLabel = '' }) {
+    const useOpenAi = !!byokEntry && byok.provider === 'openai';
+    // OpenAI 只有 3:2（1536x1024），Gemini 用 16:9；草稿比例要和成品一致，位置才對得上
+    const layout = useOpenAi ? buildPosterLayout(schedule, 1536, 1024) : buildPosterLayout(schedule, 1600, 900);
+    const sketchDataUrl = renderPosterSketch(layout);
+    const prompt = buildPosterBasePrompt(layout, character, dayLabel);
+    console.log(`[行程圖 Prompt${dayLabel ? '・' + dayLabel : ''}]`, prompt);
+    let baseDataUrl, label;
+    if (byokEntry) {
+      baseDataUrl = useOpenAi
+        ? await generatePosterWithOpenAi(byokEntry, prompt, sketchDataUrl)
+        : await generatePosterWithOwnGemini(byokEntry, prompt, sketchDataUrl);
+      label = useOpenAi
+        ? `由 ${byokEntry.model || 'GPT Image'}（你的 OpenAI 金鑰）生成`
+        : `由 ${byokEntry.model || 'Gemini'}（你的 Gemini 金鑰）生成`;
+    } else {
+      baseDataUrl = await generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl);
+      label = '由 Gemini 生成（TravelLinkAI 提供）';
+    }
+    const composed = await composePosterImage(baseDataUrl, layout, schedule, dayLabel);
+    const snapshot = schedule.map((s) => ({ stopId: posterStopIdOf(s), name: String(s.name || '') }));
+    return {
+      dataUrl: composed.dataUrl,
+      label,
+      snapshot,
+      stopBoxes: { imageUrl: '', boxes: normalizePosterBoxes(composed.boxes, snapshot), raw: composed.boxes, composed: true }
+    };
+  }
+
+  // ── 多日行程：每天一張插圖 ──
+  function posterTripDayList(schedule) {
+    const days = [...new Set(schedule.map((s) => Number(s.dayIndex) || 1))].sort((a, b) => a - b);
+    return days.length > 1 ? days : null;
+  }
+
+  function posterStashActive() {
+    if (!posterDays) return;
+    posterDays.items[posterDays.active] = {
+      dataUrl: posterGeneratedImageBase64, uploadUrl: posterImageUploadUrl, stopBoxes: posterStopBoxes,
+      snapshot: posterStopsSnapshot, label: posterModelLabel, status: posterBoxesStatus, note: posterBoxesNote
+    };
+  }
+
+  function posterLoadDay(day) {
+    const item = (posterDays && posterDays.items[day]) || {};
+    posterGeneratedImageBase64 = item.dataUrl || null;
+    posterImageUploadUrl = item.uploadUrl || null;
+    posterImageUploadPromise = null;
+    posterStopBoxes = item.stopBoxes || null;
+    posterStopsSnapshot = item.snapshot || [];
+    posterModelLabel = item.label || '';
+    posterBoxesStatus = item.status || 'idle';
+    posterBoxesNote = item.note || '';
+    posterSelectedBoxIndex = -1;
+    posterSelectedMissingIndex = -1;
+  }
+
+  function setPosterActiveDay(day) {
+    if (!posterDays || !posterDays.list.includes(day) || posterDays.active === day) return;
+    posterStashActive();
+    posterDays.active = day;
+    posterLoadDay(day);
+    renderTravelTools();
+  }
+
+  // 多日行程時，插圖只對應「目前這一天」的站：漏站清單與編號都只看這一天
+  function posterScopeIndexes() {
+    const all = replanStops.map((_, i) => i);
+    if (!posterDays) return all;
+    return all.filter((i) => (Number(replanStops[i] && replanStops[i].dayIndex) || 1) === posterDays.active);
+  }
+
+  function posterScopeNumber(stopIndex) {
+    const pos = posterScopeIndexes().indexOf(stopIndex);
+    return pos >= 0 ? pos + 1 : null;
+  }
+
+  function renderPosterDayTabs() {
+    if (!posterDays) return '';
+    return `
+      <div class="poster-day-tabs" role="tablist" aria-label="選擇第幾天的插圖">
+        ${posterDays.list.map((d) => {
+          const has = !!(posterDays.active === d ? posterGeneratedImageBase64 : (posterDays.items[d] && posterDays.items[d].dataUrl));
+          return `<button type="button" role="tab" class="poster-day-tab${posterDays.active === d ? ' active' : ''}" aria-selected="${posterDays.active === d}"
+                    onclick="setPosterActiveDay(${d})">第 ${d} 天${has ? '' : '（未生成）'}</button>`;
+        }).join('')}
+      </div>`;
+  }
+
+  async function generatePosterDays({ schedule, dayList, onlyDay, character, byok, byokEntry, vertex, apiKey }) {
+    const targets = onlyDay ? [onlyDay] : dayList;
+    if (!onlyDay && !window.confirm(`這是 ${dayList.length} 天的行程，會依天數生成 ${dayList.length} 張插圖（每天一張，每張約 20–30 秒）。要開始嗎？`)) return;
+    const tripId = currentItineraryId;
+    posterLoadToken++;
+    if (!onlyDay || !posterDays || String(posterDays.list) !== String(dayList)) {
+      posterDays = { list: dayList, active: onlyDay || dayList[0], items: {} };
+      posterLoadDay(posterDays.active);
+    } else {
+      posterStashActive();
+      posterDays.active = onlyDay;
+    }
+    posterTripId = tripId;
+    posterImageGenerating = true;
+    posterGeneratingPhase = 'drawing';
+    renderTravelTools();
+    const failed = [];
+    let done = 0;
+    const runDay = async (day) => {
+      const daySchedule = schedule.filter((s) => (Number(s.dayIndex) || 1) === day);
+      try {
+        const drawn = await drawComposedPoster({ schedule: daySchedule, character, byok, byokEntry, vertex, apiKey, dayLabel: `第 ${day} 天` });
+        if (currentItineraryId !== tripId || !posterDays) return;
+        posterDays.items[day] = { dataUrl: drawn.dataUrl, uploadUrl: '', stopBoxes: drawn.stopBoxes, snapshot: drawn.snapshot, label: drawn.label, status: 'ready', note: '' };
+      } catch (e) {
+        failed.push(`第 ${day} 天：${e.message}`);
+      } finally {
+        done += 1;
+        posterGeneratingNote = targets.length > 1 ? `（已完成 ${done}／${targets.length} 天）` : '';
+        renderTravelTools();
+      }
+    };
+    posterGeneratingNote = targets.length > 1 ? `（已完成 0／${targets.length} 天）` : '';
+    try {
+      // 一次畫兩天：比逐張快，又不至於撞到代理的速率限制
+      for (let i = 0; i < targets.length; i += 2) await Promise.all(targets.slice(i, i + 2).map(runDay));
+      if (currentItineraryId !== tripId || !posterDays) return;
+      posterLoadDay(posterDays.active);
+      if (firebaseStorage) {
+        for (const day of targets) {
+          const item = posterDays.items[day];
+          if (!item || !item.dataUrl || item.uploadUrl) continue;
+          try {
+            item.uploadUrl = await uploadPosterDataUrl(item.dataUrl);
+            item.stopBoxes.imageUrl = item.uploadUrl;
+          } catch (e) { console.warn(`[互動插圖] 第 ${day} 天上傳失敗：`, e); }
+        }
+        if (currentItineraryId !== tripId || !posterDays) return;
+        posterLoadDay(posterDays.active);
+        savePosterDaysToTrip().catch((e) => console.warn('[互動插圖] 寫回行程失敗：', e));
+      }
+      if (failed.length) window.alert(`有 ${failed.length} 天的插圖生成失敗，可以稍後按「重畫這一天」：\n${failed.join('\n')}`);
+    } finally {
+      posterImageGenerating = false;
+      posterGeneratingPhase = '';
+      posterGeneratingNote = '';
+      renderTravelTools();
+    }
+  }
+
+  // 多日行程存回行程文件：每天的圖與站框放在 imageDays；第 1 天照舊寫 imageUrl／imageStopBoxes，
+  // 還不認得 imageDays 的 App 至少看得到第 1 天。
+  async function savePosterDaysToTrip() {
+    const tripId = posterTripId;
+    if (!posterDays || !tripId || tripId !== currentItineraryId || !posterCanWriteTrip()) return;
+    posterStashActive();
+    const imageDays = posterDays.list.map((day) => {
+      const item = posterDays.items[day];
+      if (!item || !item.uploadUrl || !item.stopBoxes || !item.stopBoxes.raw) return null;
+      // 陣列裡不能用 serverTimestamp，改存毫秒
+      return { day, imageUrl: item.uploadUrl, imageStopBoxes: { imageUrl: item.uploadUrl, model: 'web-layout', at: Date.now(), boxes: item.stopBoxes.raw } };
+    }).filter(Boolean);
+    if (!imageDays.length) return;
+    const first = imageDays.find((d) => d.day === posterDays.list[0]);
+    const ref = firebaseDb.collection('micro_trips').doc(tripId);
+    const isOwner = !currentTripIsCollab || collabRole === 'owner';
+    const payload = { imageDays };
+    if (first) payload.imageUrl = first.imageUrl;
+    if (first && isOwner) payload.imageStopBoxes = { ...first.imageStopBoxes, at: firebase.firestore.FieldValue.serverTimestamp() };
+    try {
+      await ref.set(payload, { merge: true });
+    } catch (e) {
+      // 編輯者：規則還沒部署 imageDays 白名單時會被擋 → 至少把第 1 天的 imageUrl 寫回
+      console.warn('[互動插圖] 無法寫回每日插圖：', e && e.code ? e.code : e);
+      if (!first) return;
+      try { await ref.set({ imageUrl: first.imageUrl }, { merge: true }); } catch (_e) { return; }
+    }
+    // 編輯者寫不了 imageStopBoxes → 請 detect_stop_boxes 替 App 找第 1 天的框
+    if (first && !isOwner) {
+      const fns = getPosterFunctions();
+      const stops = (posterDays.items[posterDays.list[0]] || {}).snapshot || [];
+      if (fns && stops.length) {
+        fns.httpsCallable('detect_stop_boxes', { timeout: 60000 })({ tripId, stops, force: false })
+          .catch((err) => console.warn('[互動插圖] 替 App 找站框失敗：', err && err.code ? err.code : err));
+      }
+    }
+  }
+
+  function posterSketchPart(sketchDataUrl) {
+    return { inlineData: { mimeType: 'image/png', data: String(sketchDataUrl).split(',')[1] } };
+  }
+
+  async function generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl) {
+    const imageModel = 'gemini-3-pro-image';
+    // 代理模式沒有前端金鑰 → 不要掛空的 ?key=（金鑰由後端注入），與其他 Vertex 呼叫一致
+    const endpoint = vertex.ready
+      ? `${VERTEX_HOST}/v1beta1/projects/${encodeURIComponent(vertex.projectId)}/locations/global/publishers/google/models/${imageModel}:generateContent${vertex.apiKey ? `?key=${encodeURIComponent(vertex.apiKey)}` : ''}`
+      : `${GEMINI_API_BASE}/${imageModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: await vertexAuthHeaders(),
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [posterSketchPart(sketchDataUrl), { text: prompt }] }],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { aspectRatio: '16:9' }
+        }
+      })
+    });
+    if (res.status === 401 || res.status === 429) throw vertexHttpError(res.status, '圖片生成失敗');
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error?.message || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    // Pro 會在圖片前夾帶文字／thought part，不能只看 parts[0]
+    const part = (data.candidates?.[0]?.content?.parts || []).find(p => p.inlineData?.data && !p.thought);
+    if (!part?.inlineData?.data) { throw new Error('未收到圖片資料。回應：' + JSON.stringify(data).slice(0, 200)); }
+    return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+  }
+
   function downloadGeneratedImage() {
     if (!posterGeneratedImageBase64) return;
     const anchor = document.createElement('a');
     anchor.href = posterGeneratedImageBase64;
     anchor.download = `${currentInviteCode || 'travel'}-poster.png`;
+    // 從行程文件載入的插圖是 Storage 網址：跨網域時 download 屬性會被忽略，改開新分頁，免得把整頁導走
+    if (!posterIsDataUrl()) { anchor.target = '_blank'; anchor.rel = 'noopener'; }
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -4560,12 +4917,15 @@
     const anchor = document.createElement('a');
     anchor.href = img.src;
     anchor.download = `${currentInviteCode || 'travel'}-poster.png`;
+    if (!/^data:/.test(img.src)) { anchor.target = '_blank'; anchor.rel = 'noopener'; }
     anchor.click();
   }
 
   // ── 圖片分享功能 ──
   async function shareGeneratedImage() {
     if (!posterGeneratedImageBase64) { window.alert('請先生成插圖再分享。'); return; }
+    // Storage 網址不 fetch 成檔案（bucket 沒開 CORS 會在 F12 留紅字），直接分享連結
+    if (!posterIsDataUrl()) { await copyImageUrl(); return; }
     try {
       const res  = await fetch(posterGeneratedImageBase64);
       const blob = await res.blob();
@@ -4582,7 +4942,7 @@
 
   async function shareImageToLine() {
     const text = buildShareText();
-    if (posterGeneratedImageBase64 && navigator.canShare) {
+    if (posterGeneratedImageBase64 && posterIsDataUrl() && navigator.canShare) {
       try {
         const res  = await fetch(posterGeneratedImageBase64);
         const blob = await res.blob();
@@ -4598,7 +4958,7 @@
 
   function shareImageToFacebook() {
     const text = buildShareText();
-    if (posterGeneratedImageBase64 && navigator.canShare) {
+    if (posterGeneratedImageBase64 && posterIsDataUrl() && navigator.canShare) {
       fetch(posterGeneratedImageBase64).then((r) => r.blob()).then((blob) => {
         const file = new File([blob], 'poster.png', { type: 'image/png' });
         if (navigator.canShare({ files: [file] })) {
@@ -4617,24 +4977,813 @@
     window.alert('行程文字已複製！請在 Facebook 新貼文中貼上，並手動上傳圖片。');
   }
 
-  async function uploadPosterToStorage() {
+  async function uploadPosterDataUrl(dataUrl) {
+    const blob = await (await fetch(dataUrl)).blob();
+    const code = currentInviteCode || 'trip';
+    const path = `posters/${code}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`;
+    const snapshot = await firebaseStorage.ref(path).put(blob, { contentType: 'image/png' });
+    return snapshot.ref.getDownloadURL();
+  }
+
+  async function uploadPosterToStorage({ attach = true } = {}) {
     if (!posterGeneratedImageBase64 || !firebaseStorage || posterImageUploadUrl) return;
     posterImageUploading = true;
     renderTravelTools();
     try {
-      const res  = await fetch(posterGeneratedImageBase64);
-      const blob = await res.blob();
-      const code = currentInviteCode || 'trip';
-      const path = `posters/${code}-${Date.now()}.png`;
-      const ref  = firebaseStorage.ref(path);
-      const snapshot = await ref.put(blob, { contentType: 'image/png' });
-      posterImageUploadUrl = await snapshot.ref.getDownloadURL();
+      posterImageUploadUrl = await uploadPosterDataUrl(posterGeneratedImageBase64);
+      if (posterStopBoxes && posterStopBoxes.composed) posterStopBoxes.imageUrl = posterImageUploadUrl;
     } catch (e) {
       console.warn('背景上傳圖片失敗：', e);
     } finally {
       posterImageUploading = false;
       renderTravelTools();
     }
+    // 上傳完成 → 寫回行程文件（App 與旅伴才看得到）並找站框，讓插圖可以點
+    if (attach && posterImageUploadUrl) {
+      const save = posterDays ? savePosterDaysToTrip
+        : (posterStopBoxes && posterStopBoxes.composed) ? savePosterLayoutToTrip : attachPosterToTrip;
+      save(posterImageUploadUrl).catch((e) => console.warn('[互動插圖] 寫回行程失敗：', e));
+    }
+  }
+
+  // ── AI 插圖：使用者自備金鑰（BYOK）──
+  // 只套用在 AI 插圖（最貴的一項，約 US$0.13／張）；文字生成仍走我們的代理。
+  // 金鑰只存在這台裝置的 localStorage：不上傳 Firestore、不經過我們的後端、不寫進 log，
+  // 由瀏覽器直接呼叫 Google AI Studio／OpenAI。登出時一併清除（見 doLogout）。
+  const POSTER_BYOK_STORAGE = 'wai_poster_byok_v1';
+  const POSTER_BYOK_PROVIDERS = {
+    gemini: { label: 'Gemini', keyHint: 'AIza…', keyUrl: 'https://aistudio.google.com/apikey' },
+    openai: { label: 'OpenAI', keyHint: 'sk-…', keyUrl: 'https://platform.openai.com/api-keys' }
+  };
+
+  function getPosterByokState() {
+    let raw = null;
+    try { raw = JSON.parse(localStorage.getItem(POSTER_BYOK_STORAGE) || 'null'); } catch (_e) { raw = null; }
+    const pick = (entry) => (entry && typeof entry.key === 'string' && entry.key)
+      ? { key: entry.key, model: String(entry.model || '') } : null;
+    const state = {
+      provider: 'default',
+      gemini: pick(raw && raw.gemini),
+      openai: pick(raw && raw.openai)
+    };
+    if (raw && POSTER_BYOK_PROVIDERS[raw.provider]) state.provider = raw.provider;
+    return state;
+  }
+
+  function savePosterByokState(state) {
+    try { localStorage.setItem(POSTER_BYOK_STORAGE, JSON.stringify(state)); } catch (_e) { /* 無痕模式寫不進去就算了 */ }
+  }
+
+  function clearPosterByok() {
+    try { localStorage.removeItem(POSTER_BYOK_STORAGE); } catch (_e) {}
+    posterByokDraftKey = '';
+  }
+
+  function maskApiKey(key) {
+    const k = String(key || '');
+    if (k.length <= 8) return '••••';
+    const head = k.startsWith('sk-') ? 'sk-' : k.slice(0, 4);
+    return `${head}…${k.slice(-4)}`;
+  }
+
+  function setPosterEngine(provider) {
+    const state = getPosterByokState();
+    state.provider = POSTER_BYOK_PROVIDERS[provider] ? provider : 'default';
+    savePosterByokState(state);
+    posterByokDraftKey = '';
+    renderTravelTools();
+  }
+
+  function rememberPosterByokDraft(value) {
+    posterByokDraftKey = String(value || '');
+  }
+
+  function removePosterByokKey(provider) {
+    const state = getPosterByokState();
+    if (!POSTER_BYOK_PROVIDERS[provider]) return;
+    state[provider] = null;
+    savePosterByokState(state);
+    posterByokDraftKey = '';
+    feedbackToast(`已刪除這台裝置上的 ${POSTER_BYOK_PROVIDERS[provider].label} 金鑰`, 'green');
+    renderTravelTools();
+  }
+
+  async function fetchJsonWithTimeout(url, options, timeoutMs) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: ctrl.signal });
+      const body = await res.json().catch(() => ({}));
+      return { res, body };
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('等待太久沒有回應，請稍後再試。');
+      throw new Error('連不上服務，請檢查網路後再試。');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 把各家的錯誤翻成使用者看得懂、知道下一步怎麼做的話（金鑰錯、額度用完、沒開帳單、沒權限）
+  function byokErrorMessage(provider, status, body) {
+    const err = (body && body.error) || {};
+    const msg = String(err.message || '');
+    const code = String(err.code || err.status || err.type || '');
+    if (provider === 'openai') {
+      if (status === 401) return 'OpenAI 金鑰無效或已被撤銷，請重新貼上金鑰。';
+      if (status === 403 && /verif/i.test(msg)) return '這把 OpenAI 金鑰的組織還沒通過驗證，不能使用畫圖模型。請到 OpenAI 後台完成組織驗證，或把畫圖服務改回預設。';
+      if (status === 403) return 'OpenAI 拒絕這次請求（金鑰沒有畫圖權限）。';
+      if (status === 429 && /insufficient_quota|billing/i.test(code + msg)) return 'OpenAI 帳戶額度用完或尚未設定付款方式，請到 OpenAI 後台儲值。';
+      if (status === 429) return 'OpenAI 請求太頻繁，請稍等一下再試。';
+      if (status === 400 && /safety|moderation|content_policy/i.test(code + msg)) return 'OpenAI 認為這次內容不適合生成（常見原因是指定的卡通人物有版權限制），請換個角色再試。';
+    } else {
+      if (status === 400 && /api key/i.test(msg)) return 'Gemini 金鑰無效，請到 Google AI Studio 確認後重新貼上。';
+      if (status === 401 || status === 403) return 'Gemini 金鑰沒有權限（可能是 API 未啟用或金鑰有限制），請到 Google AI Studio 確認。';
+      if (status === 429) return 'Gemini 金鑰的額度用完了。畫圖模型沒有免費額度，需要在 Google AI Studio 為專案開通帳單。';
+      if (status === 404) return '這把金鑰找不到可用的 Gemini 畫圖模型，請重新按「測試並儲存」。';
+    }
+    return `${POSTER_BYOK_PROVIDERS[provider].label} 回應錯誤（${status}）${msg ? '：' + msg.slice(0, 120) : ''}`;
+  }
+
+  // 測試金鑰：只呼叫免費的「列出模型」，順便挑出這把金鑰能用的畫圖模型
+  async function testPosterByokKey(provider, key) {
+    if (provider === 'openai') {
+      const { res, body } = await fetchJsonWithTimeout('https://api.openai.com/v1/models', {
+        headers: { Authorization: `Bearer ${key}` }
+      }, 20000);
+      if (!res.ok) throw new Error(byokErrorMessage('openai', res.status, body));
+      const ids = (body.data || []).map((m) => String(m.id || ''));
+      const model = ['gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini'].find((id) => ids.includes(id))
+        || ids.find((id) => /^gpt-image/.test(id));
+      if (!model) throw new Error('這把 OpenAI 金鑰沒有可用的畫圖模型（gpt-image），請把畫圖服務改回預設。');
+      return model;
+    }
+    const { res, body } = await fetchJsonWithTimeout('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', {
+      headers: { 'x-goog-api-key': key }
+    }, 20000);
+    if (!res.ok) throw new Error(byokErrorMessage('gemini', res.status, body));
+    const names = (body.models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''));
+    // 與預設路徑同一個模型家族（gemini-3-pro-image），沒有才退到其他畫圖模型
+    const model = names.find((n) => n === 'gemini-3-pro-image')
+      || names.find((n) => /^gemini-3-pro-image/.test(n))
+      || names.find((n) => /^gemini-.*-image/.test(n));
+    if (!model) throw new Error('這把 Gemini 金鑰找不到可用的畫圖模型，請把畫圖服務改回預設。');
+    return model;
+  }
+
+  async function savePosterByokKey(provider) {
+    if (!POSTER_BYOK_PROVIDERS[provider] || posterByokTesting) return;
+    const input = document.getElementById('posterByokKeyInput');
+    const key = String((input ? input.value : posterByokDraftKey) || '').trim();
+    if (!key) { feedbackToast('請先貼上金鑰', 'orange'); return; }
+    posterByokTesting = true;
+    renderTravelTools();
+    try {
+      const model = await testPosterByokKey(provider, key);
+      const state = getPosterByokState();
+      state[provider] = { key, model };
+      state.provider = provider;
+      savePosterByokState(state);
+      posterByokDraftKey = '';
+      feedbackToast(`金鑰可以使用，之後插圖改用 ${model}`, 'green');
+    } catch (e) {
+      posterByokDraftKey = key;
+      window.alert(`金鑰測試失敗：${e.message}`);
+    } finally {
+      posterByokTesting = false;
+      renderTravelTools();
+    }
+  }
+
+  async function generatePosterWithOwnGemini(entry, prompt, sketchDataUrl) {
+    const model = entry.model || 'gemini-3-pro-image';
+    const { res, body } = await fetchJsonWithTimeout(
+      `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: 'POST',
+        // 金鑰放 header 不放網址，避免出現在瀏覽紀錄／代理 log
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': entry.key },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [posterSketchPart(sketchDataUrl), { text: prompt }] }],
+          generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '16:9' } }
+        })
+      }, 150000);
+    if (!res.ok) throw new Error(byokErrorMessage('gemini', res.status, body));
+    const part = (body.candidates?.[0]?.content?.parts || []).find((p) => p.inlineData?.data && !p.thought);
+    if (!part) throw new Error('Gemini 沒有回傳圖片，可能是內容被安全機制擋下，請換個角色再試。');
+    return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+  }
+
+  async function generatePosterWithOpenAi(entry, prompt, sketchDataUrl) {
+    // 要帶構圖草稿就得用 images/edits（multipart）；gpt-image 沒有 16:9，用 1536x1024（3:2），草稿也是 3:2
+    const form = new FormData();
+    form.append('model', entry.model || 'gpt-image-1');
+    form.append('prompt', prompt);
+    form.append('size', '1536x1024');
+    form.append('n', '1');
+    form.append('image', await (await fetch(sketchDataUrl)).blob(), 'sketch.png');
+    const { res, body } = await fetchJsonWithTimeout('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${entry.key}` },
+      body: form
+    }, 240000);
+    if (!res.ok) throw new Error(byokErrorMessage('openai', res.status, body));
+    const b64 = body.data && body.data[0] && body.data[0].b64_json;
+    if (!b64) throw new Error('OpenAI 沒有回傳圖片資料。');
+    return `data:image/png;base64,${b64}`;
+  }
+
+  function renderPosterByokPanel() {
+    const state = getPosterByokState();
+    const provider = state.provider;
+    const meta = POSTER_BYOK_PROVIDERS[provider];
+    const entry = meta ? state[provider] : null;
+    const disabled = posterImageGenerating || posterByokTesting ? 'disabled' : '';
+    let detail = '';
+    if (meta && entry) {
+      detail = `
+        <div class="byok-saved">
+          <span>已儲存 <code>${escapeHtml(maskApiKey(entry.key))}</code> · ${escapeHtml(entry.model || meta.label)}</span>
+          <button type="button" class="byok-link-btn" onclick="removePosterByokKey('${provider}')" ${disabled}>刪除金鑰</button>
+        </div>`;
+    } else if (meta) {
+      detail = `
+        <div class="byok-key-row">
+          <input class="travel-input" id="posterByokKeyInput" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="貼上你的 ${meta.label} API 金鑰（${meta.keyHint}）"
+                 value="${escapeHtml(posterByokDraftKey)}" oninput="rememberPosterByokDraft(this.value)" ${disabled}>
+          <button type="button" class="travel-btn secondary" onclick="savePosterByokKey('${provider}')" ${disabled}>${posterByokTesting ? '測試中…' : '測試並儲存'}</button>
+        </div>
+        <div class="travel-hint">還沒有金鑰？到 <a href="${meta.keyUrl}" target="_blank" rel="noopener">${meta.label} 後台</a> 建立。${provider === 'openai' ? 'OpenAI 畫圖需先完成組織驗證，一張約需 1～2 分鐘。' : 'Gemini 畫圖需要已開通帳單的專案。'}</div>`;
+    }
+    return `
+      <div class="byok-panel">
+        <label class="byok-label" for="posterEngineSelect">畫圖服務</label>
+        <select class="byok-select" id="posterEngineSelect" onchange="setPosterEngine(this.value)" ${disabled}>
+          <option value="default" ${provider === 'default' ? 'selected' : ''}>預設（TravelLinkAI 提供）</option>
+          <option value="gemini" ${provider === 'gemini' ? 'selected' : ''}>用我自己的 Gemini 金鑰</option>
+          <option value="openai" ${provider === 'openai' ? 'selected' : ''}>用我自己的 OpenAI 金鑰</option>
+        </select>
+        ${detail}
+        ${meta ? '<div class="travel-hint byok-privacy">🔒 金鑰只存在這台裝置的瀏覽器，由瀏覽器直接呼叫該服務，不會上傳到我們的伺服器；費用由你的帳戶支付，登出時一併清除。</div>' : ''}
+      </div>`;
+  }
+
+  // ── 互動插圖：站框（與 App 共用 micro_trips/{id}.imageStopBoxes，格式見組員的「站框格式」文件）──
+  // box = [ymin, xmin, ymax, xmax]、point = [y, x]，皆為 0～1000、相對整張插圖。
+  // 站框由 Cloud Function detect_stop_boxes 產生並由後端寫回文件；網頁只負責把 imageUrl 寫回、呼叫、顯示。
+
+  function posterIsDataUrl() {
+    return /^data:/.test(String(posterGeneratedImageBase64 || ''));
+  }
+
+  // App 建的行程有 stopId（UUID）；網頁的站沿用 stop.id。與 detect_stop_boxes 的 stopId 對應用。
+  function posterStopIdOf(stop) {
+    // collabStopId（cstop-…）是寫進 Firestore stops 的穩定 id，App 也認得；沒有才退回網頁本地的 id
+    return String((stop && (stop.stopId || stop.collabStopId || stop.id)) || '');
+  }
+
+  function posterCanWriteTrip() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    return !!(firebaseEnabled && firebaseDb && user && !collabReadOnly
+      && currentItineraryId && currentItineraryId !== 'TRIP-EMPTY');
+  }
+
+  function getPosterFunctions() {
+    if (!window.firebase || typeof firebase.app !== 'function' || typeof firebase.functions !== 'function') return null;
+    try { return firebase.app().functions('us-central1'); } catch (_e) { return null; }
+  }
+
+  // 程式疊標籤的插圖：站框是現成的。擁有者直接把 imageUrl 和 imageStopBoxes 一起寫回（App 打開就能點）；
+  // 編輯者的規則白名單沒有 imageStopBoxes → 只寫 imageUrl，再請 detect_stop_boxes 替 App 找框
+  //（標籤是清楚的印刷字，找框很準）。網頁自己的點選一律用程式算好的框，不受影響。
+  async function savePosterLayoutToTrip(imageUrl) {
+    const tripId = posterTripId;
+    const boxesData = posterStopBoxes && posterStopBoxes.raw;
+    if (!imageUrl || !tripId || tripId !== currentItineraryId || !boxesData) return;
+    posterStopBoxes.imageUrl = imageUrl;
+    if (!posterCanWriteTrip()) return; // 沒登入／唯讀：網頁上照樣可以點，只是不存回行程
+    const ref = firebaseDb.collection('micro_trips').doc(tripId);
+    const isOwner = !currentTripIsCollab || collabRole === 'owner';
+    try {
+      if (isOwner) {
+        await ref.set({
+          imageUrl,
+          imageStopBoxes: {
+            imageUrl,
+            model: 'web-layout',
+            at: firebase.firestore.FieldValue.serverTimestamp(),
+            boxes: boxesData
+          }
+        }, { merge: true });
+        return;
+      }
+      await ref.set({ imageUrl }, { merge: true });
+    } catch (e) {
+      console.warn('[互動插圖] 無法寫回行程：', e && e.code ? e.code : e);
+      return;
+    }
+    const fns = getPosterFunctions();
+    if (fns) {
+      fns.httpsCallable('detect_stop_boxes', { timeout: 60000 })({ tripId, stops: posterStopsSnapshot, force: false })
+        .catch((e) => console.warn('[互動插圖] 替 App 找站框失敗：', e && e.code ? e.code : e));
+    }
+  }
+
+  async function attachPosterToTrip(imageUrl) {
+    const tripId = posterTripId;
+    if (!imageUrl || !tripId || tripId !== currentItineraryId) return;
+    if (!posterCanWriteTrip()) {
+      posterBoxesStatus = 'unavailable';
+      posterBoxesNote = (firebaseAuth && firebaseAuth.currentUser)
+        ? '唯讀成員無法把插圖存回行程，所以圖上的站點不能點選。'
+        : '登入並把行程存到雲端後，插圖上的站點就可以點選。';
+      renderTravelTools();
+      return;
+    }
+    const token = posterLoadToken;
+    try {
+      // 只寫 imageUrl（編輯者白名單內的欄位），merge 不會動到 imageStopBoxes 等其他欄位
+      await firebaseDb.collection('micro_trips').doc(tripId).set({ imageUrl }, { merge: true });
+    } catch (e) {
+      if (token !== posterLoadToken) return;
+      posterBoxesStatus = 'unavailable';
+      posterBoxesNote = '這趟行程還沒存到雲端，存檔後重新生成插圖，圖上的站點就可以點選。';
+      console.warn('[互動插圖] 無法寫回 imageUrl：', e && e.code ? e.code : e);
+      renderTravelTools();
+      return;
+    }
+    await detectPosterStopBoxes({ force: false, token });
+  }
+
+  async function detectPosterStopBoxes({ force = false, token = posterLoadToken } = {}) {
+    const tripId = posterTripId;
+    const fns = getPosterFunctions();
+    if (!fns || !tripId || !(firebaseAuth && firebaseAuth.currentUser)) {
+      posterBoxesStatus = 'unavailable';
+      posterBoxesNote = '登入後插圖上的站點才可以點選。';
+      renderTravelTools();
+      return;
+    }
+    const stops = (posterStopsSnapshot.length ? posterStopsSnapshot
+      : buildReplanSchedule().map((s) => ({ stopId: posterStopIdOf(s), name: String(s.name || '') })))
+      .filter((s) => s.name);
+    if (!stops.length) return;
+    posterBoxesStatus = 'loading';
+    posterBoxesNote = '';
+    renderTravelTools();
+    try {
+      const result = await fns.httpsCallable('detect_stop_boxes', { timeout: 60000 })({ tripId, stops, force: !!force });
+      if (token !== posterLoadToken || tripId !== currentItineraryId) return;
+      const data = (result && result.data) || {};
+      const boxes = (data.boxes || []).filter(posterBoxIsValid);
+      // 回傳的框是看哪張圖找的：和畫面上的圖不同（例如別人剛重畫）就不能疊上去
+      if (data.imageUrl && posterImageUploadUrl && data.imageUrl !== posterImageUploadUrl) {
+        posterBoxesStatus = 'failed';
+        posterBoxesNote = '行程的插圖剛被其他旅伴更新，請關閉後重新開啟這個面板。';
+      } else if (!boxes.length) {
+        posterBoxesStatus = 'failed';
+        posterBoxesNote = '在插圖上找不到站點編號，可以重新辨識或重畫一張。';
+      } else {
+        posterStopBoxes = { imageUrl: data.imageUrl || posterImageUploadUrl, boxes: normalizePosterBoxes(boxes) };
+        posterBoxesStatus = 'ready';
+      }
+    } catch (e) {
+      if (token !== posterLoadToken) return;
+      posterBoxesStatus = 'failed';
+      const code = String(e && e.code || '');
+      posterBoxesNote = /permission-denied/.test(code) ? '只有行程的擁有者或成員可以辨識插圖站點。'
+        : /unauthenticated/.test(code) ? '請先登入再辨識插圖站點。'
+        : '辨識插圖站點失敗，插圖仍可下載與分享。';
+      console.warn('[互動插圖] detect_stop_boxes 失敗：', code || e);
+    }
+    renderTravelTools();
+  }
+
+  function retryPosterStopBoxes() {
+    detectPosterStopBoxes({ force: true });
+  }
+
+  function posterBoxIsValid(b) {
+    return b && Array.isArray(b.box) && b.box.length === 4 && b.box.every((n) => Number.isFinite(Number(n)))
+      && Number(b.box[2]) > Number(b.box[0]) && Number(b.box[3]) > Number(b.box[1]);
+  }
+
+  // 打開「匯出行程圖」時：換了行程就清掉舊插圖；行程文件上已有插圖（App 或旅伴畫的）就載入它與站框
+  function posterCloudCheckKey() {
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    return `${currentItineraryId}|${user ? user.uid : ''}`;
+  }
+
+  async function loadTripPosterFromCloud() {
+    const tripId = currentItineraryId;
+    posterCloudCheckedKey = posterCloudCheckKey();
+    if (posterTripId && posterTripId !== tripId) {
+      posterLoadToken++;
+      posterGeneratedImageBase64 = null;
+      posterImageUploadUrl = null;
+      posterImageUploadPromise = null;
+      posterStopBoxes = null;
+      posterBoxesStatus = 'idle';
+      posterBoxesNote = '';
+      posterSelectedBoxIndex = -1;
+      posterSelectedMissingIndex = -1;
+      posterModelLabel = '';
+      posterStopsSnapshot = [];
+      posterTripId = null;
+      posterDays = null;
+    }
+    if (posterImageGenerating || posterGeneratedImageBase64 || posterDays) return;
+    const user = firebaseAuth && firebaseAuth.currentUser;
+    if (!firebaseEnabled || !firebaseDb || !user || !tripId || tripId === 'TRIP-EMPTY') return;
+    const token = ++posterLoadToken;
+    let data = null;
+    try {
+      const snap = await firebaseDb.collection('micro_trips').doc(tripId).get();
+      data = snap.exists ? (snap.data() || {}) : null;
+    } catch (_e) { return; } // 讀不到（未上雲／無權限）就維持原本的「生成插圖」畫面
+    if (token !== posterLoadToken || tripId !== currentItineraryId || posterGeneratedImageBase64) return;
+    const imageUrl = data && typeof data.imageUrl === 'string' ? data.imageUrl : '';
+    if (!/^https:\/\//.test(imageUrl)) return;
+    if (loadPosterDaysFromDoc(data, imageUrl, tripId)) { renderTravelTools(); return; }
+    posterTripId = tripId;
+    posterGeneratedImageBase64 = imageUrl;
+    posterImageUploadUrl = imageUrl;
+    posterModelLabel = '這趟行程目前的插圖';
+    posterStopsSnapshot = [];
+    const saved = data.imageStopBoxes;
+    if (saved && saved.imageUrl === imageUrl && Array.isArray(saved.boxes) && saved.boxes.some(posterBoxIsValid)) {
+      posterStopBoxes = { imageUrl, boxes: normalizePosterBoxes(saved.boxes.filter(posterBoxIsValid)) };
+      posterBoxesStatus = 'ready';
+      renderTravelTools();
+      return;
+    }
+    // 舊行程或站框已作廢（imageUrl 不同）→ 補找一次
+    renderTravelTools();
+    detectPosterStopBoxes({ force: false, token });
+  }
+
+  // 多日行程的 imageDays。第 1 天的圖若和 imageUrl 不同，代表之後有人（例如 App）重畫了單張插圖：
+  // 以最後畫的為準，退回單張顯示。
+  function loadPosterDaysFromDoc(data, imageUrl, tripId) {
+    const entries = Array.isArray(data.imageDays) ? data.imageDays.filter((d) => d && Number(d.day) > 0 && /^https:\/\//.test(String(d.imageUrl || ''))) : [];
+    if (entries.length < 1) return false;
+    const list = [...new Set(replanStops.map((s) => Number(s.dayIndex) || 1).concat(entries.map((d) => Number(d.day))))].sort((a, b) => a - b);
+    if (list.length < 2) return false;
+    const first = entries.find((d) => Number(d.day) === list[0]);
+    if (first && first.imageUrl !== imageUrl) return false;
+    const items = {};
+    entries.forEach((d) => {
+      const day = Number(d.day);
+      const order = replanStops.filter((st) => (Number(st.dayIndex) || 1) === day).map((st) => ({ stopId: posterStopIdOf(st), name: String(st.name || '') }));
+      const saved = d.imageStopBoxes;
+      const raw = saved && Array.isArray(saved.boxes) ? saved.boxes.filter(posterBoxIsValid) : [];
+      items[day] = {
+        dataUrl: d.imageUrl, uploadUrl: d.imageUrl, snapshot: order, label: '這趟行程目前的插圖',
+        stopBoxes: raw.length ? { imageUrl: d.imageUrl, boxes: normalizePosterBoxes(raw, order), raw, composed: true } : null,
+        status: raw.length ? 'ready' : 'unavailable', note: raw.length ? '' : '這一天的插圖沒有站點資料，可以按「重畫這一天」。'
+      };
+    });
+    posterTripId = tripId;
+    posterDays = { list, active: list[0], items };
+    posterLoadDay(list[0]);
+    return true;
+  }
+
+  // 站框 → 目前行程的站（先比 stopId，再比站名；插圖畫完後行程可能又被改過）
+  function posterNameKey(v) {
+    return String(v || '').replace(/臺/g, '台').replace(/\s+/g, '').toLowerCase();
+  }
+
+  // 站框的 stopId → 目前行程第幾站（stopId 可能是 App 的 stopId、網頁的 id 或共編的 collabStopId）
+  function posterStopIndexById(id) {
+    const sid = String(id || '');
+    if (!sid) return -1;
+    return replanStops.findIndex((s) => posterStopIdOf(s) === sid || String(s.id || '') === sid || String(s.collabStopId || '') === sid);
+  }
+
+  function posterBoxOverlap(a, b) {
+    const iy = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+    const ix = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+    const inter = iy * ix;
+    const area = (r) => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+    const smaller = Math.min(area(a), area(b));
+    return smaller > 0 ? inter / smaller : 0;
+  }
+
+  // 同名站（最常見的是起點＝終點）的兩個修正：
+  // 1. 模型常只認出一個同名標記，把同一個框同時給第 1 站與第 11 站。兩顆按鈕疊在一起，
+  //    點第 1 站實際點到上層的第 11 站，第 11 站的位置則沒有框。→ 位置重疊的框合併成一個共用框（標「1／11」）。
+  // 2. 若同名的框 stopId 重複，依框的順序重新對到同名站。
+  function normalizePosterBoxes(boxes, orderOverride) {
+    const merged = [];
+    boxes.forEach((raw) => {
+      const b = { ...raw, box: raw.box.map(Number) };
+      const host = merged.find((m) => posterBoxOverlap(m.box, b.box) > 0.7);
+      if (!host) { merged.push(b); return; }
+      const ids = host.sharedStopIds || [String(host.stopId || '')];
+      const sid = String(b.stopId || '');
+      if (sid && !ids.includes(sid)) ids.push(sid);
+      host.sharedStopIds = ids.filter(Boolean);
+    });
+    merged.forEach((m) => {
+      if (!m.sharedStopIds) return;
+      if (m.sharedStopIds.length < 2) { delete m.sharedStopIds; return; }
+      // 依行程順序排：第一個是起點，最後一個是回程
+      m.sharedStopIds.sort((x, y) => {
+        const ix = posterStopIndexById(x), iy = posterStopIndexById(y);
+        return (ix < 0 ? 1e9 : ix) - (iy < 0 ? 1e9 : iy);
+      });
+      m.stopId = m.sharedStopIds[0];
+    });
+    const order = (orderOverride && orderOverride.length) ? orderOverride
+      : posterStopsSnapshot.length ? posterStopsSnapshot
+      : posterScopeIndexes().map((i) => ({ stopId: posterStopIdOf(replanStops[i]), name: String(replanStops[i].name || '') }));
+    const groups = new Map();
+    order.forEach((s) => {
+      const key = posterNameKey(s.name);
+      if (!key || !s.stopId) return;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s.stopId);
+    });
+    groups.forEach((ids, key) => {
+      if (ids.length < 2) return;
+      const members = merged.filter((b) => !b.sharedStopIds && posterNameKey(b.name) === key);
+      // 同名站只有一個框（起終點合併成「1／N」一個標記）→ 這個框同時代表所有同名站
+      if (members.length === 1) {
+        members[0].sharedStopIds = ids.slice();
+        members[0].stopId = ids[0];
+        return;
+      }
+      const seen = new Set(members.map((b) => String(b.stopId || '')));
+      if (members.length > 1 && seen.size < members.length) {
+        members.forEach((b, i) => { b.stopId = ids[Math.min(i, ids.length - 1)]; });
+      }
+    });
+    return merged;
+  }
+
+  // 共用框（起點＝終點只畫一個標記）：還沒從起點出發就是起點，出發後指向回程那一站
+  function posterSharedBoxStopId(box) {
+    const ids = box.sharedStopIds;
+    const first = replanStops[posterStopIndexById(ids[0])];
+    return (currentTripStatus === 'ongoing' && first && first.checkedInAt) ? ids[ids.length - 1] : ids[0];
+  }
+
+  function resolvePosterBoxStop(box) {
+    const id = String((box && box.sharedStopIds ? posterSharedBoxStopId(box) : box && box.stopId) || '');
+    const norm = posterNameKey;
+    const idx = posterStopIndexById(id);
+    return (idx >= 0 ? replanStops[idx] : null)
+      || replanStops.find((s) => norm(s.name) && norm(s.name) === norm(box && box.name))
+      || null;
+  }
+
+  // 插圖上的編號：圖上找不到的站不會出現在 boxes，所以不能直接用陣列位置，要回到畫圖時的站序
+  function posterBoxNumber(box, i) {
+    if (box && box.sharedStopIds) {
+      const nums = box.sharedStopIds.map((sid) => posterStopsSnapshot.findIndex((s) => s.stopId === sid) + 1
+        || posterScopeNumber(posterStopIndexById(sid)) || 0).filter((n) => n > 0);
+      if (nums.length) return nums.join('／');
+    }
+    const id = String(box && box.stopId || '');
+    const snapIdx = id ? posterStopsSnapshot.findIndex((s) => s.stopId === id) : -1;
+    if (snapIdx >= 0) return snapIdx + 1;
+    const stop = resolvePosterBoxStop(box);
+    const idx = stop ? replanStops.indexOf(stop) : -1;
+    return idx >= 0 ? posterScopeNumber(idx) : null; // 對不到任何站就不編號，免得和真正的站撞號
+  }
+
+  // 行程進行中：最後一個已打卡的站＝目前所在；currentStopIndex 指向下一個要去的站
+  function getPosterJourneyState() {
+    if (currentTripStatus !== 'ongoing') return { atIndex: -1, nextIndex: -1 };
+    const nextIndex = (currentStopIndex >= 0 && currentStopIndex < replanStops.length) ? currentStopIndex : -1;
+    const prev = currentStopIndex - 1;
+    const atIndex = (prev >= 0 && replanStops[prev] && replanStops[prev].checkedInAt) ? prev : -1;
+    return { atIndex, nextIndex };
+  }
+
+  function selectPosterStop(index) {
+    posterSelectedBoxIndex = posterSelectedBoxIndex === index ? -1 : index;
+    posterSelectedMissingIndex = -1;
+    renderTravelTools();
+    if (posterSelectedBoxIndex >= 0) {
+      setTimeout(scrollPosterCardIntoView, 40);
+    }
+  }
+
+  function scrollPosterCardIntoView() {
+    const toolsOpen = !!document.querySelector('#travelToolsOverlay.open');
+    const card = document.getElementById(toolsOpen ? 'posterStopCard' : 'posterMapStopCard');
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function selectPosterMissingStop(stopIndex) {
+    posterSelectedMissingIndex = posterSelectedMissingIndex === stopIndex ? -1 : stopIndex;
+    posterSelectedBoxIndex = -1;
+    renderTravelTools();
+    if (posterSelectedMissingIndex >= 0) setTimeout(scrollPosterCardIntoView, 40);
+  }
+
+  // 插圖上找不到框的站：模型把名字畫錯（例如第 9 站標成第 7 站的名字）或漏畫時，
+  // detect_stop_boxes 就不會回傳那一站 → 圖上點不到。這些站列在插圖下方，仍可點開景點卡。
+  function getPosterMissingStopIndexes(boxes) {
+    const covered = new Set();
+    boxes.forEach((b) => {
+      (b.sharedStopIds || [b.stopId]).forEach((id) => {
+        const idx = posterStopIndexById(id);
+        if (idx >= 0) covered.add(idx);
+      });
+      const stop = resolvePosterBoxStop(b);
+      if (stop) covered.add(replanStops.indexOf(stop));
+    });
+    return posterScopeIndexes().filter((i) => !covered.has(i) && replanStops[i] && replanStops[i].name);
+  }
+
+  function showPosterStopOnMap(stopId) {
+    const stop = replanStops.find((s) => s.id === stopId);
+    if (!stop) return;
+    closeTravelTools();
+    if (plannerMapMode === 'poster') setPlannerMapMode('google');
+    if (isMobileLayout()) setMobileMode('map');
+    const pos = getStopLatLng(stop);
+    if (stop.mapPinId && pinData[stop.mapPinId]) showPinInfo(stop.mapPinId);
+    if (pos && map) map.panTo(pos);
+  }
+
+  // ── 地圖區：Google 地圖 ↔ 互動插圖 切換 ──
+  function posterAvailableForMap() {
+    return !!posterGeneratedImageBase64 && !posterImageGenerating && posterTripId === currentItineraryId;
+  }
+
+  function setPlannerMapMode(mode) {
+    plannerMapMode = mode === 'poster' ? 'poster' : 'google';
+    renderPosterMapView();
+  }
+
+  // 還沒有插圖（或正在畫）時切到插圖模式：在地圖區說明，並給一顆直接去生成的按鈕
+  function renderPosterMapEmptyState() {
+    if (posterImageGenerating) {
+      return `
+        <div class="poster-mapview-empty">
+          <div class="poster-mapview-empty-icon">🎨</div>
+          <div class="poster-mapview-empty-title">插圖生成中…</div>
+          <div class="travel-hint">AI 正在繪製這趟行程的插圖，完成後會自動顯示在這裡。</div>
+        </div>`;
+    }
+    return `
+      <div class="poster-mapview-empty">
+        <div class="poster-mapview-empty-icon">🎨</div>
+        <div class="poster-mapview-empty-title">這趟行程還沒有插圖</div>
+        <div class="travel-hint">先到「匯出行程圖」輸入喜歡的卡通人物，生成 AI 旅遊插圖；完成後就能在這裡點圖上的站，看時間、停留與營業時間。</div>
+        <div class="travel-action-row">
+          <button type="button" class="travel-btn primary" onclick="openTravelTools('export')">🎨 去生成插圖</button>
+          <button type="button" class="travel-btn secondary" onclick="setPlannerMapMode('google')">回到地圖</button>
+        </div>
+      </div>`;
+  }
+
+  function renderPosterMapView() {
+    const toggle = document.getElementById('mapModeToggle');
+    const view = document.getElementById('posterMapView');
+    if (!toggle || !view) return;
+    // 行程文件上已有插圖（App、旅伴或之前畫的）→ 載入，切換鈕才會出現；同一個「行程｜帳號」只查一次
+    if (posterCloudCheckKey() !== posterCloudCheckedKey && !posterImageGenerating) {
+      loadTripPosterFromCloud().catch((e) => console.warn('[互動插圖] 載入行程插圖失敗：', e));
+    }
+    const has = posterAvailableForMap();
+    // 有行程就顯示切換鈕；還沒有插圖時點「插圖」會看到說明與「去生成插圖」
+    const hasTrip = replanStops.length > 0;
+    if (!hasTrip) plannerMapMode = 'google';
+    const on = plannerMapMode === 'poster';
+    toggle.hidden = !hasTrip;
+    [['mapModeGoogleBtn', !on], ['mapModePosterBtn', on]].forEach(([id, active]) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', String(active));
+    });
+    document.body.classList.toggle('poster-map-mode', on);
+    view.hidden = !on;
+    view.innerHTML = !on ? ''
+      : has ? `<div class="poster-mapview-inner poster-map">${renderInteractivePoster('map')}</div>`
+      : renderPosterMapEmptyState();
+  }
+
+  function renderPosterStopCard(box, number, schedule, journey, cardId = 'posterStopCard') {
+    const stop = resolvePosterBoxStop(box);
+    const idx = stop ? replanStops.indexOf(stop) : -1;
+    const sched = idx >= 0 ? schedule[idx] : null;
+    const closeBtn = '<button type="button" class="poster-stop-card-close" onclick="selectPosterStop(-1)" aria-label="關閉景點卡">✕</button>';
+    const missingNote = box.missingOnPoster ? '<div class="travel-hint">這一站在插圖上沒有被辨識到（可能漏畫或名稱標錯），重畫插圖通常就能修正。</div>' : '';
+    if (!stop || !sched) {
+      return `
+        <div class="poster-stop-card" id="${cardId}">
+          ${closeBtn}
+          <div class="poster-stop-card-title">${number ? `${number}. ` : ''}${escapeHtml(box.name || '景點')}</div>
+          <div class="travel-hint">這一站已經不在目前的行程裡（插圖畫完後行程有調整），可以重畫插圖讓編號對上。</div>
+        </div>`;
+    }
+    const status = idx === journey.atIndex ? '<span class="poster-stop-tag at">📍 目前在這</span>'
+      : idx === journey.nextIndex ? '<span class="poster-stop-tag next">🚗 下一站</span>'
+      : stop.checkedInAt ? '<span class="poster-stop-tag done">✓ 已打卡</span>' : '';
+    const hours = stop.businessHours ? formatDayBusinessHours(stop.businessHours, getStopServiceDate(stop)) : '';
+    const hasPos = !!getStopLatLng(stop);
+    const sid = escapeHtml(JSON.stringify(String(stop.id)));
+    return `
+      <div class="poster-stop-card" id="${cardId}">
+        ${closeBtn}
+        <div class="poster-stop-card-title">${number ? `${number}. ` : ''}${escapeHtml(stop.emoji || '📍')} ${escapeHtml(stop.name || '景點')} ${status}</div>
+        <div class="poster-stop-card-meta">
+          <div>🕒 ${escapeHtml(minutesToClock(sched.start))} – ${escapeHtml(minutesToClock(sched.end))}</div>
+          <div>⏱ 停留 ${escapeHtml(String(sched.computedStayMin))} 分鐘</div>
+          ${hours ? `<div>${hours}</div>` : ''}
+        </div>
+        ${missingNote}
+        ${hasPos ? `
+          <div class="travel-action-row">
+            <button type="button" class="travel-btn primary" onclick="openExternalNavigation(${sid})">🧭 導航</button>
+            <button type="button" class="travel-btn secondary" onclick="showPosterStopOnMap(${sid})">🗺 在地圖上看</button>
+          </div>` : ''}
+      </div>`;
+  }
+
+  // ctx：'tools'＝匯出行程圖面板；'map'＝地圖區的插圖模式（兩處同時存在，id 不能重複）
+  function renderInteractivePoster(ctx = 'tools') {
+    const imgSrc = posterGeneratedImageBase64;
+    const imgId = ctx === 'map' ? 'posterMapImg' : 'posterGeneratedImg';
+    const cardId = ctx === 'map' ? 'posterMapStopCard' : 'posterStopCard';
+    const ready = posterBoxesStatus === 'ready' && posterStopBoxes && posterStopBoxes.boxes.length;
+    const schedule = ready ? buildReplanSchedule() : [];
+    const journey = getPosterJourneyState();
+    let hits = '';
+    let card = '';
+    let banner = '';
+    let missingChips = '';
+    if (ready) {
+      const boxes = posterStopBoxes.boxes;
+      if (posterSelectedBoxIndex >= boxes.length) posterSelectedBoxIndex = -1;
+      hits = boxes.map((b, i) => {
+        const [ymin, xmin, ymax, xmax] = b.box.map((n) => Math.max(0, Math.min(1000, Number(n))));
+        const stop = resolvePosterBoxStop(b);
+        const idx = stop ? replanStops.indexOf(stop) : -1;
+        const cls = ['poster-stop-hit'];
+        if (idx >= 0 && idx === journey.atIndex) cls.push('at');
+        else if (idx >= 0 && idx === journey.nextIndex) cls.push('next');
+        else if (stop && stop.checkedInAt) cls.push('done');
+        if (i === posterSelectedBoxIndex) cls.push('selected');
+        const style = `top:${ymin / 10}%;left:${xmin / 10}%;height:${(ymax - ymin) / 10}%;width:${(xmax - xmin) / 10}%`;
+        return `<button type="button" class="${cls.join(' ')}" style="${style}" onclick="selectPosterStop(${i})"
+                  aria-label="${posterBoxNumber(b, i) ? `第 ${posterBoxNumber(b, i)} 站` : '插圖上的站'}：${escapeHtml((stop && stop.name) || b.name || '')}" aria-pressed="${i === posterSelectedBoxIndex}"></button>`;
+      }).join('');
+      if (posterSelectedBoxIndex >= 0) {
+        card = renderPosterStopCard(boxes[posterSelectedBoxIndex], posterBoxNumber(boxes[posterSelectedBoxIndex], posterSelectedBoxIndex), schedule, journey, cardId);
+      }
+      const missing = getPosterMissingStopIndexes(boxes);
+      if (!missing.includes(posterSelectedMissingIndex)) posterSelectedMissingIndex = -1;
+      if (posterSelectedMissingIndex >= 0) {
+        const ms = replanStops[posterSelectedMissingIndex];
+        card = renderPosterStopCard({ stopId: posterStopIdOf(ms), name: ms.name, missingOnPoster: true }, posterScopeNumber(posterSelectedMissingIndex), schedule, journey, cardId);
+      }
+      missingChips = missing.length ? `
+        <div class="poster-missing">
+          <span class="poster-missing-label">圖上點不到的站：</span>
+          ${missing.map((i) => `<button type="button" class="poster-missing-chip${i === posterSelectedMissingIndex ? ' selected' : ''}" onclick="selectPosterMissingStop(${i})">${posterScopeNumber(i)}. ${escapeHtml(replanStops[i].name)}</button>`).join('')}
+        </div>` : '';
+      const at = journey.atIndex >= 0 ? replanStops[journey.atIndex] : null;
+      const next = journey.nextIndex >= 0 ? replanStops[journey.nextIndex] : null;
+      const nextEta = next && schedule[journey.nextIndex] ? minutesToClock(schedule[journey.nextIndex].start) : '';
+      banner = (at || next)
+        ? [at ? `📍 目前在：${escapeHtml(at.name)}` : '', next ? `🚗 下一站：${escapeHtml(next.name)}${nextEta ? ` · 約 ${escapeHtml(nextEta)} 到` : ''}` : ''].filter(Boolean).join('　')
+        : '👆 點圖上的站，看時間、停留與營業時間';
+    } else if (posterBoxesStatus === 'loading') {
+      banner = '🔎 正在辨識圖上的站點（約 5 秒）…';
+    } else if (posterBoxesStatus === 'failed') {
+      banner = `${escapeHtml(posterBoxesNote)} <button type="button" class="byok-link-btn" onclick="retryPosterStopBoxes()">重新辨識</button>`;
+    } else if (posterBoxesStatus === 'unavailable') {
+      banner = escapeHtml(posterBoxesNote);
+    } else if (posterImageUploading) {
+      banner = '☁️ 正在存回行程，完成後就能點選圖上的站…';
+    } else if (!posterImageUploadUrl) {
+      banner = '插圖沒有存到雲端，所以圖上的站點不能點選；仍可下載與分享。';
+    }
+    return `
+      ${renderPosterDayTabs()}
+      ${banner ? `<div class="poster-map-banner">${banner}</div>` : ''}
+      <div class="poster-map-stage">
+        <img id="${imgId}" src="${escapeHtml(imgSrc)}" alt="AI 生成旅遊插圖" draggable="false">
+        ${hits}
+      </div>
+      <div class="poster-map-foot">
+        <span>${escapeHtml(posterModelLabel)}</span>
+        <span class="poster-map-foot-actions">
+          ${posterDays && ctx === 'tools' ? `<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})">🎨 重畫第 ${posterDays.active} 天</button>` : ''}
+          <button type="button" class="byok-link-btn" onclick="openImageLightbox(document.getElementById('${imgId}').src)">🔍 放大檢視</button>
+        </span>
+      </div>
+      ${missingChips}
+      ${card}`;
   }
 
   // ── 旅記照片（拍照 → 壓縮 → Firebase Storage → 掛回造訪紀錄）──
@@ -8231,6 +9380,7 @@
   }
 
   function renderTravelTools() {
+    renderPosterMapView(); // 插圖狀態一變，地圖區的插圖模式也跟著更新
     const titleEl = document.getElementById('travelToolsTitle');
     const subtitleEl = document.getElementById('travelToolsSubtitle');
     const bodyEl = document.getElementById('travelToolsBody');
@@ -8320,24 +9470,25 @@
         <div class="travel-panel">
           <div class="travel-panel-title">AI 旅遊插圖</div>
           <div class="travel-panel-subtitle">輸入喜歡的卡通人物，AI 將根據你的行程直接生成日式插畫風格旅遊圖。</div>
+          ${renderPosterByokPanel()}
           <input class="travel-input" id="posterCharacterInput"
                  placeholder="例如：哆啦A夢、皮卡丘、小熊維尼…"
                  value="${escapeHtml(posterCharacterDraft)}"
                  ${posterImageGenerating ? 'disabled' : ''}>
           <div class="travel-action-row">
             <button class="travel-btn primary" onclick="generateItineraryImage()" ${posterImageGenerating ? 'disabled' : ''}>
-              ${posterImageGenerating ? '生成中…' : '生成插圖'}
+              ${posterImageGenerating ? '生成中…' : (() => { const d = posterTripDayList(buildReplanSchedule()); return d ? `生成插圖（${d.length} 天，每天一張）` : '生成插圖'; })()}
             </button>
           </div>
-          ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">✨ AI 正在繪製插圖，請稍候（約 20–40 秒）…</div>` : ''}
-          ${posterGeneratedImageBase64 ? `
-            <img id="posterGeneratedImg"
-                 src="${posterGeneratedImageBase64}"
-                 alt="AI 生成旅遊插圖"
-                 style="width:100%;border-radius:16px;border:1px solid var(--border);display:block;cursor:pointer;"
-                 onclick="openImageLightbox(this.src)"
-                 title="點擊放大預覽">
-            <div style="font-size:11px;color:var(--ink3);text-align:center;margin-top:4px;">點擊圖片可放大預覽</div>
+          ${posterImageGenerating ? `<div class="travel-hint" style="text-align:center;padding:20px 0;">${{
+            composing: '🏷 正在加上站名與編號…'
+          }[posterGeneratingPhase] || '✨ AI 正在繪製插圖，請稍候（約 20–40 秒）…'}${escapeHtml(posterGeneratingNote)}</div>` : ''}
+          ${posterDays && !posterGeneratedImageBase64 && !posterImageGenerating ? `
+            <div class="poster-map">${renderPosterDayTabs()}
+              <div class="travel-hint">第 ${posterDays.active} 天還沒有插圖。<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})">🎨 生成第 ${posterDays.active} 天</button></div>
+            </div>` : ''}
+          ${posterGeneratedImageBase64 && !posterImageGenerating ? `
+            <div class="poster-map">${renderInteractivePoster()}</div>
             <div class="img-share-row">
               <button class="img-share-btn line"   onclick="shareImageToLine()">💬 LINE</button>
               <button class="img-share-btn fb"     onclick="shareImageToFacebook()">📘 Facebook</button>
@@ -11730,6 +12881,7 @@
   function renderItineraryDisplay() {
     const plannedBlock = document.getElementById('itineraryPlannedBlock');
     if (!plannedBlock) return;
+    try { renderPosterMapView(); } catch (_e) {} // 載入行程、打卡後同步地圖區的插圖模式
 
     syncTripPrimaryVehicleSelect();
     try { syncDirectionsPanelStages(); } catch (_e) {}   // 打卡、重設進度都會走到這裡：階段面板跟著換「正在前往的段」（載入初期變數未就緒時略過）
@@ -20426,6 +21578,7 @@
   };
 
   window.doLogout = async function() {
+    clearPosterByok(); // 自備金鑰只屬於登入中的這個人：登出一併清除
     try {
       if (firebaseAuth) await firebaseAuth.signOut();
       feedbackToast('已登出，重整頁面中…');
