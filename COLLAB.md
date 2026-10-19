@@ -61,6 +61,12 @@ invites/{CODE}: { tripId, active, createdBy, createdAt }
 
 本 repo 未附 `.firebaserc` 或 `firebase.json`，部署者須先核對 Firebase 專案與目前線上完整規則。不得僅為排除 permission-denied 而加回任一登入者可修改共編文件的條件。
 
+Firestore Rules 用 [firestore-deploy.json](firestore-deploy.json) 指定規則檔（需先 `firebase login`）。這會用 repo 的整份 `firestore.rules` 取代線上規則，部署前確認線上沒有 repo 以外的修改：
+
+```bash
+firebase deploy --only firestore:rules --project project-720a680b-3ad1-40d1-b07 --config firestore-deploy.json
+```
+
 本機回歸：`node tools/test-e2e-logic.js`、`node --test tools/test-issue-fixes.js`。VM 測試執行真實函式／端點並替換 I/O，不等於 Firestore Rules 整合測試。
 
 正式站雙帳號驗收使用兩個獨立 Chrome Profiles：建立 → 邀請 → 加入 → 填偏好 → 調 editor/viewer → 退出重加；另驗 owner 未在陣列、人數已滿、key 碰撞與訪客分享。每條路徑確認 Console 零紅字。發布後再驗一般成員不能讀回饋、仍可提交自己的回饋。
