@@ -9187,7 +9187,7 @@
   const RECAP_MODULES = [
     ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261019-recap1'],
     ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261019-recap2'],
-    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261019-recap1']
+    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261019-recap4']
   ];
   let recapModulesPromise = null;
 
@@ -9217,6 +9217,15 @@
 
   function memorySetRecapTemplate(id) {
     if (!memoryStudioState) return;
+    const cur = memoryStudioState.recapTimeline;
+    if (cur && cur.edited && id !== recapTemplateId()
+        && !window.confirm('換影片節奏會重新排推薦版本，你改過的秒數與字幕會清掉。確定要換嗎？')) {
+      document.querySelectorAll('input[name="recapTemplate"]').forEach((el) => { el.checked = el.value === recapTemplateId(); });
+      return;
+    }
+    memoryStudioState.recapTimeline = null;
+    memoryStudioState.recapUndo = null;
+    try { localStorage.removeItem(recapTimelineStorageKey()); } catch (_e) {}
     memoryStudioState.recapTemplateId = id;
     try { localStorage.setItem(RECAP_TEMPLATE_STORAGE, id); } catch (_e) {}
     const box = document.getElementById('recapTimelinePreview');
@@ -9271,23 +9280,218 @@
     catch (e) { console.warn('[recap] 推薦時間軸計算失敗：', e && e.message); return null; }
   }
 
+  // ── 片段卡片編輯器（計劃 6.4：單欄卡片，不做多軌時間軸）──
+  // 編輯後的時間軸自動存在這台裝置（每趟行程一份），關掉面板再開還在；
+  // 行程的站、照片或節奏改變時（簽章不同）就重新排推薦版本。
+  function recapTimelineStorageKey() {
+    return 'wai_recap_tl_' + String(currentItineraryId || (memoryStudioState && memoryStudioState.tripId) || '');
+  }
+
+  function recapTimelineBaseSig(trip, photos) {
+    return [recapTemplateId(), (trip.stops || []).map((st) => st.stopId).join(','), (photos || []).map((p) => p.stopIndex).join(',')].join('|');
+  }
+
+  // 回傳 { trip, photos, timeline }；timeline 為使用者編輯過的版本（若仍適用）或新的推薦版本
+  function recapEditorContext() {
+    const trip = collectRecapTrip();
+    const photos = recapPreviewPhotos(trip);
+    const sig = recapTimelineBaseSig(trip, photos);
+    const st = memoryStudioState || {};
+    let timeline = st.recapTimeline && st.recapTimelineSig === sig ? st.recapTimeline : null;
+    if (!timeline) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(recapTimelineStorageKey()) || 'null');
+        if (saved && saved.sig === sig && saved.timeline && Array.isArray(saved.timeline.clips)) timeline = saved.timeline;
+        else if (saved && saved.timeline && saved.timeline.edited) st.recapResetNotice = true; // 行程或照片變了，舊的編輯不適用
+      } catch (_e) {}
+    }
+    if (!timeline) timeline = buildRecapRecommendedTimeline(trip, photos);
+    if (memoryStudioState) {
+      memoryStudioState.recapTimeline = timeline;
+      memoryStudioState.recapTimelineSig = sig;
+    }
+    return { trip, photos, timeline };
+  }
+
+  function recapSaveTimeline(timeline) {
+    try {
+      if (timeline && timeline.edited) localStorage.setItem(recapTimelineStorageKey(), JSON.stringify({ sig: memoryStudioState.recapTimelineSig, timeline }));
+      else localStorage.removeItem(recapTimelineStorageKey());
+    } catch (_e) {}
+  }
+
+  // 每次修改：先存一份給「一步復原」，再存檔、重畫
+  function recapCommitTimeline(next, { rerender = true } = {}) {
+    if (!memoryStudioState || !next) return;
+    memoryStudioState.recapUndo = memoryStudioState.recapTimeline;
+    memoryStudioState.recapTimeline = next;
+    recapSaveTimeline(next);
+    if (rerender) recapRerenderEditor();
+  }
+
+  function recapRerenderEditor() {
+    const box = document.getElementById('recapTimelinePreview');
+    if (box) box.innerHTML = renderRecapTimelinePreview();
+  }
+
   function renderRecapTimelinePreview() {
     const lib = window.WAI_RECAP_TIMELINE;
     if (!lib) return '';
-    const trip = collectRecapTrip();
-    const timeline = buildRecapRecommendedTimeline(trip, recapPreviewPhotos(trip));
+    const { trip, photos, timeline } = recapEditorContext();
     if (!timeline) return '<p class="memory-title-hint">至少要有兩個有座標的景點，才能排出推薦版本。</p>';
-    const sum = lib.summarizeTimeline(timeline);
+    const totalSec = Math.round(lib.timelineTotalMs(trip, timeline, photos) / 100) / 10;
+    const rows = lib.summarizeTimeline(timeline).rows;
     const photoCount = timeline.clips.filter((c) => c.type === 'photo').length;
+    const st = memoryStudioState || {};
+    const notice = st.recapResetNotice ? '<p class="recap-editor-notice">行程或照片有變動，已重新排推薦版本。</p>' : '';
+    st.recapResetNotice = false;
+    const captionable = { cover: true, route: true, photo: true, outro: true };
+    const cards = rows.map((r) => {
+      const id = escapeHtml(JSON.stringify(r.clipId));
+      return `
+        <li class="recap-clip-card recap-clip-${r.type}">
+          <div class="recap-card-head">
+            <span class="recap-clip-icon" aria-hidden="true">${r.icon}</span>
+            <span class="recap-clip-text">${escapeHtml(r.text)}</span>
+          </div>
+          <div class="recap-card-controls">
+            <button type="button" class="recap-step-btn" onclick="recapClipStep(${id}, -500)" aria-label="縮短 0.5 秒">−</button>
+            <span class="recap-clip-sec">${r.seconds} 秒</span>
+            <button type="button" class="recap-step-btn" onclick="recapClipStep(${id}, 500)" aria-label="延長 0.5 秒">＋</button>
+            ${r.type === 'photo' ? `<button type="button" class="recap-remove-btn" onclick="recapClipRemove(${id})">移除</button>` : ''}
+          </div>
+          ${captionable[r.type] ? `<input type="text" class="recap-caption-input" maxlength="${lib.CAPTION_MAX}"
+              value="${escapeHtml(r.caption)}" placeholder="字幕（選填，${lib.CAPTION_MAX} 字內）" aria-label="${escapeHtml(r.text)} 的字幕"
+              oninput="recapClipCaption(${id}, this.value)">` : ''}
+        </li>`;
+    }).join('');
+    const busy = !!st.recapAiBusy;
     return `
-      <details class="recap-timeline-preview">
-        <summary>推薦版本：共 ${sum.totalSeconds} 秒 · ${sum.rows.length} 段${photoCount ? ` · ${photoCount} 張照片` : '（沒有打卡照片，以路線為主）'}</summary>
-        <ol class="recap-timeline-list">
-          ${sum.rows.map((r) => `<li class="recap-clip recap-clip-${r.type}"><span class="recap-clip-icon" aria-hidden="true">${r.icon}</span><span class="recap-clip-text">${escapeHtml(r.text)}</span><span class="recap-clip-sec">${r.seconds} 秒</span></li>`).join('')}
-        </ol>
-        <p class="memory-title-hint">依景點順序、距離與打卡照片自動排出；片長依照片數調整，素材少就做短一點，不會用假畫面補長度。</p>
+      <details class="recap-timeline-preview" ${st.recapEditorOpen ? 'open' : ''} ontoggle="memoryStudioState && (memoryStudioState.recapEditorOpen = this.open)">
+        <summary>${timeline.edited ? '已編輯版本' : '推薦版本'}：共 ${totalSec} 秒 · ${rows.length} 段${photoCount ? ` · ${photoCount} 張照片` : '（沒有打卡照片，以路線為主）'}</summary>
+        ${notice}
+        <div class="recap-editor-tools">
+          <button type="button" class="memory-secondary-btn" onclick="recapAiScript()" ${busy ? 'disabled' : ''}>${busy ? '撰寫中…' : '✨ AI 寫字幕'}</button>
+          <button type="button" class="memory-secondary-btn" onclick="recapUndo()" ${st.recapUndo ? '' : 'disabled'}>↶ 復原</button>
+          <button type="button" class="memory-secondary-btn" onclick="recapResetTimeline()" ${timeline.edited ? '' : 'disabled'}>↺ 還原推薦</button>
+        </div>
+        <ol class="recap-clip-cards">${cards}</ol>
+        <p class="memory-title-hint">路線順序依行程固定；可調整每段秒數、加字幕或移除照片。修改會自動保存在這台裝置。AI 字幕只根據景點、天數與你的旅記備註撰寫，不會編造沒發生的事。</p>
       </details>`;
   }
+
+  window.recapClipStep = function (clipId, deltaMs) {
+    const tl = memoryStudioState && memoryStudioState.recapTimeline;
+    const clip = tl && tl.clips.find((c) => c.clipId === clipId);
+    if (!clip) return;
+    recapCommitTimeline(WAI_RECAP_TIMELINE.setClipDuration(tl, clipId, clip.durationMs + deltaMs));
+  };
+
+  // 打字時不重畫（會讓輸入框失去焦點），只更新狀態並存檔；「復原」記錄每次開始輸入前的版本
+  window.recapClipCaption = function (clipId, value) {
+    const tl = memoryStudioState && memoryStudioState.recapTimeline;
+    if (!tl) return;
+    const next = WAI_RECAP_TIMELINE.setClipCaption(tl, clipId, value);
+    if (memoryStudioState.recapCaptionEditing !== clipId) {
+      memoryStudioState.recapCaptionEditing = clipId;
+      memoryStudioState.recapUndo = tl;
+    }
+    memoryStudioState.recapTimeline = next;
+    recapSaveTimeline(next);
+    const summary = document.querySelector('.recap-timeline-preview summary');
+    if (summary && !/^已編輯/.test(summary.textContent)) summary.textContent = summary.textContent.replace(/^推薦版本/, '已編輯版本');
+  };
+
+  window.recapClipRemove = function (clipId) {
+    const tl = memoryStudioState && memoryStudioState.recapTimeline;
+    if (!tl) return;
+    recapCommitTimeline(WAI_RECAP_TIMELINE.removePhotoClip(tl, clipId));
+  };
+
+  window.recapUndo = function () {
+    if (!memoryStudioState || !memoryStudioState.recapUndo) return;
+    memoryStudioState.recapTimeline = memoryStudioState.recapUndo;
+    memoryStudioState.recapUndo = null;
+    memoryStudioState.recapCaptionEditing = null;
+    recapSaveTimeline(memoryStudioState.recapTimeline);
+    recapRerenderEditor();
+  };
+
+  window.recapResetTimeline = function () {
+    if (!memoryStudioState) return;
+    const { trip, photos } = recapEditorContext();
+    recapCommitTimeline(buildRecapRecommendedTimeline(trip, photos));
+    memoryStudioState.recapCaptionEditing = null;
+  };
+
+  // ── AI 劇本助手：依景點、天數、旅記備註寫字幕，並建議哪幾張照片停久一點 ──
+  // 只填字幕與照片長短，不新增片段、不改順序、不生成畫面（AI 只當輔助，見 TRAVEL_STORY_AI_DRAMA_APPENDIX.md）
+  window.recapAiScript = async function () {
+    if (!memoryStudioState || memoryStudioState.recapAiBusy) return;
+    await ensureRecapModules();
+    const { trip, timeline } = recapEditorContext();
+    if (!timeline) return;
+    const vertex = (typeof getVertexConfig === 'function') ? getVertexConfig() : { ready: false };
+    if (!vertex.ready) { feedbackToast('AI 服務尚未設定，請手動輸入字幕', 'orange'); return; }
+    memoryStudioState.recapAiBusy = true;
+    recapRerenderEditor();
+    try {
+      const tripId = String(currentItineraryId || '');
+      const notes = {};
+      getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId).forEach((r) => {
+        if (r.note) notes[visitedPlaceNameKey(r.name)] = String(r.note).slice(0, 200);
+      });
+      const stopById = {};
+      (trip.stops || []).forEach((st) => { stopById[st.stopId] = st; });
+      const lines = timeline.clips.filter((c) => c.type === 'route' || c.type === 'photo').map((c) => {
+        if (c.type === 'route') {
+          const to = stopById[c.toStopId] || {};
+          return `${c.clipId}｜路線｜前往「${to.name || ''}」（第 ${to.dayIndex || 1} 天，${c.distanceKm || 0} km）`;
+        }
+        const st = stopById[c.assetRef && c.assetRef.stopId] || {};
+        const note = notes[visitedPlaceNameKey(st.name || '')];
+        return `${c.clipId}｜照片｜「${st.name || ''}」（第 ${st.dayIndex || 1} 天，停留 ${st.stayMin || 0} 分鐘）${note ? `｜旅記備註：${note}` : ''}`;
+      });
+      const prompt = [
+        '你是旅遊回顧短片的剪輯助手，要替每個片段寫一句字幕。',
+        `旅程：${(memoryStudioState.recapTitle || trip.title || '').slice(0, 40)}；地區：${trip.region || ''}；日期：${trip.dateLabel || ''}；交通：${trip.transportMode || ''}`,
+        '片段（片段id｜類型｜內容）：',
+        ...lines,
+        '',
+        '規則：',
+        `1. 每則字幕不超過 ${WAI_RECAP_TIMELINE.CAPTION_MAX} 個中文字，口語、溫暖、不要 emoji 與 hashtag。`,
+        '2. 只能根據上面提供的景點名稱、天數、距離與旅記備註寫；不可編造天氣、同行者、心情、吃了什麼或發生的事件。',
+        '3. 路線片段寫移動感（例如「前往某某」「沿著海岸到某某」），照片片段寫該景點；有旅記備註時優先用備註的內容。',
+        '4. 不要寫資料裡沒有的方位（東南西北）、距離以外的數字或景點特色描述，寧可樸素也不要猜。',
+        '5. emphasis 只用於照片片段：有旅記備註或停留較久的寫 long，其餘 normal，最多一半寫 short。',
+        '只回 JSON（不要多餘文字）：{"cover":"開場字幕","outro":"結尾字幕","clips":{"片段id":{"caption":"字幕","emphasis":"long|normal|short"}}}'
+      ].join('\n');
+      const endpoint = VERTEX_API_BASE + '/publishers/google/models/' + GEMINI_MODEL + ':generateContent' + (vertex.apiKey ? '?key=' + encodeURIComponent(vertex.apiKey) : '');
+      const res = await fetch(endpoint, {
+        method: 'POST', headers: await vertexAuthHeaders(),
+        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: buildGenConfig({ temperature: 0.6, maxOutputTokens: 2048, thinking: 0 }) })
+      });
+      if (res.status === 401) throw new Error('請先登入再使用 AI 字幕');
+      if (!res.ok) throw new Error('AI 回應錯誤（' + res.status + '）');
+      const data = await res.json();
+      const text = ((data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).map((p) => p.text || '').join('');
+      const parsed = safeParseJson(text);
+      if (!parsed || typeof parsed !== 'object') throw new Error('AI 回傳格式不正確，請再試一次');
+      // 使用者已經打好的字幕保留，只填空白的；全部都有字幕時才整份改寫
+      const base = memoryStudioState.recapTimeline || timeline;
+      const hasEmpty = base.clips.some((c) => ['cover', 'route', 'photo', 'outro'].includes(c.type) && !c.caption);
+      const next = WAI_RECAP_TIMELINE.applyScriptSuggestion(base, parsed, { keepExisting: hasEmpty });
+      memoryStudioState.recapEditorOpen = true;
+      memoryStudioState.recapAiBusy = false;
+      memoryStudioState.recapCaptionEditing = null;
+      recapCommitTimeline(next);
+      feedbackToast('✨ 已填入 AI 字幕，可以直接修改', 'green');
+    } catch (e) {
+      feedbackToast(String((e && e.message) || 'AI 字幕失敗，請再試一次'), 'orange');
+    } finally {
+      if (memoryStudioState && memoryStudioState.recapAiBusy) { memoryStudioState.recapAiBusy = false; recapRerenderEditor(); }
+    }
+  };
 
   function memorySetAudioMode(mode) {
     if (!memoryStudioState) return;
@@ -9613,7 +9817,9 @@
         .join(',');
       const audio = (memoryStudioState && memoryStudioState.audioMode) || 'original';
       const title = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
-      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${stopSig}#${photoSig}`;
+      const tl = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited ? memoryStudioState.recapTimeline : null;
+      const tlSig = tl ? tl.clips.map((c) => `${c.clipId}:${c.durationMs}:${c.caption || ''}`).join(',') : '';
+      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${stopSig}#${photoSig}#${tlSig}`;
     } catch (_e) { return ''; }
   }
 
@@ -9820,7 +10026,9 @@
       const authHeaders = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
       await ensureRecapModules();
       const templateId = recapTemplateId();
-      const timeline = buildRecapRecommendedTimeline(trip, photos);
+      const edited = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited
+        ? memoryStudioState.recapTimeline : null;
+      const timeline = edited || buildRecapRecommendedTimeline(trip, photos);
       let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline }) });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));

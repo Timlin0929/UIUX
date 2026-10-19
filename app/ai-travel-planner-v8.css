@@ -8908,3 +8908,30 @@ body.poster-viewer-open { overflow: hidden; }
 .recap-clip-sec { font-variant-numeric: tabular-nums; color: var(--ink3, #8a857c); white-space: nowrap; }
 .recap-timeline-preview .memory-title-hint { padding: 0 12px 10px; margin: 6px 0 0; }
 @media (max-width: 420px) { .recap-template-options { grid-template-columns: 1fr; } }
+
+/* ── 回顧短片：片段卡片編輯器 ── */
+.recap-editor-tools { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; }
+.recap-editor-tools .memory-secondary-btn { white-space: nowrap; font-size: 12px; padding: 6px 10px; }
+.recap-editor-tools .memory-secondary-btn:disabled { opacity: .45; cursor: default; }
+.recap-editor-notice { margin: 0 12px 8px; padding: 6px 10px; border-radius: 8px; font-size: 12px; background: #fdf2ed; color: #b4532a; }
+.recap-clip-cards { list-style: none; margin: 0; padding: 0 12px 4px; display: grid; gap: 6px; }
+.recap-clip-card {
+  display: grid; gap: 6px; padding: 8px 10px; border-radius: 10px;
+  background: var(--surface, #fff); border: 1px solid var(--border, #e0dbd2);
+}
+.recap-card-head { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 6px; align-items: baseline; font-size: 13px; color: var(--ink, #22201d); }
+.recap-card-controls { display: flex; align-items: center; gap: 6px; }
+.recap-step-btn {
+  width: 30px; height: 30px; flex: none; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border, #e0dbd2); background: var(--surface2, #f6f3ee); font-size: 16px; line-height: 1;
+}
+.recap-card-controls .recap-clip-sec { min-width: 52px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink, #22201d); }
+.recap-remove-btn {
+  margin-left: auto; padding: 5px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+  border: 1px solid #f3c8b1; background: #fdf7f3; color: #b4532a; font-size: 12px; font-weight: 700;
+}
+.recap-caption-input {
+  width: 100%; box-sizing: border-box; padding: 7px 10px; border-radius: 8px; font-size: 13px;
+  border: 1px solid var(--border, #e0dbd2); background: var(--surface2, #f6f3ee); color: var(--ink, #22201d);
+}
+.recap-caption-input:focus { outline: 2px solid #2e7d6d; outline-offset: 0; background: var(--surface, #fff); }

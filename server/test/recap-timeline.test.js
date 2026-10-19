@@ -106,6 +106,53 @@ ok('跳站的路線片段被忽略', bad.segmentMs[0] === TIMELINE.LIMITS.route[
 ok('沒有照片的站不能放照片片段', bad.mediaStopIndices.join() === '1');
 ok('時長被夾在範圍內', bad.holdMsByStop[1] === TIMELINE.LIMITS.photo[0] && bad.coverMs === TIMELINE.LIMITS.cover[0]);
 
+// ── 字幕 ──
+ok('字幕：去換行與控制字元、最多 14 字', TIMELINE.sanitizeCaption(' 抵達\n三仙台' + String.fromCharCode(7) + '看海超級超級超級長的字幕 ') === '抵達 三仙台 看海超級超級超');
+let captioned = TIMELINE.setClipCaption(tl, 'cover', '台東慢慢走');
+captioned = TIMELINE.setClipCaption(captioned, 'route-0', '出發囉');
+captioned = TIMELINE.setClipCaption(captioned, 'photo-1', '鐵花村的晚上');
+captioned = TIMELINE.setClipCaption(captioned, 'outro', '下次再來');
+ok('設定字幕會標記為已編輯、原時間軸不變', captioned.edited === true && !tl.clips[0].caption);
+const capManifest = MANIFEST.buildRecapManifest(trip, TIMELINE.compileTimeline(trip, captioned, photos));
+capManifest.media = [{ stopIndex: 1 }, { stopIndex: 3 }];
+TIMELINE.attachCaptions(capManifest, captioned);
+const caps = capManifest.captions;
+ok('字幕軌：4 則、依時間排序', caps.length === 4 && caps.every((c, i) => i === 0 || c.startMs >= caps[i - 1].startMs), JSON.stringify(caps));
+ok('字幕軌：開場字幕從 0 到開場結束', caps[0].startMs === 0 && caps[0].endMs === capManifest.timeline.coverMs);
+const photoCap = caps.find((c) => c.text === '鐵花村的晚上');
+ok('字幕軌：照片字幕對到該站的停留時間', photoCap && photoCap.startMs === Math.round(capManifest.timeline.arriveMs[1]) && photoCap.endMs - photoCap.startMs === Math.round(capManifest.timeline.holdMs[1]));
+ok('字幕軌：結尾字幕到影片結束', caps[3].endMs === Math.round(capManifest.timeline.totalMs));
+const forged = MANIFEST.buildRecapManifest(trip, { template: 'standard', mediaCount: 0 });
+TIMELINE.attachCaptions(forged, { clips: [{ type: 'photo', assetRef: { stopId: 'b' }, caption: '沒有照片的站' }, { type: 'route', fromStopId: 'a', toStopId: 'c', caption: '跳站' }, { type: 'timeline', caption: '不能加字幕的類型' }] });
+ok('字幕軌：對不回行程或不能加字幕的片段被丟掉', forged.captions.length === 0);
+
+// ── 編輯器操作 ──
+const longer = TIMELINE.setClipDuration(tl, 'route-0', 999999);
+ok('調秒數：夾在上限', longer.clips.find((c) => c.clipId === 'route-0').durationMs === TIMELINE.LIMITS.route[1]);
+const removed = TIMELINE.removePhotoClip(tl, 'photo-1');
+ok('移除照片片段：order 重新連號', removed.clips.every((c, i) => c.order === i) && !removed.clips.some((c) => c.clipId === 'photo-1'));
+ok('不能移除路線片段', TIMELINE.removePhotoClip(tl, 'route-0').clips.length === tl.clips.length);
+ok('移除照片後總長變短', TIMELINE.timelineTotalMs(trip, removed, photos) < TIMELINE.timelineTotalMs(trip, tl, photos));
+
+// ── AI 劇本建議 ──
+const scripted = TIMELINE.applyScriptSuggestion(tl, {
+  cover: '台東兩天慢慢走', outro: '下次見',
+  clips: {
+    'photo-1': { caption: '鐵花村聽音樂', emphasis: 'long' },
+    'photo-3': { caption: '三仙台看日出', emphasis: 'short' },
+    'route-0': { caption: '出發往市區', emphasis: 'long' },
+    ghost: { caption: '不存在的片段' }
+  }
+});
+ok('AI：字幕填進對應片段', scripted.clips.find((c) => c.clipId === 'photo-1').caption === '鐵花村聽音樂' && scripted.clips[0].caption === '台東兩天慢慢走');
+ok('AI：不新增片段、不改順序', scripted.clips.map((c) => c.clipId).join() === tl.clips.map((c) => c.clipId).join());
+ok('AI：long／short 只調照片片段', scripted.clips.find((c) => c.clipId === 'photo-1').durationMs > tl.clips.find((c) => c.clipId === 'photo-1').durationMs
+  && scripted.clips.find((c) => c.clipId === 'photo-3').durationMs < tl.clips.find((c) => c.clipId === 'photo-3').durationMs
+  && scripted.clips.find((c) => c.clipId === 'route-0').durationMs === tl.clips.find((c) => c.clipId === 'route-0').durationMs);
+const kept = TIMELINE.applyScriptSuggestion(TIMELINE.setClipCaption(tl, 'cover', '我自己寫的'), { cover: 'AI 寫的開場', clips: { 'photo-1': { caption: 'AI 照片字幕' } } }, { keepExisting: true });
+ok('AI：keepExisting 不覆蓋使用者打好的字幕、仍填空白的', kept.clips[0].caption === '我自己寫的' && kept.clips.find((c) => c.clipId === 'photo-1').caption === 'AI 照片字幕');
+ok('AI：亂回的格式不會出錯', TIMELINE.applyScriptSuggestion(tl, 'garbage').clips.length === tl.clips.length);
+
 // ── 後端 ──
 const sTrip = JOBS.sanitizeTrip(trip);
 const sPhotos = JOBS.sanitizePhotos(photos, sTrip.stops.length);

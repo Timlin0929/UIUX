@@ -283,6 +283,8 @@ function mountRecapJobs(app, deps) {
       photos = sanitizePhotos(req.body && req.body.photos, trip.stops.length);
       const opts = resolveManifestOptions(trip, photos, req.body && req.body.templateId, req.body && req.body.timeline);
       manifest = buildManifest(trip, opts, req.body && req.body.routePoints);
+      // 字幕：時間由伺服器依實際時間軸計算，文字逐則淨化（14 字內）
+      if (req.body && req.body.timeline) TIMELINE.attachCaptions(manifest, req.body.timeline);
     } catch (err) {
       return res.status(err.status || 400).json({ error: 'invalid input', message: err.message });
     }

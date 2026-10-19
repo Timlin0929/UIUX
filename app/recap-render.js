@@ -464,6 +464,24 @@
     ctx.fillStyle = '#bff0dc'; ctx.font = '600 40px ' + SANS; ctx.fillText(lab, cx0 + 86, cy0 + ch / 2 + 2); ctx.textBaseline = 'alphabetic';
   }
 
+  // 字幕條：畫面下方置中，前後各 180ms 淡入淡出（字幕軌由 recap-timeline.js attachCaptions 產生）
+  function drawCaption(ctx, m, W, H, tMs) {
+    var list = Array.isArray(m.captions) ? m.captions : [];
+    var c = null;
+    for (var i = 0; i < list.length; i++) { if (tMs >= list[i].startMs && tMs < list[i].endMs) { c = list[i]; break; } }
+    if (!c || !c.text) return;
+    var a = Math.max(0, Math.min(1, Math.min((tMs - c.startMs) / 180, (c.endMs - tMs) / 180)));
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.font = '700 56px ' + SANS;
+    var tw = Math.min(ctx.measureText(c.text).width, W - 200);
+    var bw = tw + 88, bh = 104, bx = (W - bw) / 2, by = H * 0.86 - bh / 2;
+    ctx.fillStyle = 'rgba(8,14,16,.72)'; rr(ctx, bx, by, bw, bh, 26); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(c.text, W / 2, by + bh / 2 + 2, W - 200);
+    ctx.restore();
+  }
+
   // ── 主入口：對某時刻畫一整幀 ──
   function renderFrameAtMs(ctx, m, world, timing, tMs, viewport, media, basemap) {
     var W = viewport.w, H = viewport.h, tl = m.timeline;
@@ -513,6 +531,7 @@
       drawStops(ctx, screenPts, m.stops.length - 1);
       statsCard(ctx, m, W, H, Math.min(1, (tMs - timing.routeEnd) / 500));
     }
+    drawCaption(ctx, m, W, H, tMs);
     // 地圖來源標註（OSM 授權要求）
     if (basemap && basemap.tiles && basemap.tiles.length && basemap.attribution) {
       ctx.save();

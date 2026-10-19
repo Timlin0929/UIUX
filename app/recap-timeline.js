@@ -31,6 +31,18 @@
     outro: [1000, 6000]
   };
 
+  // 字幕：每則最多 14 個字（計劃 6.4），去掉換行與控制字元；空字串＝沒有字幕
+  var CAPTION_MAX = 14;
+  var CAPTION_TYPES = { cover: true, route: true, photo: true, outro: true };
+
+  function sanitizeCaption(value) {
+    var text = String(value == null ? '' : value)
+      .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return Array.from(text).slice(0, CAPTION_MAX).join('');
+  }
+
   function clampMs(type, value) {
     var range = LIMITS[type] || [0, 60000];
     var n = Math.round(Number(value) || 0);
@@ -161,14 +173,116 @@
         : c.type === 'photo' ? '照片：' + c.label
         : c.type === 'timeline' ? '換日：第 ' + c.day + ' 天'
         : '結尾：旅程數據';
-      return { type: c.type, icon: ICON[c.type] || '•', text: text, seconds: Math.round(c.durationMs / 100) / 10 };
+      return { clipId: c.clipId, type: c.type, icon: ICON[c.type] || '•', text: text, caption: c.caption || '', seconds: Math.round(c.durationMs / 100) / 10 };
     });
     return { rows: rows, totalSeconds: Math.round((timeline && timeline.totalMs || 0) / 100) / 10 };
+  }
+
+  // 時間軸 → manifest.captions（字幕軌：[{ startMs, endMs, text }]）。時間依 manifest 實際排出的時間軸計算，
+  // 不信任片段上的任何時間值；只接受能對回這趟行程的片段與 CAPTION_TYPES 裡的類型。
+  function attachCaptions(manifest, timeline) {
+    var clips = Array.isArray(timeline && timeline.clips) ? timeline.clips : [];
+    var tl = manifest.timeline;
+    var stops = manifest.stops || [];
+    var idIndex = {};
+    stops.forEach(function (st, i) { idIndex[String(st.stopId || '')] = i; });
+    var depart = tl.arriveMs.map(function (a, i) { return a + (tl.holdMs[i] || 0); });
+    var out = [];
+    clips.forEach(function (c) {
+      if (!c || !CAPTION_TYPES[c.type]) return;
+      var text = sanitizeCaption(c.caption);
+      if (!text) return;
+      var start, end;
+      if (c.type === 'cover') { start = 0; end = tl.coverMs; }
+      else if (c.type === 'outro') { start = tl.totalMs - tl.statsMs; end = tl.totalMs; }
+      else if (c.type === 'route') {
+        var from = idIndex[String(c.fromStopId || '')];
+        var to = idIndex[String(c.toStopId || '')];
+        if (from === undefined || to !== from + 1) return;
+        start = depart[from]; end = tl.arriveMs[to];
+      } else {
+        var s = idIndex[String(c.assetRef && c.assetRef.stopId || '')];
+        if (s === undefined || !(tl.holdMs[s] > 0)) return;
+        if (!(manifest.media || []).some(function (m) { return m.stopIndex === s; })) return;
+        start = tl.arriveMs[s]; end = start + tl.holdMs[s];
+      }
+      if (end - start >= 300) out.push({ startMs: Math.round(start), endMs: Math.round(end), text: text });
+    });
+    out.sort(function (a, b) { return a.startMs - b.startMs; });
+    manifest.captions = out.slice(0, 80);
+    return manifest;
+  }
+
+  // ── 編輯器用的純函式（都回傳新的時間軸，不改原物件，方便「一步復原」）──
+  function cloneTimeline(timeline) { return JSON.parse(JSON.stringify(timeline)); }
+
+  function setClipDuration(timeline, clipId, durationMs) {
+    var next = cloneTimeline(timeline);
+    next.clips.forEach(function (c) { if (c.clipId === clipId) c.durationMs = clampMs(c.type, durationMs); });
+    next.edited = true;
+    return next;
+  }
+
+  function setClipCaption(timeline, clipId, caption) {
+    var next = cloneTimeline(timeline);
+    next.clips.forEach(function (c) {
+      if (c.clipId !== clipId || !CAPTION_TYPES[c.type]) return;
+      var text = sanitizeCaption(caption);
+      if (text) c.caption = text; else delete c.caption;
+    });
+    next.edited = true;
+    return next;
+  }
+
+  // 只能移除照片片段（路線與開場結尾是影片骨架，拿掉會讓地圖跳站）
+  function removePhotoClip(timeline, clipId) {
+    var next = cloneTimeline(timeline);
+    next.clips = next.clips.filter(function (c) { return !(c.clipId === clipId && c.type === 'photo'); });
+    next.clips.forEach(function (c, i) { c.order = i; });
+    next.edited = true;
+    return next;
+  }
+
+  // AI 劇本建議 → 新時間軸：只填字幕、調整照片片段的長短；不新增片段、不改順序。
+  // suggestion：{ cover, outro, clips: { [clipId]: { caption, emphasis: 'long'|'normal'|'short' } } }
+  // opts.keepExisting：使用者已經打好的字幕不覆蓋（只填空白的）
+  function applyScriptSuggestion(timeline, suggestion, opts) {
+    var keepExisting = !!(opts && opts.keepExisting);
+    var next = cloneTimeline(timeline);
+    var s = suggestion && typeof suggestion === 'object' ? suggestion : {};
+    var byClip = s.clips && typeof s.clips === 'object' ? s.clips : {};
+    var FACTOR = { long: 1.35, normal: 1, short: 0.75 };
+    next.clips.forEach(function (c) {
+      var sug = c.type === 'cover' ? { caption: s.cover } : c.type === 'outro' ? { caption: s.outro } : byClip[c.clipId];
+      if (!sug || typeof sug !== 'object') return;
+      if (CAPTION_TYPES[c.type] && !(keepExisting && c.caption)) {
+        var text = sanitizeCaption(sug.caption);
+        if (text) c.caption = text;
+      }
+      if (c.type === 'photo' && FACTOR[sug.emphasis]) c.durationMs = clampMs('photo', c.durationMs * FACTOR[sug.emphasis]);
+    });
+    next.edited = true;
+    next.scriptSource = 'ai';
+    return next;
+  }
+
+  // 依目前片段重新算總長（與後端同一套 manifest 計算）
+  function timelineTotalMs(trip, timeline, photos) {
+    if (!MANIFEST) return Number(timeline && timeline.totalMs) || 0;
+    return Math.round(MANIFEST.buildRecapManifest(trip, compileTimeline(trip, timeline, photos)).timeline.totalMs);
   }
 
   return {
     SCHEMA_VERSION: SCHEMA_VERSION,
     LIMITS: LIMITS,
+    CAPTION_MAX: CAPTION_MAX,
+    sanitizeCaption: sanitizeCaption,
+    attachCaptions: attachCaptions,
+    setClipDuration: setClipDuration,
+    setClipCaption: setClipCaption,
+    removePhotoClip: removePhotoClip,
+    applyScriptSuggestion: applyScriptSuggestion,
+    timelineTotalMs: timelineTotalMs,
     buildRecommendedTimeline: buildRecommendedTimeline,
     compileTimeline: compileTimeline,
     summarizeTimeline: summarizeTimeline
