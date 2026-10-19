@@ -8807,3 +8807,78 @@ body.poster-map-mode .map-info-card { display: none !important; }
 }
 .poster-day-tab.active { background: #2e7d6d; border-color: #2e7d6d; color: #fff; }
 .poster-map-foot-actions { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; justify-content: flex-end; }
+
+/* App 畫的是 9:16 直式插圖：寬度撐滿會變成一長條 → 改成限制高度、置中。
+   stage 縮到和圖片一樣大，站框（百分比）才會跟著對齊。 */
+.poster-map-stage { width: fit-content; max-width: 100%; margin: 0 auto; }
+.poster-map-stage img { width: auto; max-width: 100%; max-height: 72vh; }
+
+/* ── 互動插圖對齊 App：已打卡蓋 28% 白、天數沒圖變灰 ── */
+.poster-stop-hit.done { background: rgba(255,255,255,.28); border-color: rgba(120,120,120,.3); }
+.poster-day-tab.empty { color: var(--ink3, #8a857c); border-style: dashed; }
+
+/* 進行中的「我」：上一站 → 下一站的橙色虛線，小點在線上 */
+.poster-progress-line { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.poster-progress-line line { stroke: #f07b3f; stroke-width: 4; stroke-dasharray: 8 7; stroke-linecap: round; }
+.poster-me-dot {
+  position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%;
+  background: #2563eb; border: 3px solid #fff; box-shadow: 0 0 0 4px rgba(37,99,235,.25), 0 2px 6px rgba(0,0,0,.3);
+  pointer-events: none; transition: top .9s ease, left .9s ease;
+}
+.poster-me-dot.moving { animation: posterMePulse 1.6s ease-out infinite; }
+@keyframes posterMePulse { 0% { box-shadow: 0 0 0 0 rgba(37,99,235,.45), 0 2px 6px rgba(0,0,0,.3); } 100% { box-shadow: 0 0 0 14px rgba(37,99,235,0), 0 2px 6px rgba(0,0,0,.3); } }
+@media (prefers-reduced-motion: reduce) { .poster-me-dot { transition: none; } .poster-me-dot.moving { animation: none; } }
+
+/* 手機版：行程頁插圖卡（高 220，寬度撐滿、只顯示一段） */
+.poster-trip-card-host[hidden] { display: none; }
+.poster-trip-card-host { margin: 0 0 12px; }
+.poster-trip-card {
+  position: relative; height: 220px; border-radius: 16px; overflow: hidden; cursor: pointer;
+  border: 1px solid var(--border, #e0dbd2); background: var(--surface2, #f6f3ee);
+}
+.poster-card-window { position: absolute; inset: 0; overflow: hidden; }
+.poster-card-inner { transition: transform .9s ease; will-change: transform; }
+.poster-card-inner .poster-map-stage { width: 100%; max-width: none; border: none; border-radius: 0; margin: 0; }
+.poster-card-inner .poster-map-stage img { width: 100%; max-height: none; height: auto; }
+.poster-card-days { position: absolute; left: 8px; bottom: 8px; }
+.poster-card-days .poster-day-tab { padding: 4px 10px; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+.poster-card-hint {
+  position: absolute; right: 8px; bottom: 8px; padding: 3px 9px; border-radius: 999px;
+  background: rgba(0,0,0,.5); color: #fff; font-size: 11px; font-weight: 700; pointer-events: none;
+}
+.poster-trip-card-cta {
+  width: 100%; padding: 14px; border-radius: 16px; cursor: pointer; text-align: center;
+  font-size: 14px; font-weight: 700; color: #225f52; background: #edf6f4; border: 1px dashed #2e7d6d;
+}
+.poster-trip-card-cta.is-busy { cursor: default; }
+
+/* 全螢幕插圖：整張等比、不裁邊、可縮放 */
+body.poster-viewer-open { overflow: hidden; }
+.poster-viewer {
+  position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); background: rgba(20,20,18,.96); color: #fff;
+}
+.poster-viewer-top { position: relative; display: flex; align-items: center; gap: 6px; }
+.poster-viewer-title { flex: 1; min-width: 0; font-size: 15px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.poster-viewer-icon {
+  width: 36px; height: 36px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(255,255,255,.16); color: #fff; font-size: 18px; line-height: 36px;
+}
+.poster-viewer-menu {
+  position: absolute; top: 42px; right: 44px; z-index: 2; display: grid; min-width: 180px; padding: 6px;
+  border-radius: 12px; background: var(--surface, #fff); box-shadow: 0 8px 24px rgba(0,0,0,.3);
+}
+.poster-viewer-menu button {
+  padding: 10px 12px; border: none; background: none; text-align: left; cursor: pointer;
+  font-size: 14px; color: var(--ink, #22201d); border-radius: 8px;
+}
+.poster-viewer-menu button:hover { background: var(--surface2, #f0ede8); }
+.poster-viewer-menu button:disabled { opacity: .45; cursor: default; }
+.poster-zoom { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; border-radius: 12px; }
+.poster-zoom-inner { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transform-origin: 0 0; }
+.poster-zoom .poster-map-stage { border: none; }
+.poster-zoom .poster-map-stage img { max-height: none; }
+.poster-viewer-bottom { display: grid; gap: 8px; max-height: 42vh; overflow-y: auto; }
+.poster-viewer .poster-map-banner { margin: 0; }
+.poster-viewer .poster-missing-label { color: rgba(255,255,255,.75); }
+.poster-viewer .poster-stop-card { color: var(--ink, #22201d); }

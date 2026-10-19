@@ -89,6 +89,12 @@
   let posterGeneratingNote = '';     // 多日行程：正在畫第幾天（顯示在進度文字）
   // 多日行程每天一張插圖。全域的 posterGeneratedImageBase64／posterStopBoxes… 永遠代表「目前顯示的那一天」，
   // 其他天暫存在 items；切換天數時先存回再載入。單日行程為 null，流程和以前一樣。
+  let posterDaysUserPicked = false;  // 使用者自己點過天數 → 進行中不再自動跳到「今天」
+  let posterViewerOpen = false;      // 全螢幕插圖
+  let posterViewerMenuOpen = false;
+  let posterZoom = { s: 1, x: 0, y: 0 };
+  let posterCardScrollY = 0;         // 手機行程頁插圖卡目前捲到的位置（px）
+  const posterProgressMax = {};      // 「我」在每一段的最大進度：只前進不後退
   let posterDays = null;             // { list: [1, 2, 3], active: 1, items: { [day]: { dataUrl, uploadUrl, stopBoxes, snapshot, label, status, note } } }
   let posterModelLabel = '';
   let posterLoadToken = 0;
@@ -4455,54 +4461,135 @@
   // 實驗與比較見 prototypes/poster-layout-experiment/。
   const POSTER_FONT = '"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif';
 
-  // 同名站（例如起點＝終點）只放一個標記，編號寫成「1／11」
+  // 同名站（例如起點＝終點、隔天從同一間住宿出發）只放一個標記，編號寫成「1／11」
+  // portrait（手機版，9:16）：1 號在標題下方，由上往下、左右交錯；橫式（桌機）：依順序排成一圈。
   function buildPosterLayout(schedule, W, H) {
+    const portrait = H > W;
     const places = [];
     schedule.forEach((s, i) => {
       const key = posterNameKey(s.name);
       const found = key ? places.find((pl) => pl.key === key) : null;
       if (found) { found.numbers.push(i + 1); found.stopIds.push(posterStopIdOf(s)); return; }
-      places.push({ key, name: String(s.name || '景點'), emoji: s.emoji || '', numbers: [i + 1], stopIds: [posterStopIdOf(s)] });
+      places.push({ key, name: String(s.name || '景點'), emoji: s.emoji || '', type: posterStopTypeOf(s), numbers: [i + 1], stopIds: [posterStopIdOf(s)] });
     });
     const n = places.length;
     places.forEach((pl, k) => {
       if (n === 1) { pl.x = W / 2; pl.y = H / 2; return; }
+      if (portrait) {
+        pl.y = H * (0.20 + 0.70 * k / (n - 1));
+        pl.x = W * (k % 2 === 0 ? 0.28 : 0.72);
+        return;
+      }
       const a = Math.PI - (k / n) * Math.PI * 2; // 從左邊開始、順時針
       pl.x = W / 2 + Math.cos(a) * W * 0.369;
       pl.y = H / 2 - Math.sin(a) * H * 0.333 + H * 0.022;
     });
-    return { W, H, places, order: schedule.map((s) => places.findIndex((pl) => pl.key === posterNameKey(s.name))) };
+    // 疊字尺寸的基準：直式照 App 規格（900×1600 座標系）；橫式短邊同為 900，但站排成一圈較擠，縮成 0.8
+    const unit = portrait ? Math.min(W / 900, H / 1600) : Math.min(W / 1600, H / 900) * 0.8;
+    return { W, H, portrait, unit, places, order: schedule.map((s) => places.findIndex((pl) => pl.key === posterNameKey(s.name))) };
   }
 
-  // 構圖草稿：紅色編號圓點＋灰色虛線路線，送給 AI 當構圖參考（不會出現在成品上）
+  // 景點類型：App 寫在 stopType（網頁載入時收在 __appExtras）；網頁建的站沒有，就從站名／說明推測
+  function posterStopTypeOf(stop) {
+    const extras = stop && stop.__appExtras;
+    const t = String((stop && stop.stopType) || (extras && extras.stopType) || '').trim();
+    if (t) return t;
+    const text = `${stop && stop.name || ''} ${stop && stop.desc || ''}`;
+    if (/車站|火車站|轉運站/.test(stop && stop.name || '')) return '車站';
+    if (/餐|咖啡|小吃|美食|麵|飯|早午餐|甜點|冰/.test(text)) return '餐飲';
+    if (/民宿|飯店|旅館|住宿|酒店/.test(text)) return '住宿';
+    if (/博物館|美術館|文化|藝文|展館/.test(text)) return '文化';
+    if (/公園|步道/.test(text)) return '公園';
+    if (/海|山|湖|溪|瀑布|岩|洞|森林|自然/.test(text)) return '自然景觀';
+    return '';
+  }
+
+  // 描述那一步失敗時的通用描述（只看類型、不帶站名）
+  function posterGenericDescription(place) {
+    const t = String(place.type || '');
+    if (/餐|咖啡|小吃|美食/.test(t)) return '一盤當地的特色美食';
+    if (/車站/.test(t) || /車站$/.test(place.name)) return '有屋簷與月台的鐵路車站';
+    if (/博物館|文化/.test(t)) return '一座有特色的文化展館建築';
+    if (/公園|步道/.test(t)) return '綠樹成蔭的公園步道';
+    if (/自然/.test(t)) return '當地的自然風景';
+    if (/住宿|民宿/.test(t)) return '溫馨的民宿小屋';
+    return '一個有當地特色的景點';
+  }
+
+  // 第 2 步：把站名轉成「畫面描述」。底圖指令只要出現站名，圖片模型就常把名字（還有錯字）寫進圖裡；
+  // 只給描述則不會。走我們的代理（約 3 秒、不到 US$0.001），失敗就用通用描述，不擋住生成。
+  async function describePosterPlaces(places, area) {
+    const fallback = () => places.forEach((pl) => { pl.desc = posterGenericDescription(pl); });
+    const vertex = getVertexConfig();
+    if (!vertex.ready) { fallback(); return; }
+    const list = places.map((pl) => `${pl.numbers[0]}. ${pl.name}${pl.type ? `（${pl.type}）` : ''}`).join('\n');
+    const prompt = `以下是一趟「${area}」旅遊行程的地點。請為每個地點寫一句 20 字以內的「畫面描述」，描述它的外觀、景觀或代表性食物，讓插畫家不看名字也畫得出來。描述裡不能出現任何專有名詞（地名、店名、景點名）、文字、數字或招牌。如果不確定這個地點實際長什麼樣子，就依類型寫通用的描述，不要猜測特定細節。回傳 JSON 物件，鍵是編號字串、值是描述，例如 {"1": "有屋簷與月台的鐵路車站"}。\n${list}`;
+    try {
+      const endpoint = `${VERTEX_API_BASE}/publishers/google/models/${GEMINI_MODEL}:generateContent${vertex.apiKey ? `?key=${encodeURIComponent(vertex.apiKey)}` : ''}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 20000);
+      const res = await fetch(endpoint, {
+        method: 'POST', signal: ctrl.signal,
+        headers: await vertexAuthHeaders(),
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.4, thinkingConfig: { thinkingBudget: 0 } }
+        })
+      }).finally(() => clearTimeout(timer));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const text = (data.candidates?.[0]?.content?.parts || []).map((part) => part.text || '').join('');
+      const map = JSON.parse(text);
+      places.forEach((pl) => {
+        const d = String((map && map[String(pl.numbers[0])]) || '').trim();
+        pl.desc = d ? (d.length > 40 ? d.slice(0, 40) : d) : posterGenericDescription(pl);
+      });
+    } catch (e) {
+      console.warn('[互動插圖] 畫面描述失敗，改用通用描述：', e && e.message);
+      fallback();
+    }
+  }
+
+  // 構圖草稿：紅色編號圓點＋灰色虛線，送給 AI 當構圖參考（不會出現在成品上）。
+  // 只畫「第一次到某地」的段落：回到已到過的地點那段不畫，直式才不會有一條橫穿整張圖的長線。
   function renderPosterSketch(layout) {
     const c = document.createElement('canvas');
     c.width = layout.W; c.height = layout.H;
     const g = c.getContext('2d');
+    const k = layout.portrait ? Math.min(layout.W / 900, layout.H / 1600) : Math.min(layout.W / 1600, layout.H / 900) * 0.8;
     g.fillStyle = '#f4f1ea'; g.fillRect(0, 0, c.width, c.height);
-    g.setLineDash([18, 14]); g.lineWidth = 6; g.strokeStyle = '#8a857c'; g.beginPath();
-    layout.order.forEach((idx, i) => { const pl = layout.places[idx]; if (pl) (i ? g.lineTo(pl.x, pl.y) : g.moveTo(pl.x, pl.y)); });
-    g.stroke(); g.setLineDash([]);
+    g.setLineDash([18 * k, 14 * k]); g.lineWidth = 6 * k; g.strokeStyle = '#8a857c';
+    const seen = new Set();
+    layout.order.forEach((idx, i) => {
+      const firstVisit = !seen.has(idx);
+      seen.add(idx);
+      if (i === 0 || !firstVisit) return;
+      const a = layout.places[layout.order[i - 1]], b = layout.places[idx];
+      if (!a || !b) return;
+      g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+    });
+    g.setLineDash([]);
     layout.places.forEach((pl) => {
-      g.fillStyle = '#e0452b'; g.beginPath(); g.arc(pl.x, pl.y, 40, 0, Math.PI * 2); g.fill();
-      g.fillStyle = '#fff'; g.font = 'bold 40px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(String(pl.numbers[0]), pl.x, pl.y + 2);
+      g.fillStyle = '#e0452b'; g.beginPath(); g.arc(pl.x, pl.y, 26 * k, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#fff'; g.font = `bold ${Math.round(30 * k)}px Arial`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(String(pl.numbers[0]), pl.x, pl.y + 2 * k);
     });
     return c.toDataURL('image/png');
   }
 
-  function buildPosterBasePrompt(layout, character, dayLabel = '') {
-    const area = `${currentTripRegion || currentTripTitle || '這趟旅程的目的地'}${dayLabel ? `（${dayLabel}）` : ''}`;
-    const list = layout.places.map((pl) => `圓點 ${pl.numbers[0]}：${pl.emoji || ''}${pl.name}`).join('\n');
+  // 底圖指令：地點清單只給畫面描述、不給站名；地區名註明不要寫出來（與 App 同一份）
+  function buildPosterBasePrompt(layout, character, area) {
+    const list = layout.places.map((pl) => `圓點 ${pl.numbers[0]}：${pl.emoji || ''}${pl.desc || posterGenericDescription(pl)}`).join('\n');
+    const ratio = layout.portrait ? '9:16 直式' : (layout.W > layout.H * 1.6 ? '16:9 橫式' : '3:2 橫式');
     return [
-      `請以附圖為「構圖草稿」，繪製一張「${area}」旅遊地圖插畫（底圖）。`,
+      '請以附圖為「構圖草稿」，繪製一張旅遊地圖插畫（底圖）。',
       '附圖說明：紅色編號圓點是各站的位置，灰色虛線是行程路線。',
       '',
-      '【位置】每一站的小插圖，中心必須正好畫在草稿上對應圓點的位置：不要往外移、不要移到畫面中央、也不要和其他站交換位置。路線用一條連續的手繪虛線，沿著草稿虛線依序連接各站。',
-      `【內容】背景是俯瞰的手繪示意地圖，依「${area}」的特色畫出地形（例如海岸線與海、山脈、綠地、街道或道路）。每一站畫一個表現該地點景觀或食物的小插圖。主角是可愛的卡通「${character}」，在其中兩三站旁邊當嚮導或旅伴。日式雜誌插畫風格，可愛、清新，比例 ${layout.W > layout.H * 1.6 ? '16:9' : '3:2'}。`,
-      '【絕對禁止】整張圖不能有任何文字：不要寫站名、不要寫標題、不要任何中文（繁體或簡體）、英文、數字或編號；也不要畫空白的標籤框、文字底板、圖例或紅色圓點。站名與編號之後會由程式另外疊上，圖上只要有插畫。',
+      '【位置】每一站的小插圖，中心必須正好畫在草稿上對應圓點的位置：不要往外移、不要移到畫面中央、也不要和其他站交換位置。路線用一條連續的手繪虛線，沿著草稿虛線依序連接各站，可以有自然的彎曲。畫面最上方約八分之一留給標題，只畫天空或背景、不要放站點插圖。',
+      `【內容】背景是俯瞰的手繪示意地圖，依「${area}」一帶的特色畫出地形（例如海岸線與海、山脈、綠地、街道或道路；地名只是讓你知道地形，不要寫出來）。每一站畫一個符合下列描述的小插圖。主角是可愛的卡通「${character}」，在其中兩三站旁邊當嚮導或旅伴。日式雜誌插畫風格，可愛、清新，比例 ${ratio}。`,
+      '【絕對禁止】整張圖不能有任何文字：不要任何中文（繁體或簡體）、英文、數字、編號、標題或標籤；建築物的招牌、匾額、包裝畫成空白或圖案。也不要畫空白的標籤框、文字底板、圖例或紅色圓點。編號與站名之後會由程式另外疊上，圖上只要有插畫。',
       '',
-      '各圓點要畫的內容（只用來決定插圖內容，不要寫進圖裡）：',
+      '各圓點要畫的內容：',
       list
     ].join('\n');
   }
@@ -4516,79 +4603,85 @@
     });
   }
 
-  // 把 AI 底圖疊上標題、編號圓點與站名，回傳合成後的 PNG 與每一站的點選範圍（0～1000，與 App 的站框格式相同）
+  // 一天之內的時刻（schedule 的分鐘數多日會帶跨日偏移）
+  function posterClockOfDay(min) {
+    const m = ((Math.round(Number(min)) % 1440) + 1440) % 1440;
+    return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  }
+
+  // 標題卡第二行：「2026/10/17 11:00–17:00」（沒有出發日期就只有時間）
+  function posterTitleTimeLine(schedule) {
+    const first = schedule[0], last = schedule[schedule.length - 1];
+    if (!first || !last) return '';
+    const iso = getStopServiceDate(first);
+    const date = iso ? String(iso).replace(/-/g, '/') + ' ' : '';
+    return `${date}${posterClockOfDay(first.start)}–${posterClockOfDay(last.end)}`;
+  }
+
+  // 第 5 步：疊上標題、編號圓點與站名，回傳合成 PNG 與每站的點選範圍（0～1000，與 App 相同）。
+  // 尺寸照 App 規格，乘上 u（直式＝實際圖 ÷ 900×1600；橫式另乘 0.8）。
   async function composePosterImage(baseDataUrl, layout, schedule, titleSuffix = '') {
     const img = await loadImageElement(baseDataUrl);
     const c = document.createElement('canvas');
     c.width = img.naturalWidth; c.height = img.naturalHeight;
     const g = c.getContext('2d');
     g.drawImage(img, 0, 0);
-    const sx = c.width / layout.W, sy = c.height / layout.H, s = Math.min(sx, sy);
+    const sx = c.width / layout.W, sy = c.height / layout.H;
+    const u = Math.min(sx, sy) * layout.unit;
     const boxes = [];
     const toBox = (x0, y0, x1, y1) => [
       Math.max(0, Math.round(y0 / c.height * 1000)), Math.max(0, Math.round(x0 / c.width * 1000)),
       Math.min(1000, Math.round(y1 / c.height * 1000)), Math.min(1000, Math.round(x1 / c.width * 1000))
     ];
-    const crowded = layout.places.length > 10;
+    const roundRect = (x, y, w, h, r) => { g.beginPath(); if (g.roundRect) g.roundRect(x, y, w, h, r); else g.rect(x, y, w, h); };
+    const maxChars = layout.places.length > 10 ? 9 : 14;
     layout.places.forEach((pl) => {
       const x = pl.x * sx, y = pl.y * sy;
       const num = pl.numbers.join('／');
       const wide = num.length > 2;
-      const r = 22 * s * (wide ? 1.25 : 1);
+      // 比草稿的圓點（半徑 26）大：AI 偶爾把草稿紅點照抄進圖裡，要蓋得住
+      const r = 32 * u * (wide ? 1.25 : 1);
       g.save();
-      g.shadowColor = 'rgba(0,0,0,.25)'; g.shadowBlur = 6 * s;
+      g.shadowColor = 'rgba(0,0,0,.28)'; g.shadowOffsetY = 2 * u; g.shadowBlur = 4 * u;
       g.fillStyle = '#f07b3f'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
       g.restore();
-      g.lineWidth = 4 * s; g.strokeStyle = '#fff'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke();
+      g.lineWidth = 4 * u; g.strokeStyle = '#fff'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke();
       g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.font = `bold ${Math.round((wide ? 17 : 24) * s)}px ${POSTER_FONT}`;
-      g.fillText(num, x, y + 1 * s);
-      // 站名標籤：圓點下方；站多時名字過長就截斷，避免和隔壁站的標籤疊在一起
-      const maxChars = crowded ? 9 : 14;
+      g.font = `bold ${Math.round((wide ? 22 : 30) * u)}px ${POSTER_FONT}`;
+      g.fillText(num, x, y + 1 * u);
       const label = pl.name.length > maxChars ? pl.name.slice(0, maxChars - 1) + '…' : pl.name;
-      g.font = `bold ${Math.round(22 * s)}px ${POSTER_FONT}`;
-      const ph = 34 * s, pw = g.measureText(label).width + 22 * s;
-      const lx = Math.max(6 * s, Math.min(c.width - pw - 6 * s, x - pw / 2));
-      const ly = Math.min(c.height - ph - 6 * s, y + r + 8 * s);
-      g.fillStyle = 'rgba(255,255,255,.93)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 2.5 * s;
-      g.beginPath();
-      if (g.roundRect) g.roundRect(lx, ly, pw, ph, ph / 2); else g.rect(lx, ly, pw, ph);
-      g.fill(); g.stroke();
-      g.fillStyle = '#22201d'; g.fillText(label, lx + pw / 2, ly + ph / 2 + 1 * s);
-      // 點選範圍＝圓點＋標籤，外加一點邊距方便手指點
-      const pad = 10 * s;
+      g.font = `bold ${Math.round(28 * u)}px ${POSTER_FONT}`;
+      const ph = 42 * u, pw = g.measureText(label).width + 28 * u;
+      const lx = Math.max(6 * u, Math.min(c.width - pw - 6 * u, x - pw / 2));
+      const ly = Math.min(c.height - ph - 6 * u, y + r + 10 * u);
+      g.fillStyle = 'rgba(255,255,255,.93)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 3 * u;
+      roundRect(lx, ly, pw, ph, ph / 2); g.fill(); g.stroke();
+      g.fillStyle = '#22201d'; g.fillText(label, lx + pw / 2, ly + ph / 2 + 1 * u);
+      const pad = 12 * u;
       const box = toBox(Math.min(x - r, lx) - pad, y - r - pad, Math.max(x + r, lx + pw) + pad, ly + ph + pad);
       const point = [Math.round(y / c.height * 1000), Math.round(x / c.width * 1000)];
       pl.stopIds.forEach((stopId) => boxes.push({ stopId, name: pl.name, box, point }));
     });
-    // 標題（左上角）：行程名稱與時間
+    // 標題卡（左上）：行程名（多日加「・第 N 天」）＋日期與時間
     const title = `${currentTripTitle || '我的旅遊行程'}${titleSuffix ? `・${titleSuffix}` : ''}`;
-    const first = schedule[0], last = schedule[schedule.length - 1];
-    const range = first && last ? `${minutesToClock(first.start)} – ${minutesToClock(last.end)}` : '';
+    const timeLine = posterTitleTimeLine(schedule);
     g.textAlign = 'left'; g.textBaseline = 'middle';
-    g.font = `800 ${Math.round(30 * s)}px ${POSTER_FONT}`;
+    g.font = `800 ${Math.round(40 * u)}px ${POSTER_FONT}`;
     const tw = g.measureText(title).width;
-    g.font = `600 ${Math.round(18 * s)}px ${POSTER_FONT}`;
-    const rw = range ? g.measureText(range).width : 0;
-    const bw = Math.max(tw, rw) + 36 * s, bh = (range ? 78 : 52) * s;
-    g.fillStyle = 'rgba(255,255,255,.9)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 2.5 * s;
-    g.beginPath();
-    if (g.roundRect) g.roundRect(14 * s, 14 * s, bw, bh, 16 * s); else g.rect(14 * s, 14 * s, bw, bh);
-    g.fill(); g.stroke();
-    g.fillStyle = '#22201d'; g.font = `800 ${Math.round(30 * s)}px ${POSTER_FONT}`;
-    g.fillText(title, 32 * s, (range ? 42 : 40) * s);
-    if (range) { g.fillStyle = '#2e7d6d'; g.font = `600 ${Math.round(18 * s)}px ${POSTER_FONT}`; g.fillText(range, 32 * s, 74 * s); }
+    g.font = `700 ${Math.round(24 * u)}px ${POSTER_FONT}`;
+    const rw = timeLine ? g.measureText(timeLine).width : 0;
+    const bw = Math.min(c.width - 36 * u, Math.max(tw, rw) + 44 * u), bh = (timeLine ? 102 : 66) * u;
+    g.fillStyle = 'rgba(255,255,255,.9)'; g.strokeStyle = '#2e7d6d'; g.lineWidth = 3 * u;
+    roundRect(18 * u, 18 * u, bw, bh, 20 * u); g.fill(); g.stroke();
+    g.fillStyle = '#22201d'; g.font = `800 ${Math.round(40 * u)}px ${POSTER_FONT}`;
+    g.fillText(title, 40 * u, (timeLine ? 54 : 51) * u, bw - 44 * u);
+    if (timeLine) { g.fillStyle = '#2e7d6d'; g.font = `700 ${Math.round(24 * u)}px ${POSTER_FONT}`; g.fillText(timeLine, 40 * u, 94 * u); }
     return { dataUrl: c.toDataURL('image/png'), boxes };
   }
 
-  // onlyDay：多日行程只重畫某一天（其他天保留）
   async function generateItineraryImage(onlyDay) {
     const input = document.getElementById('posterCharacterInput');
-    const character = (input ? input.value : posterCharacterDraft).trim();
-    if (!character) {
-      window.alert('請先輸入卡通人物名稱。');
-      return;
-    }
+    const character = (input ? input.value : posterCharacterDraft).trim() || '可愛的小旅人';
     // 代理模式下前端「本來就不該有」Gemini 金鑰（金鑰在 server/.env，由後端注入）。
     // 舊的「沒有 key 就擋下」是改用 proxy 之前留下的關卡，忘了拆 —— 結果是正式站永遠
     // 在這裡 return，根本走不到下面那段已經寫好的 proxy 分支。只有直連模式才需要金鑰。
@@ -4662,21 +4755,27 @@
   // 畫一張：草稿 → AI 底圖 → 疊標籤。回傳合成圖、站框（已整理）、原始站框與模型標示
   async function drawComposedPoster({ schedule, character, byok, byokEntry, vertex, apiKey, dayLabel = '' }) {
     const useOpenAi = !!byokEntry && byok.provider === 'openai';
-    // OpenAI 只有 3:2（1536x1024），Gemini 用 16:9；草稿比例要和成品一致，位置才對得上
-    const layout = useOpenAi ? buildPosterLayout(schedule, 1536, 1024) : buildPosterLayout(schedule, 1600, 900);
+    // 手機版畫直式（與 App 一致），桌機畫橫式。OpenAI 只有 3:2／2:3，草稿比例要和成品一致，位置才對得上
+    const portrait = isMobileLayout();
+    const layout = useOpenAi
+      ? (portrait ? buildPosterLayout(schedule, 1024, 1536) : buildPosterLayout(schedule, 1536, 1024))
+      : (portrait ? buildPosterLayout(schedule, 900, 1600) : buildPosterLayout(schedule, 1600, 900));
+    const area = currentTripRegion || currentTripTitle || '這趟旅程的目的地';
+    await describePosterPlaces(layout.places, area);
     const sketchDataUrl = renderPosterSketch(layout);
-    const prompt = buildPosterBasePrompt(layout, character, dayLabel);
+    const prompt = buildPosterBasePrompt(layout, character, area);
     console.log(`[行程圖 Prompt${dayLabel ? '・' + dayLabel : ''}]`, prompt);
+    const aspect = portrait ? '9:16' : '16:9';
     let baseDataUrl, label;
     if (byokEntry) {
       baseDataUrl = useOpenAi
-        ? await generatePosterWithOpenAi(byokEntry, prompt, sketchDataUrl)
-        : await generatePosterWithOwnGemini(byokEntry, prompt, sketchDataUrl);
+        ? await generatePosterWithOpenAi(byokEntry, prompt, sketchDataUrl, portrait ? '1024x1536' : '1536x1024')
+        : await generatePosterWithOwnGemini(byokEntry, prompt, sketchDataUrl, aspect);
       label = useOpenAi
         ? `由 ${byokEntry.model || 'GPT Image'}（你的 OpenAI 金鑰）生成`
         : `由 ${byokEntry.model || 'Gemini'}（你的 Gemini 金鑰）生成`;
     } else {
-      baseDataUrl = await generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl);
+      baseDataUrl = await generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl, aspect);
       label = '由 Gemini 生成（TravelLinkAI 提供）';
     }
     const composed = await composePosterImage(baseDataUrl, layout, schedule, dayLabel);
@@ -4717,8 +4816,9 @@
     posterSelectedMissingIndex = -1;
   }
 
-  function setPosterActiveDay(day) {
+  function setPosterActiveDay(day, auto = false) {
     if (!posterDays || !posterDays.list.includes(day) || posterDays.active === day) return;
+    if (!auto) posterDaysUserPicked = true;
     posterStashActive();
     posterDays.active = day;
     posterLoadDay(day);
@@ -4743,8 +4843,8 @@
       <div class="poster-day-tabs" role="tablist" aria-label="選擇第幾天的插圖">
         ${posterDays.list.map((d) => {
           const has = !!(posterDays.active === d ? posterGeneratedImageBase64 : (posterDays.items[d] && posterDays.items[d].dataUrl));
-          return `<button type="button" role="tab" class="poster-day-tab${posterDays.active === d ? ' active' : ''}" aria-selected="${posterDays.active === d}"
-                    onclick="setPosterActiveDay(${d})">第 ${d} 天${has ? '' : '（未生成）'}</button>`;
+          return `<button type="button" role="tab" class="poster-day-tab${posterDays.active === d ? ' active' : ''}${has ? '' : ' empty'}" aria-selected="${posterDays.active === d}"
+                    onclick="event.stopPropagation();setPosterActiveDay(${d})">第 ${d} 天${has ? '' : '（未生成）'}</button>`;
         }).join('')}
       </div>`;
   }
@@ -4754,13 +4854,12 @@
     if (!onlyDay && !window.confirm(`這是 ${dayList.length} 天的行程，會依天數生成 ${dayList.length} 張插圖（每天一張，每張約 20–30 秒）。要開始嗎？`)) return;
     const tripId = currentItineraryId;
     posterLoadToken++;
-    if (!onlyDay || !posterDays || String(posterDays.list) !== String(dayList)) {
-      posterDays = { list: dayList, active: onlyDay || dayList[0], items: {} };
-      posterLoadDay(posterDays.active);
-    } else {
-      posterStashActive();
-      posterDays.active = onlyDay;
-    }
+    // 同一組天數就保留舊圖：某天這次沒畫成，仍顯示原本那張（可再按「重畫這一天」）
+    const sameDays = posterDays && String(posterDays.list) === String(dayList);
+    if (sameDays) posterStashActive();
+    posterDays = { list: dayList, active: onlyDay || (sameDays ? posterDays.active : dayList[0]), items: sameDays ? posterDays.items : {} };
+    posterLoadDay(posterDays.active);
+    posterDaysUserPicked = !!onlyDay;
     posterTripId = tripId;
     posterImageGenerating = true;
     posterGeneratingPhase = 'drawing';
@@ -4773,6 +4872,8 @@
         const drawn = await drawComposedPoster({ schedule: daySchedule, character, byok, byokEntry, vertex, apiKey, dayLabel: `第 ${day} 天` });
         if (currentItineraryId !== tripId || !posterDays) return;
         posterDays.items[day] = { dataUrl: drawn.dataUrl, uploadUrl: '', stopBoxes: drawn.stopBoxes, snapshot: drawn.snapshot, label: drawn.label, status: 'ready', note: '' };
+        // 畫好一天就先顯示，不等其他天
+        if (posterDays.active === day) posterLoadDay(day);
       } catch (e) {
         failed.push(`第 ${day} 天：${e.message}`);
       } finally {
@@ -4851,7 +4952,7 @@
     return { inlineData: { mimeType: 'image/png', data: String(sketchDataUrl).split(',')[1] } };
   }
 
-  async function generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl) {
+  async function generatePosterWithDefault(prompt, vertex, apiKey, sketchDataUrl, aspect = '16:9') {
     const imageModel = 'gemini-3-pro-image';
     // 代理模式沒有前端金鑰 → 不要掛空的 ?key=（金鑰由後端注入），與其他 Vertex 呼叫一致
     const endpoint = vertex.ready
@@ -4863,8 +4964,8 @@
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [posterSketchPart(sketchDataUrl), { text: prompt }] }],
         generationConfig: {
-          responseModalities: ["IMAGE"],
-          imageConfig: { aspectRatio: '16:9' }
+          responseModalities: ['TEXT', 'IMAGE'],
+          imageConfig: { aspectRatio: aspect }
         }
       })
     });
@@ -5156,7 +5257,7 @@
     }
   }
 
-  async function generatePosterWithOwnGemini(entry, prompt, sketchDataUrl) {
+  async function generatePosterWithOwnGemini(entry, prompt, sketchDataUrl, aspect = '16:9') {
     const model = entry.model || 'gemini-3-pro-image';
     const { res, body } = await fetchJsonWithTimeout(
       `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`,
@@ -5166,7 +5267,7 @@
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': entry.key },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [posterSketchPart(sketchDataUrl), { text: prompt }] }],
-          generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '16:9' } }
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: aspect } }
         })
       }, 150000);
     if (!res.ok) throw new Error(byokErrorMessage('gemini', res.status, body));
@@ -5175,12 +5276,12 @@
     return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
   }
 
-  async function generatePosterWithOpenAi(entry, prompt, sketchDataUrl) {
+  async function generatePosterWithOpenAi(entry, prompt, sketchDataUrl, size = '1536x1024') {
     // 要帶構圖草稿就得用 images/edits（multipart）；gpt-image 沒有 16:9，用 1536x1024（3:2），草稿也是 3:2
     const form = new FormData();
     form.append('model', entry.model || 'gpt-image-1');
     form.append('prompt', prompt);
-    form.append('size', '1536x1024');
+    form.append('size', size);
     form.append('n', '1');
     form.append('image', await (await fetch(sketchDataUrl)).blob(), 'sketch.png');
     const { res, body } = await fetchJsonWithTimeout('https://api.openai.com/v1/images/edits', {
@@ -5240,8 +5341,9 @@
 
   // App 建的行程有 stopId（UUID）；網頁的站沿用 stop.id。與 detect_stop_boxes 的 stopId 對應用。
   function posterStopIdOf(stop) {
-    // collabStopId（cstop-…）是寫進 Firestore stops 的穩定 id，App 也認得；沒有才退回網頁本地的 id
-    return String((stop && (stop.stopId || stop.collabStopId || stop.id)) || '');
+    // 與 App 相同的優先序：collabStopId → stopId → 本地 id。App 讀站框時先看 collabStopId，
+    // 兩個值若哪天不同，以 collabStopId 為準才對得上。
+    return String((stop && (stop.collabStopId || stop.stopId || stop.id)) || '');
   }
 
   function posterCanWriteTrip() {
@@ -5393,6 +5495,7 @@
       posterStopsSnapshot = [];
       posterTripId = null;
       posterDays = null;
+      posterDaysUserPicked = false;
     }
     if (posterImageGenerating || posterGeneratedImageBase64 || posterDays) return;
     const user = firebaseAuth && firebaseAuth.currentUser;
@@ -5438,7 +5541,7 @@
       const day = Number(d.day);
       const order = replanStops.filter((st) => (Number(st.dayIndex) || 1) === day).map((st) => ({ stopId: posterStopIdOf(st), name: String(st.name || '') }));
       const saved = d.imageStopBoxes;
-      const raw = saved && Array.isArray(saved.boxes) ? saved.boxes.filter(posterBoxIsValid) : [];
+      const raw = saved && saved.imageUrl === d.imageUrl && Array.isArray(saved.boxes) ? saved.boxes.filter(posterBoxIsValid) : [];
       items[day] = {
         dataUrl: d.imageUrl, uploadUrl: d.imageUrl, snapshot: order, label: '這趟行程目前的插圖',
         stopBoxes: raw.length ? { imageUrl: d.imageUrl, boxes: normalizePosterBoxes(raw, order), raw, composed: true } : null,
@@ -5527,8 +5630,15 @@
   // 共用框（起點＝終點只畫一個標記）：還沒從起點出發就是起點，出發後指向回程那一站
   function posterSharedBoxStopId(box) {
     const ids = box.sharedStopIds;
-    const first = replanStops[posterStopIndexById(ids[0])];
-    return (currentTripStatus === 'ongoing' && first && first.checkedInAt) ? ids[ids.length - 1] : ids[0];
+    if (currentTripStatus === 'ongoing') {
+      const idxs = ids.map(posterStopIndexById);
+      const prefer = [currentStopIndex - 1, currentStopIndex].filter((i) => i >= 0);
+      const at = prefer.find((i) => idxs.includes(i) && (i === currentStopIndex || (replanStops[i] && replanStops[i].checkedInAt)));
+      if (at !== undefined) return ids[idxs.indexOf(at)];
+      const notVisited = idxs.findIndex((i) => i >= 0 && replanStops[i] && !replanStops[i].checkedInAt);
+      if (notVisited >= 0) return ids[notVisited];
+    }
+    return ids[0];
   }
 
   function resolvePosterBoxStop(box) {
@@ -5555,13 +5665,76 @@
     return idx >= 0 ? posterScopeNumber(idx) : null; // 對不到任何站就不編號，免得和真正的站撞號
   }
 
-  // 行程進行中：最後一個已打卡的站＝目前所在；currentStopIndex 指向下一個要去的站
+  // 行程表上的分鐘數 → 實際時間（有出發日期就用，沒有就當今天）
+  function posterAbsTime(min) {
+    const dep = currentTripPreferences && currentTripPreferences.departureDate;
+    const base = dep ? new Date(`${dep}T00:00:00`) : new Date(new Date().toDateString());
+    return base.getTime() + Math.round(Number(min) || 0) * 60000;
+  }
+
+  // 行程進行中的狀態（與 App 規則一致）：
+  //   在站上（已打卡、還沒離開）：有 GPS 時離該站 500m 內；沒 GPS 時看是否還沒到預計離開時間 → atIndex
+  //   移動中：進度＝GPS 到兩站的距離比例，或「離開上一站後經過的時間 ÷ 預計車程」；只前進不後退、到站前最多 95%；
+  //   進到下一站 300m 內 → near（小點跳到下一站，標「快到了，記得打卡」）
   function getPosterJourneyState() {
-    if (currentTripStatus !== 'ongoing') return { atIndex: -1, nextIndex: -1 };
+    const none = { atIndex: -1, nextIndex: -1, moving: null };
+    if (currentTripStatus !== 'ongoing') return none;
     const nextIndex = (currentStopIndex >= 0 && currentStopIndex < replanStops.length) ? currentStopIndex : -1;
-    const prev = currentStopIndex - 1;
-    const atIndex = (prev >= 0 && replanStops[prev] && replanStops[prev].checkedInAt) ? prev : -1;
-    return { atIndex, nextIndex };
+    const prevIdx = currentStopIndex - 1;
+    const prev = replanStops[prevIdx];
+    if (!prev || !prev.checkedInAt) return { atIndex: -1, nextIndex, moving: null };
+    const schedule = buildReplanSchedule();
+    const prevSched = schedule[prevIdx];
+    const leaveAt = prevSched ? posterAbsTime(prevSched.end) : Date.now();
+    const loc = lastUserLocation && Number.isFinite(Number(lastUserLocation.lat)) ? lastUserLocation : null;
+    const prevPos = getStopLatLng(prev);
+    const atStop = (loc && prevPos) ? measureDistanceMeters(loc, prevPos) <= 500 : Date.now() < leaveAt;
+    if (atStop || nextIndex < 0) return { atIndex: prevIdx, nextIndex, moving: null };
+    const next = replanStops[nextIndex];
+    const nextPos = getStopLatLng(next);
+    const transitMin = Math.max(1, Number(prevSched && prevSched.transit) || 15);
+    const leftAt = Math.max(leaveAt, Number(prev.checkedInAt) || 0);
+    let frac, near = false;
+    if (loc && prevPos && nextPos) {
+      const d1 = measureDistanceMeters(prevPos, loc), d2 = measureDistanceMeters(loc, nextPos);
+      frac = d1 / Math.max(1, d1 + d2);
+      near = d2 <= 300;
+    } else {
+      frac = (Date.now() - leftAt) / (transitMin * 60000);
+    }
+    const key = `${posterStopIdOf(prev)}>${posterStopIdOf(next)}`;
+    frac = Math.max(posterProgressMax[key] || 0, Math.min(0.95, Math.max(0, frac)));
+    posterProgressMax[key] = frac;
+    const eta = new Date(leftAt + transitMin * 60000);
+    return {
+      atIndex: -1, nextIndex,
+      moving: { fromIndex: prevIdx, toIndex: nextIndex, frac, near, eta: `${String(eta.getHours()).padStart(2, '0')}:${String(eta.getMinutes()).padStart(2, '0')}` }
+    };
+  }
+
+  // 某一站在這張圖上的圓點位置（[y, x]，0～1000）；沒有 point 就用框的中心
+  function posterPointForStop(boxes, stopIndex) {
+    const id = posterStopIdOf(replanStops[stopIndex]);
+    const b = boxes.find((bx) => (bx.sharedStopIds || [bx.stopId]).some((sid) => posterStopIndexById(sid) === stopIndex || sid === id));
+    if (!b) return null;
+    if (Array.isArray(b.point) && b.point.length === 2) return b.point.map(Number);
+    return [(Number(b.box[0]) + Number(b.box[2])) / 2, (Number(b.box[1]) + Number(b.box[3])) / 2];
+  }
+
+  // 「我」在這張圖上的位置（在站上＝那站的圓點；移動中＝兩站之間）。不在這張圖上（例如別天）回 null
+  function posterMePoint(boxes, journey) {
+    if (journey.moving) {
+      const a = posterPointForStop(boxes, journey.moving.fromIndex), b = posterPointForStop(boxes, journey.moving.toIndex);
+      if (!a || !b) return null;
+      if (journey.moving.near) return { point: b, from: a, to: b, near: true };
+      const f = journey.moving.frac;
+      return { point: [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], from: a, to: b, near: false };
+    }
+    if (journey.atIndex >= 0) {
+      const pt = posterPointForStop(boxes, journey.atIndex);
+      return pt ? { point: pt } : null;
+    }
+    return null;
   }
 
   function selectPosterStop(index) {
@@ -5575,7 +5748,7 @@
 
   function scrollPosterCardIntoView() {
     const toolsOpen = !!document.querySelector('#travelToolsOverlay.open');
-    const card = document.getElementById(toolsOpen ? 'posterStopCard' : 'posterMapStopCard');
+    const card = document.getElementById(posterViewerOpen ? 'posterViewerStopCard' : toolsOpen ? 'posterStopCard' : 'posterMapStopCard');
     if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
@@ -5614,7 +5787,8 @@
 
   // ── 地圖區：Google 地圖 ↔ 互動插圖 切換 ──
   function posterAvailableForMap() {
-    return !!posterGeneratedImageBase64 && !posterImageGenerating && posterTripId === currentItineraryId;
+    // 多日行程畫好一天就先顯示，所以生成中也算
+    return !!posterGeneratedImageBase64 && (!posterImageGenerating || !!posterDays) && posterTripId === currentItineraryId;
   }
 
   function setPlannerMapMode(mode) {
@@ -5652,12 +5826,19 @@
     if (posterCloudCheckKey() !== posterCloudCheckedKey && !posterImageGenerating) {
       loadTripPosterFromCloud().catch((e) => console.warn('[互動插圖] 載入行程插圖失敗：', e));
     }
+    // 多日行程進行中：預設顯示「今天」那張（使用者自己點過天數就不再自動切）
+    if (posterDays && currentTripStatus === 'ongoing' && !posterDaysUserPicked) {
+      const todayStop = replanStops[Math.min(Math.max(currentStopIndex, 0), replanStops.length - 1)];
+      const today = Number(todayStop && todayStop.dayIndex) || 1;
+      if (posterDays.list.includes(today) && posterDays.active !== today) setPosterActiveDay(today, true);
+    }
     const has = posterAvailableForMap();
-    // 有行程就顯示切換鈕；還沒有插圖時點「插圖」會看到說明與「去生成插圖」
+    // 手機版和 App 一樣，插圖只從行程頁的插圖卡進入 → 地圖區不放切換鈕
+    const mobile = isMobileLayout();
     const hasTrip = replanStops.length > 0;
-    if (!hasTrip) plannerMapMode = 'google';
+    if (!hasTrip || mobile) plannerMapMode = 'google';
     const on = plannerMapMode === 'poster';
-    toggle.hidden = !hasTrip;
+    toggle.hidden = !hasTrip || mobile;
     [['mapModeGoogleBtn', !on], ['mapModePosterBtn', on]].forEach(([id, active]) => {
       const btn = document.getElementById(id);
       if (!btn) return;
@@ -5669,6 +5850,207 @@
     view.innerHTML = !on ? ''
       : has ? `<div class="poster-mapview-inner poster-map">${renderInteractivePoster('map')}</div>`
       : renderPosterMapEmptyState();
+    renderPosterTripCard();
+    renderPosterViewer();
+  }
+
+  // ── 手機版：行程頁最上方的插圖卡（高 220，只顯示一段；點一下開全螢幕）──
+  function renderPosterTripCard() {
+    const host = document.getElementById('posterTripCard');
+    if (!host) return;
+    const show = isMobileLayout() && replanStops.length > 0;
+    host.hidden = !show;
+    if (!show) { host.innerHTML = ''; return; }
+    if (!posterAvailableForMap()) {
+      host.innerHTML = posterImageGenerating
+        ? '<div class="poster-trip-card-cta is-busy">🎨 插圖生成中…</div>'
+        : '<button type="button" class="poster-trip-card-cta" onclick="openTravelTools(\'export\')">🎨 生成這趟行程的互動插圖</button>';
+      return;
+    }
+    host.innerHTML = `
+      <div class="poster-trip-card" role="button" tabindex="0" aria-label="開啟全螢幕行程插圖"
+           onclick="openPosterViewer()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openPosterViewer();}">
+        <div class="poster-card-window">
+          <div class="poster-card-inner" style="transform:translateY(${-posterCardScrollY}px)">${renderInteractivePoster('card')}</div>
+        </div>
+        ${posterDays ? `<div class="poster-card-days">${renderPosterDayTabs()}</div>` : ''}
+        <span class="poster-card-hint">點一下放大</span>
+      </div>`;
+    // 規劃中停在最上面（標題）；進行中把「我」捲到卡片中間，平滑移動。
+    // 用 setTimeout 而不是 rAF：分頁在背景時 rAF 不會執行，回到前景前位置就不會更新
+    setTimeout(() => {
+      const inner = host.querySelector('.poster-card-inner');
+      const img = host.querySelector('.poster-card-inner img');
+      if (!inner || !img) return;
+      const place = () => {
+        const winH = host.querySelector('.poster-card-window').clientHeight || 220;
+        const imgH = img.clientHeight;
+        let target = 0;
+        const me = inner.querySelector('.poster-me-dot');
+        if (me && currentTripStatus === 'ongoing') target = (parseFloat(me.style.top) / 100) * imgH - winH / 2;
+        target = Math.max(0, Math.min(Math.max(0, imgH - winH), target));
+        posterCardScrollY = target;
+        inner.style.transform = `translateY(${-target}px)`;
+      };
+      if (img.complete) place(); else img.addEventListener('load', place, { once: true });
+    }, 0);
+  }
+
+  // ── 全螢幕：整張等比顯示、可雙指縮放（最多 4 倍）、雙擊放大，點站框彈出景點卡 ──
+  function openPosterViewer() {
+    if (!posterAvailableForMap()) return;
+    posterViewerOpen = true;
+    posterViewerMenuOpen = false;
+    posterZoom = { s: 1, x: 0, y: 0 };
+    document.body.classList.add('poster-viewer-open');
+    renderPosterViewer();
+  }
+
+  function closePosterViewer() {
+    posterViewerOpen = false;
+    posterViewerMenuOpen = false;
+    document.body.classList.remove('poster-viewer-open');
+    renderPosterViewer();
+  }
+
+  function togglePosterViewerMenu() {
+    posterViewerMenuOpen = !posterViewerMenuOpen;
+    renderPosterViewer();
+  }
+
+  function posterViewerAction(action) {
+    posterViewerMenuOpen = false;
+    if (action === 'save') downloadGeneratedImage();
+    else if (action === 'share') shareGeneratedImage();
+    else if (action === 'redrawDay' && posterDays) generateItineraryImage(posterDays.active);
+    else if (action === 'redrawAll') generateItineraryImage();
+    renderPosterViewer();
+  }
+
+  function renderPosterViewer() {
+    let el = document.getElementById('posterViewer');
+    if (!posterViewerOpen || !posterAvailableForMap()) {
+      if (el) el.remove();
+      if (posterViewerOpen && !posterGeneratedImageBase64 && !posterImageGenerating) posterViewerOpen = false;
+      document.body.classList.toggle('poster-viewer-open', posterViewerOpen);
+      return;
+    }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'posterViewer';
+      el.className = 'poster-viewer';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-label', '行程插圖');
+      document.body.appendChild(el);
+      setupPosterZoomGestures(el);
+    }
+    const parts = renderPosterParts('viewer');
+    const title = `${currentTripTitle || '行程插圖'}${posterDays ? `・第 ${posterDays.active} 天` : ''}`;
+    el.innerHTML = `
+      <div class="poster-viewer-top">
+        <div class="poster-viewer-title">${escapeHtml(title)}</div>
+        <button type="button" class="poster-viewer-icon" onclick="togglePosterViewerMenu()" aria-label="更多動作" aria-expanded="${posterViewerMenuOpen}">⋮</button>
+        <button type="button" class="poster-viewer-icon" onclick="closePosterViewer()" aria-label="關閉全螢幕插圖">✕</button>
+        ${posterViewerMenuOpen ? `
+          <div class="poster-viewer-menu" role="menu">
+            <button type="button" role="menuitem" onclick="posterViewerAction('save')">↓ 存到相簿</button>
+            <button type="button" role="menuitem" onclick="posterViewerAction('share')">↗ 分享</button>
+            ${posterDays ? `<button type="button" role="menuitem" onclick="posterViewerAction('redrawDay')" ${posterImageGenerating ? 'disabled' : ''}>🎨 重畫第 ${posterDays.active} 天</button>` : ''}
+            <button type="button" role="menuitem" onclick="posterViewerAction('redrawAll')" ${posterImageGenerating ? 'disabled' : ''}>🎨 全部重新繪製</button>
+          </div>` : ''}
+      </div>
+      ${parts.banner}
+      <div class="poster-zoom" id="posterZoom">
+        <div class="poster-zoom-inner" style="transform:translate(${posterZoom.x}px,${posterZoom.y}px) scale(${posterZoom.s})">${parts.stage}</div>
+      </div>
+      <div class="poster-viewer-bottom">
+        ${parts.tabs}
+        ${parts.missingChips}
+        ${parts.card}
+      </div>`;
+    // 圖片高度跟著可用空間（縮放區）走，整張等比顯示、不裁邊
+    setTimeout(() => {
+      const zoom = el.querySelector('.poster-zoom');
+      const img = el.querySelector('.poster-zoom img');
+      if (zoom && img) img.style.maxHeight = `${Math.max(120, zoom.clientHeight - 16)}px`;
+    }, 0);
+  }
+
+  // 縮放手勢：單指拖曳（放大後）、雙指縮放、雙擊／雙點放大、滑鼠滾輪。拖曳或縮放過就不觸發站框的點擊
+  function setupPosterZoomGestures(root) {
+    const pts = new Map();
+    let start = null, pinch = null, moved = false, lastTap = 0;
+    const box = () => root.querySelector('.poster-zoom');
+    const apply = () => {
+      const zb = box();
+      if (!zb) return;
+      const w = zb.clientWidth, h = zb.clientHeight;
+      posterZoom.s = Math.min(4, Math.max(1, posterZoom.s));
+      posterZoom.x = Math.min(0, Math.max(w * (1 - posterZoom.s), posterZoom.x));
+      posterZoom.y = Math.min(0, Math.max(h * (1 - posterZoom.s), posterZoom.y));
+      const inner = zb.querySelector('.poster-zoom-inner');
+      if (inner) inner.style.transform = `translate(${posterZoom.x}px,${posterZoom.y}px) scale(${posterZoom.s})`;
+    };
+    const zoomAt = (cx, cy, nextS) => {
+      const ratio = nextS / posterZoom.s;
+      posterZoom.x = cx - (cx - posterZoom.x) * ratio;
+      posterZoom.y = cy - (cy - posterZoom.y) * ratio;
+      posterZoom.s = nextS;
+      apply();
+    };
+    const local = (e) => { const r = box().getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    root.addEventListener('pointerdown', (e) => {
+      if (!box() || !box().contains(e.target)) return;
+      pts.set(e.pointerId, local(e));
+      if (pts.size === 1) { start = { ...local(e), x0: posterZoom.x, y0: posterZoom.y }; moved = false; }
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, s0: posterZoom.s, x0: posterZoom.x, y0: posterZoom.y, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+      }
+    });
+    root.addEventListener('pointermove', (e) => {
+      if (!pts.has(e.pointerId) || !box()) return;
+      pts.set(e.pointerId, local(e));
+      if (pts.size >= 2 && pinch) {
+        const [a, b] = [...pts.values()];
+        const nextS = Math.min(4, Math.max(1, pinch.s0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.dist)));
+        posterZoom.x = pinch.mid.x - (pinch.mid.x - pinch.x0) * (nextS / pinch.s0);
+        posterZoom.y = pinch.mid.y - (pinch.mid.y - pinch.y0) * (nextS / pinch.s0);
+        posterZoom.s = nextS;
+        moved = true;
+        apply();
+      } else if (start) {
+        const p = local(e), dx = p.x - start.x, dy = p.y - start.y;
+        if (Math.hypot(dx, dy) > 6) moved = true;
+        if (moved && posterZoom.s > 1) { posterZoom.x = start.x0 + dx; posterZoom.y = start.y0 + dy; apply(); }
+      }
+    });
+    const end = (e) => {
+      if (!pts.has(e.pointerId)) return;
+      const p = pts.get(e.pointerId);
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinch = null;
+      if (pts.size === 0) {
+        start = null;
+        if (!moved) {
+          const now = Date.now();
+          if (now - lastTap < 300) { zoomAt(p.x, p.y, posterZoom.s > 1.05 ? 1 : 2.5); moved = true; lastTap = 0; }
+          else lastTap = now;
+        }
+      }
+    };
+    root.addEventListener('pointerup', end);
+    root.addEventListener('pointercancel', end);
+    root.addEventListener('click', (e) => {
+      if (moved && box() && box().contains(e.target)) { e.stopPropagation(); e.preventDefault(); moved = false; }
+    }, true);
+    root.addEventListener('wheel', (e) => {
+      if (!box() || !box().contains(e.target)) return;
+      e.preventDefault();
+      const p = local(e);
+      zoomAt(p.x, p.y, Math.min(4, Math.max(1, posterZoom.s * (e.deltaY < 0 ? 1.2 : 1 / 1.2))));
+    }, { passive: false });
   }
 
   function renderPosterStopCard(box, number, schedule, journey, cardId = 'posterStopCard') {
@@ -5709,18 +6091,17 @@
       </div>`;
   }
 
-  // ctx：'tools'＝匯出行程圖面板；'map'＝地圖區的插圖模式（兩處同時存在，id 不能重複）
-  function renderInteractivePoster(ctx = 'tools') {
+  // ctx：'tools'＝匯出行程圖面板；'map'＝地圖區的插圖模式；'viewer'＝全螢幕；'card'＝手機行程頁插圖卡（不可點、只看）
+  // 同一畫面可能同時有好幾份，id 不能重複
+  function renderPosterParts(ctx = 'tools') {
     const imgSrc = posterGeneratedImageBase64;
-    const imgId = ctx === 'map' ? 'posterMapImg' : 'posterGeneratedImg';
-    const cardId = ctx === 'map' ? 'posterMapStopCard' : 'posterStopCard';
+    const ids = { tools: ['posterGeneratedImg', 'posterStopCard'], map: ['posterMapImg', 'posterMapStopCard'], viewer: ['posterViewerImg', 'posterViewerStopCard'], card: ['posterCardImg', ''] }[ctx];
+    const [imgId, cardId] = ids;
+    const interactive = ctx !== 'card';
     const ready = posterBoxesStatus === 'ready' && posterStopBoxes && posterStopBoxes.boxes.length;
     const schedule = ready ? buildReplanSchedule() : [];
     const journey = getPosterJourneyState();
-    let hits = '';
-    let card = '';
-    let banner = '';
-    let missingChips = '';
+    let hits = '', card = '', banner = '', missingChips = '', progress = '';
     if (ready) {
       const boxes = posterStopBoxes.boxes;
       if (posterSelectedBoxIndex >= boxes.length) posterSelectedBoxIndex = -1;
@@ -5732,31 +6113,48 @@
         if (idx >= 0 && idx === journey.atIndex) cls.push('at');
         else if (idx >= 0 && idx === journey.nextIndex) cls.push('next');
         else if (stop && stop.checkedInAt) cls.push('done');
-        if (i === posterSelectedBoxIndex) cls.push('selected');
+        if (interactive && i === posterSelectedBoxIndex) cls.push('selected');
         const style = `top:${ymin / 10}%;left:${xmin / 10}%;height:${(ymax - ymin) / 10}%;width:${(xmax - xmin) / 10}%`;
+        if (!interactive) return `<span class="${cls.join(' ')}" style="${style}"></span>`;
         return `<button type="button" class="${cls.join(' ')}" style="${style}" onclick="selectPosterStop(${i})"
                   aria-label="${posterBoxNumber(b, i) ? `第 ${posterBoxNumber(b, i)} 站` : '插圖上的站'}：${escapeHtml((stop && stop.name) || b.name || '')}" aria-pressed="${i === posterSelectedBoxIndex}"></button>`;
       }).join('');
-      if (posterSelectedBoxIndex >= 0) {
+      // 進行中的「我」：移動中畫上一站 → 下一站的橙色虛線，小點在線上的位置＝進度
+      const me = posterMePoint(boxes, journey);
+      if (me) {
+        progress = `
+          ${me.from ? `<svg class="poster-progress-line" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+            <line x1="${me.from[1]}" y1="${me.from[0]}" x2="${me.to[1]}" y2="${me.to[0]}" vector-effect="non-scaling-stroke"/></svg>` : ''}
+          <span class="poster-me-dot${journey.moving ? ' moving' : ''}" style="top:${me.point[0] / 10}%;left:${me.point[1] / 10}%" aria-hidden="true"></span>`;
+      }
+      if (interactive && posterSelectedBoxIndex >= 0) {
         card = renderPosterStopCard(boxes[posterSelectedBoxIndex], posterBoxNumber(boxes[posterSelectedBoxIndex], posterSelectedBoxIndex), schedule, journey, cardId);
       }
       const missing = getPosterMissingStopIndexes(boxes);
       if (!missing.includes(posterSelectedMissingIndex)) posterSelectedMissingIndex = -1;
-      if (posterSelectedMissingIndex >= 0) {
+      if (interactive && posterSelectedMissingIndex >= 0) {
         const ms = replanStops[posterSelectedMissingIndex];
         card = renderPosterStopCard({ stopId: posterStopIdOf(ms), name: ms.name, missingOnPoster: true }, posterScopeNumber(posterSelectedMissingIndex), schedule, journey, cardId);
       }
-      missingChips = missing.length ? `
+      missingChips = (interactive && missing.length) ? `
         <div class="poster-missing">
           <span class="poster-missing-label">圖上點不到的站：</span>
           ${missing.map((i) => `<button type="button" class="poster-missing-chip${i === posterSelectedMissingIndex ? ' selected' : ''}" onclick="selectPosterMissingStop(${i})">${posterScopeNumber(i)}. ${escapeHtml(replanStops[i].name)}</button>`).join('')}
         </div>` : '';
       const at = journey.atIndex >= 0 ? replanStops[journey.atIndex] : null;
       const next = journey.nextIndex >= 0 ? replanStops[journey.nextIndex] : null;
-      const nextEta = next && schedule[journey.nextIndex] ? minutesToClock(schedule[journey.nextIndex].start) : '';
-      banner = (at || next)
-        ? [at ? `📍 目前在：${escapeHtml(at.name)}` : '', next ? `🚗 下一站：${escapeHtml(next.name)}${nextEta ? ` · 約 ${escapeHtml(nextEta)} 到` : ''}` : ''].filter(Boolean).join('　')
-        : '👆 點圖上的站，看時間、停留與營業時間';
+      if (at) {
+        banner = `📍 目前在：${escapeHtml(at.name)}${next ? `　下一站：${escapeHtml(next.name)}` : ''}`;
+      } else if (journey.moving && next) {
+        banner = journey.moving.near
+          ? `🚗 快到了，記得打卡：${escapeHtml(next.name)}`
+          : `🚗 前往：${escapeHtml(next.name)} · 約 ${escapeHtml(journey.moving.eta)} 到`;
+      } else if (next && currentTripStatus === 'ongoing') {
+        const eta = schedule[journey.nextIndex] ? minutesToClock(schedule[journey.nextIndex].start) : '';
+        banner = `🚗 下一站：${escapeHtml(next.name)}${eta ? ` · 約 ${escapeHtml(eta)} 到` : ''}`;
+      } else {
+        banner = '👆 點圖上的站，看時間、停留與營業時間';
+      }
     } else if (posterBoxesStatus === 'loading') {
       banner = '🔎 正在辨識圖上的站點（約 5 秒）…';
     } else if (posterBoxesStatus === 'failed') {
@@ -5768,23 +6166,39 @@
     } else if (!posterImageUploadUrl) {
       banner = '插圖沒有存到雲端，所以圖上的站點不能點選；仍可下載與分享。';
     }
-    return `
-      ${renderPosterDayTabs()}
-      ${banner ? `<div class="poster-map-banner">${banner}</div>` : ''}
-      <div class="poster-map-stage">
-        <img id="${imgId}" src="${escapeHtml(imgSrc)}" alt="AI 生成旅遊插圖" draggable="false">
-        ${hits}
-      </div>
-      <div class="poster-map-foot">
-        <span>${escapeHtml(posterModelLabel)}</span>
-        <span class="poster-map-foot-actions">
-          ${posterDays && ctx === 'tools' ? `<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})">🎨 重畫第 ${posterDays.active} 天</button>` : ''}
-          <button type="button" class="byok-link-btn" onclick="openImageLightbox(document.getElementById('${imgId}').src)">🔍 放大檢視</button>
-        </span>
-      </div>
-      ${missingChips}
-      ${card}`;
+    return {
+      tabs: renderPosterDayTabs(),
+      banner: banner ? `<div class="poster-map-banner">${banner}</div>` : '',
+      stage: `
+        <div class="poster-map-stage">
+          <img id="${imgId}" src="${escapeHtml(imgSrc)}" alt="AI 生成旅遊插圖" draggable="false">
+          ${hits}
+          ${progress}
+        </div>`,
+      foot: `
+        <div class="poster-map-foot">
+          <span>${escapeHtml(posterModelLabel)}</span>
+          <span class="poster-map-foot-actions">
+            ${posterDays && ctx === 'tools' ? `<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})" ${posterImageGenerating ? 'disabled' : ''}>🎨 重畫第 ${posterDays.active} 天</button>` : ''}
+            <button type="button" class="byok-link-btn" onclick="openPosterViewer()">🔍 全螢幕檢視</button>
+          </span>
+        </div>`,
+      missingChips,
+      card
+    };
   }
+
+  function renderInteractivePoster(ctx = 'tools') {
+    const parts = renderPosterParts(ctx);
+    if (ctx === 'card') return parts.stage;
+    return `${parts.tabs}${parts.banner}${parts.stage}${parts.foot}${parts.missingChips}${parts.card}`;
+  }
+
+  // 行程進行中：每 20 秒更新一次「我」的位置（只重畫插圖卡、地圖區與全螢幕，不動匯出面板，免得打斷輸入）
+  setInterval(() => {
+    if (currentTripStatus !== 'ongoing' || !posterGeneratedImageBase64 || document.hidden) return;
+    try { renderPosterMapView(); } catch (_e) {}
+  }, 20000);
 
   // ── 旅記照片（拍照 → 壓縮 → Firebase Storage → 掛回造訪紀錄）──
 
@@ -9487,7 +9901,7 @@
             <div class="poster-map">${renderPosterDayTabs()}
               <div class="travel-hint">第 ${posterDays.active} 天還沒有插圖。<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})">🎨 生成第 ${posterDays.active} 天</button></div>
             </div>` : ''}
-          ${posterGeneratedImageBase64 && !posterImageGenerating ? `
+          ${posterGeneratedImageBase64 && (!posterImageGenerating || posterDays) ? `
             <div class="poster-map">${renderInteractivePoster()}</div>
             <div class="img-share-row">
               <button class="img-share-btn line"   onclick="shareImageToLine()">💬 LINE</button>
