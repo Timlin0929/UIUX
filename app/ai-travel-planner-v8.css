@@ -8882,3 +8882,7 @@ body.poster-viewer-open { overflow: hidden; }
 .poster-viewer .poster-map-banner { margin: 0; }
 .poster-viewer .poster-missing-label { color: rgba(255,255,255,.75); }
 .poster-viewer .poster-stop-card { color: var(--ink, #22201d); }
+/* 桌機畫的 16:9 插圖在手機上撐滿寬度只有約 190px 高：卡片改成「最高 220」，不留空白條 */
+.poster-trip-card { height: auto; }
+.poster-card-window { position: relative; inset: auto; max-height: 220px; }
+.poster-trip-card { display: flex; flex-direction: column; } /* 避免空白字元多撐出一行高度，卡片底下才不會多一條空白 */

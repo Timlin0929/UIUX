@@ -6194,6 +6194,25 @@
     return `${parts.tabs}${parts.banner}${parts.stage}${parts.foot}${parts.missingChips}${parts.card}`;
   }
 
+  // 桌機 ↔ 手機版面切換（視窗縮放、DevTools 裝置模式）不會重新載入頁面：
+  // 跨過 700px 時要立刻重畫，否則手機上會殘留桌機的「插圖」地圖模式與切換鈕、插圖卡也不出現。
+  // 門檻與 isMobileLayout() 相同。
+  (() => {
+    const mq = window.matchMedia('(max-width: 700px)');
+    const onLayoutChange = () => { try { renderPosterMapView(); } catch (_e) {} };
+    if (mq.addEventListener) mq.addEventListener('change', onLayoutChange);
+    else if (mq.addListener) mq.addListener(onLayoutChange);
+    // 視窗大小改變：全螢幕插圖的圖片高度、插圖卡的捲動位置都依可用空間計算，要跟著重算
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (!posterGeneratedImageBase64) return;
+        try { renderPosterTripCard(); if (posterViewerOpen) renderPosterViewer(); } catch (_e) {}
+      }, 200);
+    });
+  })();
+
   // 行程進行中：每 20 秒更新一次「我」的位置（只重畫插圖卡、地圖區與全螢幕，不動匯出面板，免得打斷輸入）
   setInterval(() => {
     if (currentTripStatus !== 'ongoing' || !posterGeneratedImageBase64 || document.hidden) return;
