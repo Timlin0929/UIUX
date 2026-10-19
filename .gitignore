@@ -63,3 +63,7 @@ __pycache__/
 
 # 探索首頁改版 DEMO（設計對照用，不進版控）
 prototypes/explore-home-redesign.html
+
+# 插圖版面實驗的生成圖（約 24MB，用 run.js 重跑即可產生）
+prototypes/poster-layout-experiment/out/
+prototypes/poster-layout-experiment.7z

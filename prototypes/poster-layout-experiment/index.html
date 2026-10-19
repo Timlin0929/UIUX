@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>插圖版面實驗</title>
+<style>
+  :root { --bg: #faf9f6; --surface: #fff; --ink: #22201d; --ink2: #6b6760; --border: #e0dbd2; --brand: #2e7d6d; --accent: #f07b3f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .lead { color: var(--ink2); font-size: 14px; line-height: 1.7; margin: 0 0 20px; }
+  .run { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin-bottom: 20px; }
+  .run h2 { font-size: 17px; margin: 0 0 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .cell figcaption { font-size: 12px; color: var(--ink2); margin: 0 0 6px; font-weight: 700; }
+  .cell img { width: 100%; display: block; border-radius: 10px; border: 1px solid var(--border); }
+  .final { grid-column: 1 / -1; }
+  .stage { position: relative; line-height: 0; }
+  .hit { position: absolute; border: 2px dashed rgba(46,125,109,.0); border-radius: 12px; background: transparent; cursor: pointer; padding: 0; }
+  .show-hits .hit { border-color: rgba(46,125,109,.55); }
+  .hit:hover, .hit.on { border: 3px solid var(--accent); background: rgba(240,123,63,.12); }
+  .picked { margin-top: 8px; font-size: 14px; min-height: 22px; }
+  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; font-size: 14px; }
+  .err { color: #b4532a; }
+  details { margin-top: 12px; font-size: 13px; }
+  pre { white-space: pre-wrap; background: #f3efe8; padding: 12px; border-radius: 10px; font-size: 12px; line-height: 1.6; }
+  @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>插圖版面實驗：先定位置，再請 AI 畫底圖</h1>
+  <p class="lead">流程：程式先決定每一站的位置 → 畫「構圖草稿」→ AI 照草稿畫<strong>不含文字</strong>的底圖 → 程式疊上編號與站名。<br>
+    要看的重點：① AI 的小插圖有沒有落在標籤旁邊（燈塔標籤旁是不是燈塔）② 圖上有沒有偷偷寫字 ③ 疊上去的標籤好不好看。點下方完成圖上的站可以測試點選。</p>
+  <div class="toolbar"><label><input type="checkbox" id="showHits"> 顯示可點範圍</label></div>
+  <div id="runs">載入中…</div>
+  <details><summary>第二輪指令</summary><pre id="prompt2"></pre></details>
+  <details><summary>第一輪指令</summary><pre id="prompt"></pre></details>
+</main>
+<script>
+  const LABEL = { geo: '版面 A：照真實位置（推開太近的點）', loop: '版面 B：依順序排成一圈' };
+  document.getElementById('showHits').addEventListener('change', (e) => document.body.classList.toggle('show-hits', e.target.checked));
+  fetch('out/prompt-v2.txt').then((r) => r.ok ? r.text() : '').then((t) => { document.getElementById('prompt2').textContent = t || '（尚未執行）'; }).catch(() => {});
+  fetch('out/prompt.txt').then((r) => r.text()).then((t) => { document.getElementById('prompt').textContent = t; }).catch(() => {});
+  fetch('out/results.json').then((r) => r.json()).then((res) => {
+    const host = document.getElementById('runs');
+    if (!res.runs.length) { host.textContent = '還沒有生成結果。'; return; }
+    host.innerHTML = '';
+    res.runs.forEach((run) => {
+      const sec = document.createElement('section');
+      sec.className = 'run';
+      if (run.error) { sec.innerHTML = `<h2>${LABEL[run.layout]} #${run.sample}</h2><p class="err">生成失敗：${run.error}</p>`; host.appendChild(sec); return; }
+      const pts = res.layouts[run.layout];
+      // 可點範圍＝編號圓點＋下方標籤（座標為 1600×900 的草稿座標 → 百分比）
+      const hits = res.places.map((pl, i) => {
+        const x = pts[i].x / res.W * 100, y = pts[i].y / res.H * 100;
+        return `<button class="hit" style="left:${x - 6.5}%;top:${y - 4.5}%;width:13%;height:13%" data-i="${i}" aria-label="${pl.numbers.join('／')}. ${pl.name}"></button>`;
+      }).join('');
+      sec.innerHTML = `
+        <h2>${(run.promptV || 1) >= 2 ? '第二輪・' : '第一輪・'}${LABEL[run.layout]} #${run.sample}<span style="font-weight:400;color:var(--ink2);font-size:13px">　生成 ${run.seconds} 秒</span></h2>
+        <div class="row">
+          <figure class="cell" style="margin:0"><figcaption>構圖草稿（送給 AI）</figcaption><img src="out/${run.layout}-sketch.png" alt="草稿"></figure>
+          <figure class="cell" style="margin:0"><figcaption>AI 畫的底圖（應該沒有任何文字）</figcaption><img src="out/${run.ai}" alt="AI 底圖"></figure>
+          <figure class="cell final" style="margin:0"><figcaption>完成圖：程式疊上編號與站名（可以點）</figcaption>
+            <div class="stage"><img src="out/${run.final}" alt="完成圖">${hits}</div>
+            <div class="picked">👆 點圖上的站</div></figure>
+        </div>`;
+      sec.querySelectorAll('.hit').forEach((b) => b.addEventListener('click', () => {
+        sec.querySelectorAll('.hit').forEach((x) => x.classList.toggle('on', x === b));
+        sec.querySelector('.picked').textContent = '你點到：' + b.getAttribute('aria-label');
+      }));
+      host.appendChild(sec);
+    });
+  }).catch(() => { document.getElementById('runs').textContent = '讀不到 out/results.json，請先執行 run.js。'; });
+</script>
+</body>
+</html>
