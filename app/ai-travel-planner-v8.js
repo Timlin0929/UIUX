@@ -5164,6 +5164,8 @@
   }
 
   async function uploadPosterDataUrl(dataUrl) {
+    // storage.rules 的 posters/ 只允許登入者新增；沒登入就不要白打一次會被拒的上傳
+    if (!(firebaseAuth && firebaseAuth.currentUser)) throw new Error('登入後才能上傳插圖');
     const blob = await (await fetch(dataUrl)).blob();
     const code = currentInviteCode || 'trip';
     const path = `posters/${code}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`;
@@ -9293,7 +9295,7 @@
   const RECAP_MODULES = [
     ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261101-reels1'],
     ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261101-reels1'],
-    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261101-reels1']
+    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261102-reels2']
   ];
   let recapModulesPromise = null;
 
@@ -9335,11 +9337,70 @@
     try { localStorage.removeItem(recapTimelineStorageKey()); } catch (_e) {}
     memoryStudioState.recapTemplateId = id;
     try { localStorage.setItem(RECAP_TEMPLATE_STORAGE, id); } catch (_e) {}
+    const lengthSlot = document.getElementById('recapLengthSlot');
+    if (lengthSlot) lengthSlot.outerHTML = renderRecapLengthPicker();
     const box = document.getElementById('recapTimelinePreview');
     if (box) box.innerHTML = renderRecapTimelinePreview();
-    document.querySelectorAll('.recap-template-option').forEach((el) => {
+    document.querySelectorAll('.recap-template-option[data-template-id]').forEach((el) => {
       el.classList.toggle('active', el.dataset.templateId === id);
     });
+  }
+
+  // 影片長度（只有 Reels 這類「照片錨點」樣板吃）：all＝放進全部照片（最長 30 秒）、15＝固定 15 秒
+  const RECAP_LENGTH_STORAGE = 'wai_recap_length';
+  function recapLengthMode() {
+    const lib = window.WAI_RECAP_TEMPLATES;
+    let v = memoryStudioState && memoryStudioState.recapLengthMode;
+    if (!v) { try { v = localStorage.getItem(RECAP_LENGTH_STORAGE) || ''; } catch (_e) { v = ''; } }
+    return lib && lib.normalizeLengthMode ? lib.normalizeLengthMode(v) : 'all';
+  }
+
+  function recapTemplateUsesLength() {
+    const lib = window.WAI_RECAP_TEMPLATES;
+    return !!(lib && lib.getTemplate(recapTemplateId()).structure === 'anchors');
+  }
+
+  function memorySetRecapLength(mode) {
+    if (!memoryStudioState) return;
+    const next = mode === '15' ? '15' : 'all';
+    const cur = memoryStudioState.recapTimeline;
+    if (next === recapLengthMode()) return;
+    if (cur && cur.edited && !window.confirm('換影片長度會重新排推薦版本，你改過的秒數與字幕會清掉。確定要換嗎？')) {
+      const slot = document.getElementById('recapLengthSlot');
+      if (slot) slot.outerHTML = renderRecapLengthPicker();
+      return;
+    }
+    memoryStudioState.recapTimeline = null;
+    memoryStudioState.recapUndo = null;
+    try { localStorage.removeItem(recapTimelineStorageKey()); } catch (_e) {}
+    memoryStudioState.recapLengthMode = next;
+    try { localStorage.setItem(RECAP_LENGTH_STORAGE, next); } catch (_e) {}
+    const slot = document.getElementById('recapLengthSlot');
+    if (slot) slot.outerHTML = renderRecapLengthPicker();
+    const box = document.getElementById('recapTimelinePreview');
+    if (box) box.innerHTML = renderRecapTimelinePreview();
+  }
+
+  function renderRecapLengthPicker() {
+    if (!recapTemplateUsesLength()) return '<div id="recapLengthSlot" hidden></div>';
+    const current = recapLengthMode();
+    const opts = [
+      { id: 'all', label: '放進全部照片', desc: '每張照片都上場，最長 30 秒' },
+      { id: '15', label: '固定 15 秒', desc: '只挑重點，剛好 15 秒' }
+    ];
+    return `
+      <fieldset class="recap-template-field" id="recapLengthSlot">
+        <legend>影片長度</legend>
+        <div class="recap-template-options">
+          ${opts.map((o) => `
+            <label class="recap-template-option${o.id === current ? ' active' : ''}">
+              <input type="radio" name="recapLength" value="${o.id}" ${o.id === current ? 'checked' : ''}
+                onchange="memorySetRecapLength(this.value)">
+              <span class="recap-template-name">${o.label}</span>
+              <span class="recap-template-desc">${o.desc}</span>
+            </label>`).join('')}
+        </div>
+      </fieldset>`;
   }
 
   function renderRecapTemplatePicker() {
@@ -9358,32 +9419,54 @@
               <span class="recap-template-desc">${escapeHtml(t.desc)}</span>
             </label>`).join('')}
         </div>
-      </fieldset>`;
+      </fieldset>
+      ${renderRecapLengthPicker()}`;
   }
 
-  // 預覽用的照片清單：與 collectRecapPhotos 同一套規則（每站第一張雲端照片），但只讀本機、不做跨端合併，
+  // 每站的雲端照片（相簿順序）→ 送給後端的清單。上限與 App 相同：總共 24 張、每站 10 張、同網址只算一次；
+  // 超過 24 張時每站輪流取，每站都留得到照片，輸出順序維持「站 → 相簿順序」（後端不會再砍）。
+  const RECAP_PHOTO_MAX = 24;
+  const RECAP_PHOTO_MAX_PER_STOP = 10;
+  function recapPhotoList(recapTrip, records) {
+    if (!recapTrip || !Array.isArray(recapTrip.stops)) return [];
+    const byName = {};
+    records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
+    const seen = new Set();
+    const perStop = recapTrip.stops.map((stop) => {
+      const rec = byName[visitedPlaceNameKey(stop.name)];
+      const list = [];
+      (rec && Array.isArray(rec.photos) ? rec.photos : []).forEach((ph) => {
+        const url = ph && ph.url ? String(ph.url) : '';
+        if (!/^https?:\/\//i.test(url) || seen.has(url) || list.length >= RECAP_PHOTO_MAX_PER_STOP) return;
+        seen.add(url);
+        list.push({ url, photoId: String(ph.photoId || ph.id || '') });
+      });
+      return list;
+    });
+    const take = perStop.map(() => 0);
+    for (let round = 0, total = 0, added = true; added && total < RECAP_PHOTO_MAX; round += 1) {
+      added = false;
+      perStop.forEach((list, i) => {
+        if (total < RECAP_PHOTO_MAX && round < list.length) { take[i] += 1; total += 1; added = true; }
+      });
+    }
+    const out = [];
+    perStop.forEach((list, i) => list.slice(0, take[i]).forEach((ph) => out.push({ stopIndex: i, url: ph.url, photoId: ph.photoId })));
+    return out;
+  }
+
+  // 預覽用的照片清單：與 collectRecapPhotos 同一套規則，但只讀本機、不做跨端合併，
   // 讓切換樣板時能立刻算出推薦版本。真正產生影片時仍走 collectRecapPhotos（會先合併旅伴照片）。
   function recapPreviewPhotos(recapTrip) {
     const tripId = String(currentItineraryId || '');
-    if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
-    const byName = {};
-    getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId).forEach((r) => {
-      const k = visitedPlaceNameKey(r.name);
-      if (!byName[k]) byName[k] = r;
-    });
-    const out = [];
-    recapTrip.stops.forEach((stop, idx) => {
-      const rec = byName[visitedPlaceNameKey(stop.name)];
-      const first = rec && (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url && /^https?:\/\//i.test(String(ph.url)));
-      if (first) out.push({ stopIndex: idx, url: String(first.url), photoId: first.photoId || first.id || '' });
-    });
-    return out;
+    if (!tripId) return [];
+    return recapPhotoList(recapTrip, getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId));
   }
 
   function buildRecapRecommendedTimeline(trip, photos) {
     const lib = window.WAI_RECAP_TIMELINE;
     if (!lib || !trip || trip.stops.length < 2) return null;
-    try { return lib.buildRecommendedTimeline(trip, { templateId: recapTemplateId(), photos }); }
+    try { return lib.buildRecommendedTimeline(trip, { templateId: recapTemplateId(), photos, lengthMode: recapLengthMode() }); }
     catch (e) { console.warn('[recap] 推薦時間軸計算失敗：', e && e.message); return null; }
   }
 
@@ -9395,7 +9478,8 @@
   }
 
   function recapTimelineBaseSig(trip, photos) {
-    return [recapTemplateId(), (trip.stops || []).map((st) => st.stopId).join(','), (photos || []).map((p) => p.stopIndex).join(',')].join('|');
+    return [recapTemplateId(), recapLengthMode(), (trip.stops || []).map((st) => st.stopId).join(','),
+      (photos || []).map((p) => `${p.stopIndex}:${p.photoId || p.url}`).join(',')].join('|');
   }
 
   // 回傳 { trip, photos, timeline }；timeline 為使用者編輯過的版本（若仍適用）或新的推薦版本
@@ -9550,14 +9634,29 @@
       });
       const stopById = {};
       (trip.stops || []).forEach((st) => { stopById[st.stopId] = st; });
-      const lines = timeline.clips.filter((c) => c.type === 'route' || c.type === 'photo').map((c) => {
+      // 第 1 版照片片段用 assetRef（單張）；第 2 版（Reels）用 assetRefs（陣列），另有路線揭曉（route + reveal）與旅程收束（summary）
+      const stopName = (id) => (stopById[id] || {}).name || '';
+      const viaText = (c) => {
+        const names = (c.viaStopIds || []).map(stopName).filter(Boolean);
+        return names.length ? `，經過${names.map((n) => `「${n}」`).join('、')}` : '';
+      };
+      const lines = timeline.clips.filter((c) => c.type === 'route' || c.type === 'photo' || c.type === 'summary').map((c) => {
+        if (c.type === 'summary') {
+          const s = c.stats || {};
+          return `${c.clipId}｜旅程收束｜完整路線（${s.stops || (trip.stops || []).length} 個景點，${s.distanceKm || trip.distanceKm || 0} km）`;
+        }
+        if (c.type === 'route' && c.reveal) {
+          return `${c.clipId}｜路線揭曉｜從「${stopName(c.fromStopId)}」到「${stopName(c.toStopId)}」（全程 ${trip.distanceKm || 0} km）`;
+        }
         if (c.type === 'route') {
           const to = stopById[c.toStopId] || {};
-          return `${c.clipId}｜路線｜前往「${to.name || ''}」（第 ${to.dayIndex || 1} 天，${c.distanceKm || 0} km）`;
+          return `${c.clipId}｜路線｜前往「${to.name || ''}」（第 ${to.dayIndex || 1} 天，${c.distanceKm || 0} km${viaText(c)}）`;
         }
-        const st = stopById[c.assetRef && c.assetRef.stopId] || {};
+        const refs = Array.isArray(c.assetRefs) ? c.assetRefs : (c.assetRef ? [c.assetRef] : []);
+        const st = stopById[refs[0] && refs[0].stopId] || {};
         const note = notes[visitedPlaceNameKey(st.name || '')];
-        return `${c.clipId}｜照片｜「${st.name || ''}」（第 ${st.dayIndex || 1} 天，停留 ${st.stayMin || 0} 分鐘）${note ? `｜旅記備註：${note}` : ''}`;
+        const extra = `${refs.length > 1 ? `，${refs.length} 張照片` : ''}${c.hero ? '，主角景點' : ''}`;
+        return `${c.clipId}｜照片｜「${st.name || ''}」（第 ${st.dayIndex || 1} 天，停留 ${st.stayMin || 0} 分鐘${extra}）${note ? `｜旅記備註：${note}` : ''}`;
       });
       const prompt = [
         '你是旅遊回顧短片的剪輯助手，要替每個片段寫一句字幕。',
@@ -9568,7 +9667,7 @@
         '規則：',
         `1. 每則字幕不超過 ${WAI_RECAP_TIMELINE.CAPTION_MAX} 個中文字，口語、溫暖、不要 emoji 與 hashtag。`,
         '2. 只能根據上面提供的景點名稱、天數、距離與旅記備註寫；不可編造天氣、同行者、心情、吃了什麼或發生的事件。',
-        '3. 路線片段寫移動感（例如「前往某某」「沿著海岸到某某」），照片片段寫該景點；有旅記備註時優先用備註的內容。',
+        '3. 路線片段寫移動感（例如「前往某某」「沿著海岸到某某」），照片片段寫該景點；有旅記備註時優先用備註的內容。路線揭曉寫整趟從哪到哪，旅程收束寫一句回顧整條路線。',
         '4. 不要寫資料裡沒有的方位（東南西北）、距離以外的數字或景點特色描述，寧可樸素也不要猜。',
         '5. emphasis 只用於照片片段：有旅記備註或停留較久的寫 long，其餘 normal，最多一半寫 short。',
         '只回 JSON（不要多餘文字）：{"cover":"開場字幕","outro":"結尾字幕","clips":{"片段id":{"caption":"字幕","emphasis":"long|normal|short"}}}'
@@ -9586,7 +9685,7 @@
       if (!parsed || typeof parsed !== 'object') throw new Error('AI 回傳格式不正確，請再試一次');
       // 使用者已經打好的字幕保留，只填空白的；全部都有字幕時才整份改寫
       const base = memoryStudioState.recapTimeline || timeline;
-      const hasEmpty = base.clips.some((c) => ['cover', 'route', 'photo', 'outro'].includes(c.type) && !c.caption);
+      const hasEmpty = base.clips.some((c) => ['cover', 'route', 'photo', 'summary', 'outro'].includes(c.type) && !c.caption);
       const next = WAI_RECAP_TIMELINE.applyScriptSuggestion(base, parsed, { keepExisting: hasEmpty });
       memoryStudioState.recapEditorOpen = true;
       memoryStudioState.recapAiBusy = false;
@@ -9784,17 +9883,7 @@
     if (!tripId || !recapTrip || !Array.isArray(recapTrip.stops)) return [];
     try { await mergeTripMemoriesIntoLocal(tripId); } catch (_e) {}
     try { await saveMyTripMemory(tripId); } catch (_e) {}
-    const records = getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId);
-    const byName = {};
-    records.forEach((r) => { const k = visitedPlaceNameKey(r.name); if (!byName[k]) byName[k] = r; });
-    const out = [];
-    recapTrip.stops.forEach((stop, idx) => {
-      const rec = byName[visitedPlaceNameKey(stop.name)];
-      if (!rec) return;
-      const first = (Array.isArray(rec.photos) ? rec.photos : []).find((ph) => ph && ph.url && /^https?:\/\//i.test(String(ph.url)));
-      if (first) out.push({ stopIndex: idx, url: String(first.url) });
-    });
-    return out;
+    return recapPhotoList(recapTrip, getVisitedPlaces().filter((p) => String(p.tripId || '') === tripId));
   }
 
   // 用現有 DirectionsService 算每段沿真實道路的點（overview_path → [[lat,lng],...]）。
@@ -9926,7 +10015,7 @@
       const title = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
       const tl = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited ? memoryStudioState.recapTimeline : null;
       const tlSig = tl ? tl.clips.map((c) => `${c.clipId}:${c.durationMs}:${c.caption || ''}`).join(',') : '';
-      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${stopSig}#${photoSig}#${tlSig}`;
+      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${recapLengthMode()}#${stopSig}#${photoSig}#${tlSig}`;
     } catch (_e) { return ''; }
   }
 
@@ -10136,7 +10225,7 @@
       const edited = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited
         ? memoryStudioState.recapTimeline : null;
       const timeline = edited || buildRecapRecommendedTimeline(trip, photos);
-      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline, lengthMode: 'all', tripId: String(currentItineraryId || '') }) });
+      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline, lengthMode: recapLengthMode(), tripId: String(currentItineraryId || '') }) });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.message || ('建立失敗（' + r.status + '）'));
@@ -10215,6 +10304,7 @@
     memorySetAudioMode,
     memorySetRecapTitle,
     memorySetRecapTemplate,
+    memorySetRecapLength,
     memoryResetLayout,
     memoryToggleCropMode,
     memorySetTemplate,
@@ -10242,6 +10332,9 @@
     }
     if (!firebaseStorage) {
       window.alert('Firebase Storage 尚未初始化，請確認 Firebase 專案已啟用 Storage。'); return;
+    }
+    if (!(firebaseAuth && firebaseAuth.currentUser)) {
+      window.alert('登入後才能取得插圖連結；沒登入也可以按「下載插圖」存到裝置。'); return;
     }
     if (!posterImageUploadPromise) {
       posterImageUploadPromise = uploadPosterToStorage();

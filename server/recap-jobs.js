@@ -37,7 +37,8 @@ const DEFAULT_LOOK = 'basic';
 
 // 片尾的網頁網址與 App 下載頁：寫在伺服器設定，不由前端傳，避免有人把任意網址印進影片
 const RECAP_WEB_URL = process.env.RECAP_WEB_URL || 'travel-link-ai.duckdns.org';
-const RECAP_APP_URL = process.env.RECAP_APP_URL || 'travel-link-ai.duckdns.org/download';
+// App 下載頁還沒有（組員決定先不放 APK）：預設不印這行，片尾只印網頁網址。有下載頁時再設 RECAP_APP_URL。
+const RECAP_APP_URL = process.env.RECAP_APP_URL || '';
 
 try { fs.mkdirSync(OUT_DIR, { recursive: true }); } catch (e) {}
 

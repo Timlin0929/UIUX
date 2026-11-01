@@ -620,7 +620,8 @@
         var text = sanitizeCaption(sug.caption);
         if (text) c.caption = text;
       }
-      if (c.type === 'photo' && FACTOR[sug.emphasis]) c.durationMs = clampMs('photo', c.durationMs * FACTOR[sug.emphasis], Array.isArray(c.assetRefs) ? c.assetRefs.length : 0);
+      // 固定 15 秒的版本不改長短（改了總長就不是 15 秒）
+      if (c.type === 'photo' && FACTOR[sug.emphasis] && next.lengthMode !== '15') c.durationMs = clampMs('photo', c.durationMs * FACTOR[sug.emphasis], Array.isArray(c.assetRefs) ? c.assetRefs.length : 0);
     });
     next.edited = true;
     next.scriptSource = 'ai';
