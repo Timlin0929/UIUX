@@ -527,3 +527,31 @@ Get-Content C:\nginx\logs\error.log  -Tail 20
 netstat -an | findstr ":80"
 netstat -an | findstr ":3001"
 ```
+
+---
+
+## 附錄：第二個網站 travel-link-amd.duckdns.org（InnoServe AMD 版，2026-10-02）
+
+同一台機器、同一個 IP，nginx 依網域分流；舊網站完全不動。
+
+| | 舊網站 | 新網站（AMD） |
+|---|---|---|
+| 網域 | `travel-link-ai.duckdns.org` | `travel-link-amd.duckdns.org` |
+| 前端 | `Desktop\UIUX\app` | `Desktop\TravelLink_AI-AMD\app` |
+| 代理 | `127.0.0.1:3001`（`UIUX\server`） | `127.0.0.1:3011`（`TravelLink_AI-AMD\server`，`.env` 的 `PORT=3011`） |
+| 文字 AI | Vertex / Gemini | `AI_PROVIDER=amd`：工研院 gpt-oss-120b（圖片仍走 Vertex） |
+| 憑證 | `C:\nginx\ssl\travel-link-ai.duckdns.org-*.pem` | `C:\nginx\ssl\travel-link-amd.duckdns.org-*.pem` |
+
+- **nginx**：`C:\nginx\conf\nginx.conf` 末尾新增兩個 server（80 保留 ACME 路徑後 301、443 正站），並加了 `server_names_hash_bucket_size 64;`（兩個長網域，預設 32 放不下）。改設定前的備份是 `nginx.conf.bak-20261002-202912`。
+- **憑證**：win-acme 同一套參數（manual、HTTP-01 FileSystem、webroot 仍是 `UIUX\app`、PEM 匯出到 `C:\nginx\ssl`）。既有的 `WanderAI Cert Renew` 排程跑 `wacs --renew` 會續**所有**憑證，新網域不用另外設。
+  - ⚠️ 兩個網域的續期驗證檔都寫到 `UIUX\app\.well-known\`，所以兩個 port 80 server 的 root 都要維持 `UIUX\app`。
+- **代理常駐**：`TravelLink_AI-AMD\server\start-proxy.bat`（3011，路徑取自腳本位置）。開機自動啟動要另外註冊排程（系統管理員 PowerShell）：
+  ```powershell
+  $action  = New-ScheduledTaskAction -Execute "C:\Users\USER\Desktop\TravelLink_AI-AMD\server\start-proxy.bat"
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  Register-ScheduledTask -TaskName "TravelLinkAI-AMD Proxy Autostart" -Action $action -Trigger $trigger -Force
+  ```
+- **控制台**：`TravelLink_AI-AMD\server\proxy-control.bat` 管 3011；舊網站的代理用 `UIUX\server` 那一份。
+- **AMD 端點備援**：`server/.env` 設了 `AMD_LLM_FALLBACK_BASE_URL`／`AMD_LLM_FALLBACK_API_KEY`（組員 VM 的反向代理，網址與金鑰不進 repo）時，直連工研院連不上或回 401/403 會**自動**改走備援，5 分鐘後再試直連，切換與恢復都會寫進 `server/logs/proxy.out.log`／`proxy.err.log`。改 `.env` 後要重啟 3011 代理。測試：`node server/test/amd-failover.test.js`（本機假伺服器，不打真端點）。
+- **外部設定（Console）**：Firebase Auth 授權網域、Google Maps 瀏覽器金鑰的 HTTP referrer 都要加上 `travel-link-amd.duckdns.org`。工研院端點看的是 IP，不用改。
+- **Google 登入顯示自家網域（2026-10-11）**：`app/weather.env.js` 的 `authDomain` 改為 `travel-link-amd.duckdns.org`，nginx 443 站加了 `location ^~ /__/` 反向代理到 `project-720a680b-3ad1-40d1-b07.firebaseapp.com`，Google 帳戶選擇畫面因此顯示本站而非 `*.firebaseapp.com`。前提是 Google Cloud OAuth 用戶端（Web client (auto created by Google Service)）已加入 JavaScript 來源 `https://travel-link-amd.duckdns.org` 與重新導向 URI `https://travel-link-amd.duckdns.org/__/auth/handler`，否則登入會出現 `redirect_uri_mismatch`。改 nginx 前的備份是 `nginx.conf.bak-20261011-amd-authdomain`。
