@@ -165,5 +165,108 @@ let rejected = false;
 try { JOBS.resolveManifestOptions(sTrip, sPhotos, 'standard', { clips: 'x' }); } catch (e) { rejected = e.status === 400; }
 ok('後端：格式錯誤的時間軸回 400', rejected);
 
+// ════ 第 2 版：Reels（IG 分享優化提案 A2、A7～A11、A19）════
+// 參考時間表：台東一日遊、8 站、9 張照片（森林公園 3 張＝主角），總長 20.5 秒
+const demoStops = ['糖廠', '豬血湯', '鐵花村', 'TTstyle', '地瓜酥', '森林公園', '美術館', '馬蘭車站']
+  .map((name, i) => ({ stopId: 'd' + i, name, lat: 22.75 + i * 0.004, lng: 121.14 + (i % 3) * 0.003, dayIndex: 1, stayMin: 40 }));
+const demoTrip = { title: '台東一日遊', distanceKm: 18, stops: demoStops };
+const demoCounts = [1, 1, 0, 1, 1, 3, 1, 1];
+const demoPhotos = [];
+demoCounts.forEach((c, i) => { for (let k = 0; k < c; k++) demoPhotos.push({ stopIndex: i, photoId: `p${i}_${k}`, url: `data:image/png;base64,${i}${k}` }); });
+
+ok('v2：Reels 樣板存在、是前端推薦預設；請求沒帶樣板仍是標準', TEMPLATES.hasTemplate('reels') && TEMPLATES.RECOMMENDED_ID === 'reels' && TEMPLATES.DEFAULT_ID === 'standard');
+ok('v2：其他節奏的換日卡縮到 0.5～0.8 秒', ['standard', 'brisk', 'leisurely', 'cinematic'].every((id) => { const ms = TEMPLATES.getTemplate(id).dayTransitionMs; return ms >= 500 && ms <= 800; }));
+
+const demoM = MANIFEST.buildRecapManifest(demoTrip, { template: 'reels', photoCounts: demoCounts, heroStopIndex: 5 });
+const demoPhaseStr = demoM.timeline.phases.map((p) => `${p.type}@${p.startMs}`).join(' ');
+ok('v2：參考時間表總長 20.5 秒', demoM.timeline.totalMs === 20500, String(demoM.timeline.totalMs));
+ok('v2：參考時間表逐段秒數一致', demoPhaseStr === 'cover@0 reveal@1200 photo@2200 photo@3600 hop@5000 photo@5700 photo@7100 hop@8500 photo@9200 hop@12200 photo@12900 photo@14300 summary@15700 outro@17200', demoPhaseStr);
+ok('v2：主角景點 3 張各 1 秒', demoM.media.filter((mm) => mm.stopIndex === 5).every((mm) => mm.durationMs === 1000 && mm.hero));
+ok('v2：中間沒照片的站只在過場經過', demoM.timeline.phases.some((p) => p.type === 'hop' && p.fromIndex === 1 && p.toIndex === 3 && p.viaIndices.join() === '2'));
+ok('v2：三種中段結構依照片數切換', MANIFEST.structureFor(0) === 'routeStory' && MANIFEST.structureFor(2) === 'mapFeatured' && MANIFEST.structureFor(3) === 'photoStory');
+ok('v2：沒指定主角時挑照片最多的站', MANIFEST.buildRecapManifest(demoTrip, { template: 'reels', photoCounts: demoCounts }).heroStopIndex === 5);
+ok('v2：0 張照片不設主角', MANIFEST.buildRecapManifest(demoTrip, { template: 'reels' }).heroStopIndex === -1);
+
+const f15 = MANIFEST.buildRecapManifest(demoTrip, { template: 'reels', photoCounts: demoCounts.map((c, i) => (i === 5 ? 5 : c)), heroStopIndex: 5, lengthMode: '15' });
+const perStop15 = {};
+f15.media.forEach((mm) => { perStop15[mm.stopIndex] = (perStop15[mm.stopIndex] || 0) + 1; });
+ok('v2：固定 15 秒總長剛好 15 秒', f15.timeline.totalMs === 15000, String(f15.timeline.totalMs));
+ok('v2：固定 15 秒主角最多 3 張、其他站 1 張', perStop15[5] === 3 && Object.keys(perStop15).every((k) => k === '5' || perStop15[k] === 1), JSON.stringify(perStop15));
+const many2 = MANIFEST.buildRecapManifest(demoTrip, { template: 'reels', photoCounts: demoCounts.map(() => 8) });
+ok('v2：放進全部照片有上限（30 秒）', many2.timeline.totalMs <= 30000, String(many2.timeline.totalMs));
+
+// 多日：不出換日卡，在當天第一張照片標「第 N 天」
+const twoDay = { title: '兩天', stops: demoStops.map((s, i) => Object.assign({}, s, { dayIndex: i < 4 ? 1 : 2 })) };
+const twoDayM = MANIFEST.buildRecapManifest(twoDay, { template: 'reels', photoCounts: demoCounts });
+ok('v2：多日行程沒有換日卡', twoDayM.timeline.dayBreaks.length === 0 && !twoDayM.timeline.phases.some((p) => p.type === 'timeline'));
+ok('v2：第 1、2 天的第一張照片帶天數標籤', twoDayM.timeline.dayLabels.map((d) => d.stopIndex + ':' + d.day).join() === '0:1,4:2', JSON.stringify(twoDayM.timeline.dayLabels));
+
+// 推薦時間軸第 2 版
+const v2 = TIMELINE.buildRecommendedTimeline(demoTrip, { templateId: 'reels', photos: demoPhotos, highlightStopId: 'd5' });
+ok('v2：schemaVersion 2、帶 lengthMode 與結構', v2.schemaVersion === 2 && v2.lengthMode === 'all' && v2.structure === 'photoStory');
+ok('v2：片段順序', v2.clips.map((c) => c.type).join() === 'cover,route,photo,photo,route,photo,photo,route,photo,route,photo,photo,summary,outro', v2.clips.map((c) => c.type).join());
+const heroClip = v2.clips.find((c) => c.hero);
+ok('v2：主角景點一張卡片、3 個 assetRefs', heroClip && heroClip.assetRefs.length === 3 && heroClip.assetRefs[2].photoId === 'p5_2');
+ok('v2：跨站路線帶 viaStopIds', v2.clips.some((c) => c.clipId === 'route-1-3' && c.viaStopIds.join() === 'd2'));
+ok('v2：封面預設行程插圖', v2.clips[0].source === 'illustration');
+ok('v2：compile 回 manifest 總長一致', TIMELINE.timelineTotalMs(demoTrip, v2, demoPhotos) === v2.totalMs);
+ok('v2：清單秒數加總＝總長', near(v2.clips.reduce((a, c) => a + c.durationMs, 0), v2.totalMs));
+ok('v1 樣板仍產第 1 版', TIMELINE.buildRecommendedTimeline(demoTrip, { templateId: 'standard', photos: demoPhotos }).schemaVersion === 1);
+
+// 驗證：via 不對的路線片段不採用（改用預設過場秒數），亂序的照片片段丟掉
+const badV2 = JSON.parse(JSON.stringify(v2));
+badV2.clips.find((c) => c.clipId === 'route-1-3').viaStopIds = ['d4'];
+badV2.clips.find((c) => c.clipId === 'route-1-3').durationMs = 5000;
+const badOpts = TIMELINE.compileTimeline(demoTrip, badV2, demoPhotos);
+ok('v2 驗證：viaStopIds 不是中間的站 → 不採用', badOpts.anchorPlan.find((p) => p.stopIndex === 3).hopMs === undefined);
+const outOfOrder = JSON.parse(JSON.stringify(v2));
+const p7 = outOfOrder.clips.find((c) => c.clipId === 'photo-7');
+outOfOrder.clips.splice(outOfOrder.clips.indexOf(p7), 1);
+outOfOrder.clips.splice(2, 0, p7);
+ok('v2 驗證：照片片段不能倒著排', TIMELINE.compileTimeline(demoTrip, outOfOrder, demoPhotos).mediaStopIndices.join() === '7');
+const forgedRef = JSON.parse(JSON.stringify(v2));
+forgedRef.clips.find((c) => c.clipId === 'photo-2' || c.clipId === 'photo-1').assetRefs = [{ kind: 'memory_photo', stopId: 'd2' }];
+ok('v2 驗證：沒有照片的站不能放照片片段', TIMELINE.compileTimeline(demoTrip, forgedRef, demoPhotos).photoCounts[2] === 0);
+
+// 編輯器：移除照片後路線自動重接，片段秒數加總仍＝實際總長
+[['photo-0'], ['photo-3'], ['photo-1'], ['photo-7'], ['photo-5', 'photo-6'], ['photo-0', 'photo-3']].forEach((ids) => {
+  let t = v2;
+  ids.forEach((id) => { t = TIMELINE.removePhotoClip(t, id); });
+  const sumMs = t.clips.reduce((a, c) => a + c.durationMs, 0);
+  ok(`v2 編輯：移除 ${ids.join('+')} 後路線重接、總長一致`, near(sumMs, TIMELINE.timelineTotalMs(demoTrip, t, demoPhotos)) && !t.clips.some((c) => c.marker), `${sumMs} vs ${TIMELINE.timelineTotalMs(demoTrip, t, demoPhotos)}`);
+});
+const lessHero = TIMELINE.removeClipPhoto(v2, heroClip.clipId, 1);
+ok('v2 編輯：主角卡片個別移除照片', TIMELINE.compileTimeline(demoTrip, lessHero, demoPhotos).photoSelection[5].join() === '0,2'
+  && lessHero.clips.find((c) => c.hero).durationMs === 2000);
+
+// 字幕軌：時間取自 phases
+let capV2 = TIMELINE.setClipCaption(v2, 'route-1-3', '往市區');
+capV2 = TIMELINE.setClipCaption(capV2, 'summary', '一天走完');
+capV2 = TIMELINE.setClipCaption(capV2, heroClip.clipId, '森林公園');
+const capM = MANIFEST.buildRecapManifest(demoTrip, TIMELINE.compileTimeline(demoTrip, capV2, demoPhotos));
+TIMELINE.attachCaptions(capM, capV2);
+ok('v2 字幕：跨站路線、主角、收束各一則，時間對到段落', JSON.stringify(capM.captions) === JSON.stringify([
+  { startMs: 5000, endMs: 5700, text: '往市區' }, { startMs: 9200, endMs: 12200, text: '森林公園' }, { startMs: 15700, endMs: 17200, text: '一天走完' }
+]), JSON.stringify(capM.captions));
+
+// 後端：新欄位
+const sDemo = JOBS.sanitizeTrip(Object.assign({}, demoTrip, {
+  costPerPerson: 1350.4, highlightStopId: 'd5',
+  stops: demoStops.map((s, i) => Object.assign({}, s, { arriveTime: i === 0 ? '09:30' : (i === 1 ? '25:00' : '') }))
+}));
+ok('後端：每人花費、最推薦的一站、抵達時間', sDemo.costPerPerson === 1350 && sDemo.highlightStopId === 'd5' && sDemo.stops[0].arriveTime === '09:30' && sDemo.stops[1].arriveTime === '');
+ok('後端：不是這趟行程的最推薦站被丟掉', JOBS.sanitizeTrip(Object.assign({}, demoTrip, { highlightStopId: 'nope' })).highlightStopId === '');
+const sDemoPhotos = JOBS.sanitizePhotos(demoPhotos.concat([demoPhotos[0]]), sDemo.stops.length);
+ok('後端：同站多張照片照收、重複網址去掉', sDemoPhotos.length === 9 && sDemoPhotos.filter((p) => p.stopIndex === 5).length === 3);
+ok('後端：照片總數上限 24', JOBS.sanitizePhotos(Array.from({ length: 40 }, (_, k) => ({ stopIndex: k % 8, url: 'data:image/png;base64,' + k })), 8).length === 24);
+const reelsM = JOBS.buildManifest(sDemo, JOBS.resolveManifestOptions(sDemo, sDemoPhotos, 'reels', null, { lengthMode: 'all' }));
+ok('後端：只送樣板也照參考時間表排、主角取 highlightStopId', reelsM.timeline.totalMs === 20500 && reelsM.heroStopIndex === 5);
+ok('後端：送第 2 版時間軸與只送樣板結果相同', JOBS.buildManifest(sDemo, JOBS.resolveManifestOptions(sDemo, sDemoPhotos, 'reels', v2, {})).timeline.totalMs === reelsM.timeline.totalMs);
+ok('後端：lengthMode 亂填 → all', JOBS.resolveManifestOptions(sDemo, sDemoPhotos, 'reels', null, { lengthMode: '999' }).lengthMode === 'all');
+ok('後端：畫面風格白名單（未完成的先用基本）', JOBS.normalizeLook('film').requested === 'film' && JOBS.normalizeLook('film').look === 'basic' && JOBS.normalizeLook('<x>').requested === 'basic');
+const deco = JOBS.decorateManifest(reelsM, sDemo, sDemoPhotos, { coverStopIndex: 3, look: 'basic' });
+ok('後端：自選封面照片、片尾網址來自伺服器設定', reelsM.cover.source === 'photo' && reelsM.cover.photoStopIndex === 3 && deco.coverPhotoUrl === sDemoPhotos.find((p) => p.stopIndex === 3).url && /duckdns/.test(reelsM.brand.webUrl));
+ok('後端：攻略卡最推薦的一站名稱', reelsM.trip.highlightName === '森林公園' && reelsM.trip.costPerPerson === 1350);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

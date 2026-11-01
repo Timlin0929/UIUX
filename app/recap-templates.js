@@ -22,9 +22,43 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
+  // DEFAULT_ID：請求沒帶樣板時（舊版網頁、目前的 App）用的樣板，維持「標準」以免舊請求的影片變樣。
+  // RECOMMENDED_ID：前端選單的預設值（IG 分享優化提案 A2）。
   var DEFAULT_ID = 'standard';
+  var RECOMMENDED_ID = 'reels';
+
+  // 長度模式（A19）：all ＝放進全部照片、依秒數自動延長（上限 maxMs）；15 ＝固定 15 秒，放不下的照片站略過
+  var LENGTH_MODES = ['all', '15'];
 
   var TEMPLATES = [
+    {
+      // structure 'anchors'：只在有照片的站之間播路線（A7），中段依照片數切換三種結構（A9），
+      // 換日不出獨立的轉場卡、改在隔天第一張照片標「第 N 天」（A10）。秒數規則見提案「秒數規則」。
+      id: 'reels',
+      label: 'Reels',
+      desc: '照片當主角、節奏明快，適合 IG Reels 與限時動態。',
+      structure: 'anchors',
+      coverMs: 1200,
+      revealMs: 1000,
+      photoMs: 1400,
+      heroMs: 1000,
+      heroSingleMs: 2000,
+      hopMs: 700,
+      summaryMs: 1500,
+      statsMs: 3300,
+      routeOnlyMs: 6000,       // 0 張照片（路線故事）：整條路線開完的時間
+      featuredRouteMs: 5000,   // 1～2 張照片（地圖＋精選照片）：整條路線開完的時間（不含照片）
+      focusMs: 600,            // 路線故事：聚焦的站各停多久
+      focusMax: 4,
+      maxMs: 30000,            // 放進全部照片時的上限（待討論，提案建議約 30 秒）
+      fixed15: { totalMs: 15000, heroSingleMs: 2400, heroMs: 1000, heroManyMs: 800, heroManyCount: 3 },
+      dwellMs: 0,
+      dayTransitionMs: 0,
+      targetMs: { '0': 15000, '1-2': 15000, '3-5': 20000, '6+': 30000 },
+      minRouteMs: 3000,
+      segment: { minMs: 300, maxShare: 0.45, ease: 'smooth' },
+      cover: { style: 'title' }
+    },
     {
       id: 'standard',
       label: '標準',
@@ -33,7 +67,7 @@
       statsMs: 3000,
       dwellMs: 200,
       photoMs: 2600,
-      dayTransitionMs: 1600,
+      dayTransitionMs: 800,
       targetMs: { '0': 14500, '1-2': 18000, '3-5': 23000, '6+': 32000 },
       minRouteMs: 6000,
       segment: { minMs: 900, maxShare: 0.45, ease: 'smooth' },
@@ -47,7 +81,7 @@
       statsMs: 2200,
       dwellMs: 120,
       photoMs: 1800,
-      dayTransitionMs: 1100,
+      dayTransitionMs: 600,
       targetMs: { '0': 11000, '1-2': 13500, '3-5': 17000, '6+': 24000 },
       minRouteMs: 4500,
       segment: { minMs: 700, maxShare: 0.4, ease: 'smooth' },
@@ -61,7 +95,7 @@
       statsMs: 3600,
       dwellMs: 400,
       photoMs: 3600,
-      dayTransitionMs: 2200,
+      dayTransitionMs: 800,
       targetMs: { '0': 18000, '1-2': 22000, '3-5': 29000, '6+': 40000 },
       minRouteMs: 8000,
       segment: { minMs: 1200, maxShare: 0.45, ease: 'smooth' },
@@ -75,7 +109,7 @@
       statsMs: 2800,
       dwellMs: 200,
       photoMs: 2400,
-      dayTransitionMs: 1500,
+      dayTransitionMs: 700,
       targetMs: { '0': 14000, '1-2': 17500, '3-5': 22500, '6+': 31000 },
       minRouteMs: 6000,
       segment: { minMs: 900, maxShare: 0.45, ease: 'linear' },
@@ -105,8 +139,16 @@
     return TEMPLATES.some(function (t) { return t.id === String(id || ''); });
   }
 
+  function normalizeLengthMode(value) {
+    var v = String(value == null ? '' : value);
+    return LENGTH_MODES.indexOf(v) >= 0 ? v : 'all';
+  }
+
   return {
     DEFAULT_ID: DEFAULT_ID,
+    RECOMMENDED_ID: RECOMMENDED_ID,
+    LENGTH_MODES: LENGTH_MODES.slice(),
+    normalizeLengthMode: normalizeLengthMode,
     getTemplate: getTemplate,
     listTemplates: listTemplates,
     hasTemplate: hasTemplate

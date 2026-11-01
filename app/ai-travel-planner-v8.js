@@ -9185,9 +9185,9 @@
   // 樣板／時間軸模組只在打開「回顧短片」時才載入：頁面初次載入已有 70 多個檔案，
   // 再多幾支 script 容易撞到 nginx 的速率限制（503）。載入失敗時影片照樣能產生（後端用標準樣板）。
   const RECAP_MODULES = [
-    ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261019-recap1'],
-    ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261019-recap2'],
-    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261019-recap4']
+    ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261101-reels1'],
+    ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261101-reels1'],
+    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261101-reels1']
   ];
   let recapModulesPromise = null;
 
@@ -9212,7 +9212,8 @@
     const lib = window.WAI_RECAP_TEMPLATES;
     let id = memoryStudioState && memoryStudioState.recapTemplateId;
     if (!id) { try { id = localStorage.getItem(RECAP_TEMPLATE_STORAGE) || ''; } catch (_e) { id = ''; } }
-    return lib && lib.hasTemplate(id) ? id : (lib ? lib.DEFAULT_ID : 'standard');
+    // 沒選過時預設 Reels（IG 分享優化提案 A2）；選過的節奏照舊保留
+    return lib && lib.hasTemplate(id) ? id : (lib ? (lib.RECOMMENDED_ID || lib.DEFAULT_ID) : 'standard');
   }
 
   function memorySetRecapTemplate(id) {
@@ -9345,7 +9346,7 @@
     const st = memoryStudioState || {};
     const notice = st.recapResetNotice ? '<p class="recap-editor-notice">行程或照片有變動，已重新排推薦版本。</p>' : '';
     st.recapResetNotice = false;
-    const captionable = { cover: true, route: true, photo: true, outro: true };
+    const captionable = { cover: true, route: true, photo: true, summary: true, outro: true };
     const cards = rows.map((r) => {
       const id = escapeHtml(JSON.stringify(r.clipId));
       return `
@@ -10029,7 +10030,7 @@
       const edited = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited
         ? memoryStudioState.recapTimeline : null;
       const timeline = edited || buildRecapRecommendedTimeline(trip, photos);
-      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline }) });
+      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline, lengthMode: 'all', tripId: String(currentItineraryId || '') }) });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.message || ('建立失敗（' + r.status + '）'));
