@@ -95,7 +95,11 @@
   let posterZoom = { s: 1, x: 0, y: 0 };
   let posterCardScrollY = 0;         // 手機行程頁插圖卡目前捲到的位置（px）
   const posterProgressMax = {};      // 「我」在每一段的最大進度：只前進不後退
-  let posterDays = null;             // { list: [1, 2, 3], active: 1, items: { [day]: { dataUrl, uploadUrl, stopBoxes, snapshot, label, status, note } } }
+  let posterDays = null;             // { list: [1, 2, 3], active: 1, wide, items: { [day]: { dataUrl, uploadUrl, stopBoxes, snapshot, label, status, note } } }
+  // 目前顯示的插圖是不是橫式：true／false；null＝還不知道（行程文件上的 imageUrl，載入圖後再判斷）。
+  // 直式存 imageUrl／imageDays（手機版與 App 用），桌機畫的橫式另存 imageWide／imageDaysWide，兩邊互不覆蓋。
+  let posterWide = null;
+  let posterOrientationProbe = '';   // 正在量直橫的圖（避免同一張重複載入）
   let posterModelLabel = '';
   let posterLoadToken = 0;
   let posterCloudCheckedKey = '';   // 已為哪個「行程｜帳號」查過雲端插圖，避免每次重繪都讀一次 Firestore
@@ -4759,6 +4763,7 @@
       const drawn = await drawComposedPoster({ schedule, character, byok, byokEntry, vertex, apiKey });
       if (currentItineraryId !== tripId) return;
       posterGeneratedImageBase64 = drawn.dataUrl;
+      posterWide = drawn.wide;
       posterModelLabel = drawn.label;
       // 站框是程式自己放的 → 不必辨識，畫好就能點；存回行程時一併寫給 App 用
       posterStopBoxes = drawn.stopBoxes;
@@ -4807,6 +4812,7 @@
     const snapshot = schedule.map((s) => ({ stopId: posterStopIdOf(s), name: String(s.name || '') }));
     return {
       dataUrl: composed.dataUrl,
+      wide: !layout.portrait,
       label,
       snapshot,
       stopBoxes: { imageUrl: '', boxes: normalizePosterBoxes(composed.boxes, snapshot), raw: composed.boxes, composed: true }
@@ -4880,9 +4886,11 @@
     const tripId = currentItineraryId;
     posterLoadToken++;
     // 同一組天數就保留舊圖：某天這次沒畫成，仍顯示原本那張（可再按「重畫這一天」）
-    const sameDays = posterDays && String(posterDays.list) === String(dayList);
+    // 直橫不同（例如桌機打開的是手機畫的直式）就不能混在同一組：另起一組，直式那組仍留在行程文件上
+    const wide = !isMobileLayout();
+    const sameDays = posterDays && String(posterDays.list) === String(dayList) && posterDays.wide === wide;
     if (sameDays) posterStashActive();
-    posterDays = { list: dayList, active: onlyDay || (sameDays ? posterDays.active : dayList[0]), items: sameDays ? posterDays.items : {} };
+    posterDays = { list: dayList, active: onlyDay || (sameDays ? posterDays.active : dayList[0]), wide, items: sameDays ? posterDays.items : {} };
     posterLoadDay(posterDays.active);
     posterDaysUserPicked = !!onlyDay;
     posterTripId = tripId;
@@ -4924,7 +4932,7 @@
         }
         if (currentItineraryId !== tripId || !posterDays) return;
         posterLoadDay(posterDays.active);
-        savePosterDaysToTrip().catch((e) => console.warn('[互動插圖] 寫回行程失敗：', e));
+        (posterDays.wide ? savePosterDaysWideToTrip : savePosterDaysToTrip)().catch((e) => console.warn('[互動插圖] 寫回行程失敗：', e));
       }
       if (failed.length) window.alert(`有 ${failed.length} 天的插圖生成失敗，可以稍後按「重畫這一天」：\n${failed.join('\n')}`);
     } finally {
@@ -4971,6 +4979,58 @@
           .catch((err) => console.warn('[互動插圖] 替 App 找站框失敗：', err && err.code ? err.code : err));
       }
     }
+  }
+
+  // ── 桌機橫式插圖：存 imageWide／imageDaysWide，不動手機版與 App 用的 imageUrl／imageDays ──
+  // 行程還沒有任何插圖時，順便照舊寫 imageUrl，App 和手機版至少有一張可看。
+  function posterWideRecord(imageUrl, boxes) {
+    return { imageUrl, imageStopBoxes: { imageUrl, model: 'web-layout', at: Date.now(), boxes } };
+  }
+
+  async function posterTripHasPortrait(ref) {
+    try {
+      const snap = await ref.get();
+      return !!(snap.exists && /^https:\/\//.test(String((snap.data() || {}).imageUrl || '')));
+    } catch (_e) { return true; } // 讀不到就當作有，寧可不寫也不要蓋掉 App 的圖
+  }
+
+  async function savePosterWideToTrip(imageUrl) {
+    const tripId = posterTripId;
+    const boxesData = posterStopBoxes && posterStopBoxes.raw;
+    if (!imageUrl || !tripId || tripId !== currentItineraryId || !boxesData) return;
+    posterStopBoxes.imageUrl = imageUrl;
+    if (!posterCanWriteTrip()) return;
+    const ref = firebaseDb.collection('micro_trips').doc(tripId);
+    const hasPortrait = await posterTripHasPortrait(ref);
+    try {
+      await ref.set({ imageWide: posterWideRecord(imageUrl, boxesData), imageDaysWide: firebase.firestore.FieldValue.delete() }, { merge: true });
+    } catch (e) {
+      console.warn('[互動插圖] 無法寫回橫式插圖：', e && e.code ? e.code : e);
+    }
+    if (!hasPortrait) await savePosterLayoutToTrip(imageUrl);
+  }
+
+  async function savePosterDaysWideToTrip() {
+    const tripId = posterTripId;
+    if (!posterDays || !tripId || tripId !== currentItineraryId || !posterCanWriteTrip()) return;
+    posterStashActive();
+    const imageDaysWide = posterDays.list.map((day) => {
+      const item = posterDays.items[day];
+      if (!item || !item.uploadUrl || !item.stopBoxes || !item.stopBoxes.raw) return null;
+      return { day, ...posterWideRecord(item.uploadUrl, item.stopBoxes.raw) };
+    }).filter(Boolean);
+    if (!imageDaysWide.length) return;
+    const first = imageDaysWide.find((d) => d.day === posterDays.list[0]);
+    const ref = firebaseDb.collection('micro_trips').doc(tripId);
+    const hasPortrait = await posterTripHasPortrait(ref);
+    const payload = { imageDaysWide };
+    if (first) payload.imageWide = { imageUrl: first.imageUrl, imageStopBoxes: first.imageStopBoxes };
+    try {
+      await ref.set(payload, { merge: true });
+    } catch (e) {
+      console.warn('[互動插圖] 無法寫回每日橫式插圖：', e && e.code ? e.code : e);
+    }
+    if (!hasPortrait) await savePosterDaysToTrip();
   }
 
   function posterSketchPart(sketchDataUrl) {
@@ -5126,8 +5186,9 @@
     }
     // 上傳完成 → 寫回行程文件（App 與旅伴才看得到）並找站框，讓插圖可以點
     if (attach && posterImageUploadUrl) {
-      const save = posterDays ? savePosterDaysToTrip
-        : (posterStopBoxes && posterStopBoxes.composed) ? savePosterLayoutToTrip : attachPosterToTrip;
+      const composed = posterStopBoxes && posterStopBoxes.composed;
+      const save = posterDays ? (posterDays.wide ? savePosterDaysWideToTrip : savePosterDaysToTrip)
+        : composed ? (posterWide ? savePosterWideToTrip : savePosterLayoutToTrip) : attachPosterToTrip;
       save(posterImageUploadUrl).catch((e) => console.warn('[互動插圖] 寫回行程失敗：', e));
     }
   }
@@ -5521,6 +5582,7 @@
       posterTripId = null;
       posterDays = null;
       posterDaysUserPicked = false;
+      posterWide = null;
     }
     if (posterImageGenerating || posterGeneratedImageBase64 || posterDays) return;
     const user = firebaseAuth && firebaseAuth.currentUser;
@@ -5532,8 +5594,11 @@
       data = snap.exists ? (snap.data() || {}) : null;
     } catch (_e) { return; } // 讀不到（未上雲／無權限）就維持原本的「生成插圖」畫面
     if (token !== posterLoadToken || tripId !== currentItineraryId || posterGeneratedImageBase64) return;
+    // 桌機：有橫式就用橫式；沒有才退回直式（畫面上會出現「生成桌機橫式版」）
+    if (data && !isMobileLayout() && loadPosterWideFromDoc(data, tripId)) { renderTravelTools(); return; }
     const imageUrl = data && typeof data.imageUrl === 'string' ? data.imageUrl : '';
     if (!/^https:\/\//.test(imageUrl)) return;
+    posterWide = null;
     if (loadPosterDaysFromDoc(data, imageUrl, tripId)) { renderTravelTools(); return; }
     posterTripId = tripId;
     posterGeneratedImageBase64 = imageUrl;
@@ -5554,8 +5619,8 @@
 
   // 多日行程的 imageDays。第 1 天的圖若和 imageUrl 不同，代表之後有人（例如 App）重畫了單張插圖：
   // 以最後畫的為準，退回單張顯示。
-  function loadPosterDaysFromDoc(data, imageUrl, tripId) {
-    const entries = Array.isArray(data.imageDays) ? data.imageDays.filter((d) => d && Number(d.day) > 0 && /^https:\/\//.test(String(d.imageUrl || ''))) : [];
+  function loadPosterDaysFromDoc(data, imageUrl, tripId, field = 'imageDays') {
+    const entries = Array.isArray(data[field]) ? data[field].filter((d) => d && Number(d.day) > 0 && /^https:\/\//.test(String(d.imageUrl || ''))) : [];
     if (entries.length < 1) return false;
     const list = [...new Set(replanStops.map((s) => Number(s.dayIndex) || 1).concat(entries.map((d) => Number(d.day))))].sort((a, b) => a - b);
     if (list.length < 2) return false;
@@ -5574,9 +5639,47 @@
       };
     });
     posterTripId = tripId;
-    posterDays = { list, active: list[0], items };
+    posterDays = { list, active: list[0], wide: field === 'imageDaysWide' ? true : null, items };
     posterLoadDay(list[0]);
     return true;
+  }
+
+  function loadPosterWideFromDoc(data, tripId) {
+    const wide = data.imageWide;
+    const imageUrl = wide && typeof wide.imageUrl === 'string' ? wide.imageUrl : '';
+    if (!/^https:\/\//.test(imageUrl)) return false;
+    if (loadPosterDaysFromDoc(data, imageUrl, tripId, 'imageDaysWide')) return true;
+    const saved = wide.imageStopBoxes;
+    const raw = saved && saved.imageUrl === imageUrl && Array.isArray(saved.boxes) ? saved.boxes.filter(posterBoxIsValid) : [];
+    posterTripId = tripId;
+    posterWide = true;
+    posterGeneratedImageBase64 = imageUrl;
+    posterImageUploadUrl = imageUrl;
+    posterModelLabel = '這趟行程目前的插圖（桌機橫式）';
+    posterStopsSnapshot = [];
+    posterStopBoxes = raw.length ? { imageUrl, boxes: normalizePosterBoxes(raw), raw, composed: true } : null;
+    posterBoxesStatus = raw.length ? 'ready' : 'unavailable';
+    posterBoxesNote = raw.length ? '' : '這張插圖沒有站點資料，可以重畫一張。';
+    return true;
+  }
+
+  // 行程文件上的 imageUrl 不知道是直是橫（舊行程可能是桌機畫的橫式）：載入圖片量一次
+  function posterShownIsWide() {
+    const known = posterDays ? posterDays.wide : posterWide;
+    if (known === true || known === false) return known;
+    const src = posterGeneratedImageBase64;
+    if (!src || posterOrientationProbe === src) return null;
+    posterOrientationProbe = src;
+    const img = new Image();
+    img.onload = () => {
+      if (posterGeneratedImageBase64 !== src) return;
+      const isWide = img.naturalWidth > img.naturalHeight;
+      if (posterDays) posterDays.wide = isWide; else posterWide = isWide;
+      renderTravelTools();
+      renderPosterMapView();
+    };
+    img.src = src;
+    return null;
   }
 
   // 站框 → 目前行程的站（先比 stopId，再比站名；插圖畫完後行程可能又被改過）
@@ -5858,12 +5961,11 @@
       if (posterDays.list.includes(today) && posterDays.active !== today) setPosterActiveDay(today, true);
     }
     const has = posterAvailableForMap();
-    // 手機版和 App 一樣，插圖只從行程頁的插圖卡進入 → 地圖區不放切換鈕
-    const mobile = isMobileLayout();
+    // 手機版和桌機一樣：在地圖頁用「地圖／插圖」切換鈕（不再用行程頁的插圖卡點開全螢幕）
     const hasTrip = replanStops.length > 0;
-    if (!hasTrip || mobile) plannerMapMode = 'google';
+    if (!hasTrip) plannerMapMode = 'google';
     const on = plannerMapMode === 'poster';
-    toggle.hidden = !hasTrip || mobile;
+    toggle.hidden = !hasTrip;
     [['mapModeGoogleBtn', !on], ['mapModePosterBtn', on]].forEach(([id, active]) => {
       const btn = document.getElementById(id);
       if (!btn) return;
@@ -5883,7 +5985,8 @@
   function renderPosterTripCard() {
     const host = document.getElementById('posterTripCard');
     if (!host) return;
-    const show = isMobileLayout() && replanStops.length > 0;
+    // 手機版改在地圖頁用切換鈕看插圖（renderPosterMapView），行程頁不再放插圖卡
+    const show = false;
     host.hidden = !show;
     if (!show) { host.innerHTML = ''; return; }
     if (!posterAvailableForMap()) {
@@ -6204,6 +6307,9 @@
         <div class="poster-map-foot">
           <span>${escapeHtml(posterModelLabel)}</span>
           <span class="poster-map-foot-actions">
+            ${(ctx === 'tools' || ctx === 'map') && !isMobileLayout() && posterShownIsWide() === false
+              ? `<button type="button" class="byok-link-btn" onclick="generateItineraryImage()" ${posterImageGenerating ? 'disabled' : ''}
+                   title="這張是手機版畫的直式插圖。另畫一張橫式給桌機用，手機版與 App 仍保留直式。">🖥️ 生成桌機橫式版</button>` : ''}
             ${posterDays && ctx === 'tools' ? `<button type="button" class="byok-link-btn" onclick="generateItineraryImage(${posterDays.active})" ${posterImageGenerating ? 'disabled' : ''}>🎨 重畫第 ${posterDays.active} 天</button>` : ''}
             <button type="button" class="byok-link-btn" onclick="openPosterViewer()">🔍 全螢幕檢視</button>
           </span>
