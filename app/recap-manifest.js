@@ -50,6 +50,42 @@
     return options[key] === undefined ? defaultValue : options[key];
   }
 
+  // 後端（server/recap-jobs.js MAX_TOTAL_MS）超過 60s 直接拒絕；留一點餘裕給浮點誤差
+  var MAX_TOTAL_MS = 59800;
+  var MIN_DRIVE_SEGMENT_MS = 600;
+  var MIN_PHOTO_HOLD_MS = 1500;
+
+  // 站多、照片多的慢節奏樣板會超過 60s：先壓開車段（換日轉場不動），壓到每段下限還不夠再壓照片停留。
+  // 原地改 segments[].travelMs 與 holdMs。
+  function fitWithinMaxTotal(segments, holdMs, fixedMs) {
+    var sum = function (arr) { return arr.reduce(function (a, b) { return a + b; }, 0); };
+    var drive = segments.filter(function (s) { return !s.dayBreak; });
+    var driveMs = sum(drive.map(function (s) { return s.travelMs; }));
+    var breakMs = sum(segments.filter(function (s) { return s.dayBreak; }).map(function (s) { return s.travelMs; }));
+    var holdTotal = sum(holdMs);
+    var over = fixedMs + breakMs + driveMs + holdTotal - MAX_TOTAL_MS;
+    if (over <= 0) return;
+    var driveFloor = drive.reduce(function (a, s) { return a + Math.min(s.travelMs, MIN_DRIVE_SEGMENT_MS); }, 0);
+    var newDrive = Math.max(driveFloor, driveMs - over);
+    if (driveMs > driveFloor) {
+      // 超出下限的部分等比例縮，短段不會被壓到比下限還短
+      var k = (newDrive - driveFloor) / (driveMs - driveFloor);
+      drive.forEach(function (s) {
+        var floor = Math.min(s.travelMs, MIN_DRIVE_SEGMENT_MS);
+        s.travelMs = floor + (s.travelMs - floor) * k;
+      });
+    }
+    over -= driveMs - newDrive;
+    if (over <= 0) return;
+    var holdFloor = holdMs.reduce(function (a, h) { return a + Math.min(h, MIN_PHOTO_HOLD_MS); }, 0);
+    if (holdTotal <= holdFloor) return;
+    var kh = Math.max(0, (holdTotal - over - holdFloor) / (holdTotal - holdFloor));
+    for (var i = 0; i < holdMs.length; i += 1) {
+      var hf = Math.min(holdMs[i], MIN_PHOTO_HOLD_MS);
+      holdMs[i] = hf + (holdMs[i] - hf) * kh;
+    }
+  }
+
   // 片長目標依真實素材數分四級（樣板決定每級的秒數）；素材不足就縮短，不用假畫面補長度
   function getAdaptiveSettings(mediaCount, coverMs, statsMs, template) {
     var tier = mediaCount === 0 ? '0' : (mediaCount <= 2 ? '1-2' : (mediaCount <= 5 ? '3-5' : '6+'));
@@ -578,6 +614,7 @@
       if (mediaSet[i] && holdIn && isFinite(Number(holdIn[i])) && Number(holdIn[i]) > 0) h = Number(holdIn[i]);
       holdMs.push(h);
     }
+    fitWithinMaxTotal(segments, holdMs, coverMs + statsMs);
 
     var media = [];
     var dayBreaks = [];
@@ -607,7 +644,7 @@
     var segmentCfg = template.segment || {};
     return {
       version: 2,
-      template: { id: template.id, label: template.label, segmentEase: segmentCfg.ease === 'linear' ? 'linear' : 'smooth' },
+      template: { id: template.id, label: template.label, segmentEase: segmentCfg.ease === 'linear' ? 'linear' : 'smooth', frame: template.frame === 'letterbox' ? 'letterbox' : 'full' },
       // 開場：photoCut 時前 photoMs 放實景照片（取第一張有照片的站），硬切到地圖再停 beatMs
       cover: usePhotoCut
         ? { style: 'photoCut', photoStopIndex: mediaIndicesIn[0], photoMs: Number(coverCfg.photoMs) || 1430, beatMs: Number(coverCfg.beatMs) || 320 }

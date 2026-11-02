@@ -107,7 +107,10 @@ function badReq(msg) { const e = new Error(msg); e.status = 400; return e; }
 // 重新驗證：只採用對得回這趟行程的片段、時長夾在範圍內，照片只能用這次一起送來的那幾張。
 // extra：{ lengthMode, look }（第 2 版請求欄位；舊請求沒帶就用預設）
 function resolveManifestOptions(trip, photos, rawTemplateId, rawTimeline, extra) {
-  const templateId = TEMPLATES.hasTemplate(rawTemplateId) ? String(rawTemplateId) : TEMPLATES.DEFAULT_ID;
+  // 下架的樣板（brisk）照取代它的樣板渲染；它帶來的時間軸是舊格式，丟掉改用推薦版
+  const aliased = TEMPLATES.aliasTarget(rawTemplateId);
+  if (aliased) rawTimeline = null;
+  const templateId = aliased || (TEMPLATES.hasTemplate(rawTemplateId) ? String(rawTemplateId) : TEMPLATES.DEFAULT_ID);
   const more = extra || {};
   const lengthMode = more.lengthMode == null ? null : TEMPLATES.normalizeLengthMode(more.lengthMode);
   const heroIdx = trip.highlightStopId ? trip.stops.findIndex((st) => st.stopId === trip.highlightStopId) : -1;

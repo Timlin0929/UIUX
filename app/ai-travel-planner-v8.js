@@ -9363,9 +9363,9 @@
   // 樣板／時間軸模組只在打開「回顧短片」時才載入：頁面初次載入已有 70 多個檔案，
   // 再多幾支 script 容易撞到 nginx 的速率限制（503）。載入失敗時影片照樣能產生（後端用標準樣板）。
   const RECAP_MODULES = [
-    ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261101-reels1'],
-    ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261101-reels1'],
-    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261102-reels2']
+    ['WAI_RECAP_TEMPLATES', './recap-templates.js?v=20261102-film1'],
+    ['WAI_RECAP_MANIFEST', './recap-manifest.js?v=20261102-film1'],
+    ['WAI_RECAP_TIMELINE', './recap-timeline.js?v=20261102-film1']
   ];
   let recapModulesPromise = null;
 

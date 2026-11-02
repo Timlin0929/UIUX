@@ -7,6 +7,7 @@
  * 時間單位一律 ms。targetMs 依真實素材數分四級（計劃 6.1：素材不足就縮短影片，不用假畫面補長度）。
  * segment：站間路線的時間分配——依距離比例，但每段至少 minMs、最多佔全部路線時間的 maxShare，
  *          避免 200 公尺的短程一閃而過、一段長途吃掉整支影片。
+ * frame：'letterbox' ＝畫面加上下黑邊（電影感）；沒寫＝滿版。
  * cover.style：'title' ＝台灣全景俯衝＋標題卡（原本的開場）；
  *              'photoCut' ＝先放一張實景照片（photoMs），硬切到地圖、停半拍（beatMs）再開始畫路線
  *              （參考影片的結構，見 docs/travel-story/RECAP_VIDEO_TEMPLATE_HANDOFF.md）。沒有照片時退回 'title'。
@@ -29,6 +30,10 @@
 
   // 長度模式（A19）：all ＝放進全部照片、依秒數自動延長（上限 maxMs）；15 ＝固定 15 秒，放不下的照片站略過
   var LENGTH_MODES = ['all', '15'];
+
+  // 已下架的樣板 id → 取代它的樣板。快節奏（brisk）和 Reels 定位重疊，2026-11-02 併入 Reels；
+  // App 或舊網頁還可能送 brisk，照 Reels 渲染（它們的時間軸是第 1 版格式，後端會丟掉改用推薦版）。
+  var ALIASES = { brisk: 'reels' };
 
   var TEMPLATES = [
     {
@@ -74,20 +79,6 @@
       cover: { style: 'title' }
     },
     {
-      id: 'brisk',
-      label: '快節奏',
-      desc: '更短、更緊湊，適合 Reels 與限時動態。',
-      coverMs: 2200,
-      statsMs: 2200,
-      dwellMs: 120,
-      photoMs: 1800,
-      dayTransitionMs: 600,
-      targetMs: { '0': 11000, '1-2': 13500, '3-5': 17000, '6+': 24000 },
-      minRouteMs: 4500,
-      segment: { minMs: 700, maxShare: 0.4, ease: 'smooth' },
-      cover: { style: 'title' }
-    },
-    {
       id: 'leisurely',
       label: '慢遊',
       desc: '節奏放慢，照片停留更久，適合多日長途。',
@@ -103,17 +94,19 @@
     },
     {
       id: 'cinematic',
-      label: '電影感開場',
-      desc: '先放一張實景照片，硬切到地圖、停半拍再開始畫路線。',
+      label: '電影感',
+      desc: '寬銀幕黑邊、照片滿版慢慢推近，用說故事的節奏走完這趟。',
       coverMs: 2600,
       statsMs: 2800,
       dwellMs: 200,
-      photoMs: 2400,
+      photoMs: 2800,
       dayTransitionMs: 700,
       targetMs: { '0': 14000, '1-2': 17500, '3-5': 22500, '6+': 31000 },
       minRouteMs: 6000,
       segment: { minMs: 900, maxShare: 0.45, ease: 'linear' },
-      cover: { style: 'photoCut', photoMs: 1430, beatMs: 320 }
+      // frame 'letterbox'：上下黑邊，可見畫面 1:1；開場照片用 2.39:1 細帶，硬切到地圖後黑邊往外推開（beatMs）
+      frame: 'letterbox',
+      cover: { style: 'photoCut', photoMs: 2000, beatMs: 900 }
     }
   ];
 
@@ -124,6 +117,7 @@
   // 找不到的 id 一律退回標準樣板（前端送來的值不可信）
   function getTemplate(id) {
     var key = String(id || DEFAULT_ID);
+    if (Object.prototype.hasOwnProperty.call(ALIASES, key)) key = ALIASES[key];
     var i;
     for (i = 0; i < TEMPLATES.length; i += 1) {
       if (TEMPLATES[i].id === key) return clone(TEMPLATES[i]);
@@ -139,6 +133,12 @@
     return TEMPLATES.some(function (t) { return t.id === String(id || ''); });
   }
 
+  // 下架樣板 id 的取代者；不是下架的 id 回 null
+  function aliasTarget(id) {
+    var key = String(id || '');
+    return Object.prototype.hasOwnProperty.call(ALIASES, key) ? ALIASES[key] : null;
+  }
+
   function normalizeLengthMode(value) {
     var v = String(value == null ? '' : value);
     return LENGTH_MODES.indexOf(v) >= 0 ? v : 'all';
@@ -151,6 +151,7 @@
     normalizeLengthMode: normalizeLengthMode,
     getTemplate: getTemplate,
     listTemplates: listTemplates,
+    aliasTarget: aliasTarget,
     hasTemplate: hasTemplate
   };
 }));

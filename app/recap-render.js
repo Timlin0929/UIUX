@@ -33,6 +33,7 @@
   function ease(t) { return t * t * (3 - 2 * t); }
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
   function lerp(a, b, t) { return a + (b - a) * t; }
+  function isLetterbox(m) { return !!(m && m.template && m.template.frame === 'letterbox'); }
   function lerpAng(a, b, t) { var d = b - a; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return a + d * t; }
 
   // ── 世界投影：lat/lng → 世界座標（度空間，北為上）──
@@ -78,7 +79,9 @@
     var by0 = Math.min.apply(null, ys), by1 = Math.max.apply(null, ys);
     var spanX = (bx1 - bx0) || 1e-6, spanY = (by1 - by0) || 1e-6;
     var center = { x: (bx0 + bx1) / 2, y: (by0 + by1) / 2 };
-    var fitScale = Math.min(viewport.w / spanX, viewport.h / spanY) * 0.82;
+    // 電影感（letterbox）只露出中間 1:1 那塊，路線全景要框在那塊裡
+    var fitH = isLetterbox(manifest) ? Math.min(viewport.h, viewport.w) : viewport.h;
+    var fitScale = Math.min(viewport.w / spanX, fitH / spanY) * 0.82;
 
     // 台灣全島全景（開頭俯衝的起點）：用與路線相同的投影/cosLat，鏡頭才對得上。
     var TW = { minLat: 21.9, maxLat: 25.3, minLng: 120.0, maxLng: 122.0 };
@@ -421,18 +424,19 @@
       } else { ctx.fillStyle = 'rgba(255,255,255,.32)'; ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 7); ctx.fill(); }
     });
   }
-  function drawVehicle(ctx, carScreen, ang, mode, worldPts, carIdxFloat) {
-    var col = carColors(mode);
-    var isWalk = (mode || '').toLowerCase().indexOf('walk') >= 0;
-    // 落地陰影：置中（只往下一點點），避免車＋影整團偏右、看起來離開路線
+  // 路線上的移動標記：不分交通方式，一律畫導航箭頭（尖端朝行進方向）。交通方式只留在標題列與攻略卡的文字。
+  function drawVehicle(ctx, carScreen, ang) {
     ctx.save();
-    if (isWalk) { ctx.translate(carScreen.x, carScreen.y + 20); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 0, 18, 8, 0, 0, 7); ctx.fill(); }
-    else { ctx.translate(carScreen.x, carScreen.y + 3); ctx.rotate(ang); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 0, 50, 22, 0, 0, 7); ctx.fill(); }
+    ctx.translate(carScreen.x, carScreen.y);
+    ctx.rotate(ang);
+    ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 16; ctx.shadowOffsetY = 4;
+    ctx.beginPath();
+    ctx.moveTo(30, 0); ctx.lineTo(-20, -22); ctx.lineTo(-9, 0); ctx.lineTo(-20, 22); ctx.closePath();
+    ctx.lineJoin = 'round';
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.lineWidth = 6; ctx.strokeStyle = '#1f8f6a'; ctx.stroke();
     ctx.restore();
-    ctx.save(); ctx.translate(carScreen.x, carScreen.y);
-    if (isWalk) { if (Math.cos(ang) < 0) ctx.scale(-1, 1); }
-    else ctx.rotate(ang);
-    drawShape(ctx, mode, col); ctx.restore();
   }
 
   function drawCoverPhoto(ctx, img, m, W, H, progress) {
@@ -720,10 +724,155 @@
     drawRouteProgress(ctx, world, cam, car.progLen, carScreen);
     drawStops(ctx, world.points.map(function (q) { return cam.toScreen(q); }), car.reached);
     var mode = (m.stops[Math.min(car.heading, m.stops.length - 1)].mode) || m.transportMode;
-    drawVehicle(ctx, carScreen, car.ang, mode);
+    drawVehicle(ctx, carScreen, car.ang);
     // 經過的站名依序閃過：顯示正要抵達（或聚焦中）的那一站
     stopChip(ctx, m, carScreen, ph.type === 'focus' ? ph.stopIndex : (car.dwelling ? car.reached : car.heading), W);
     header(ctx, m, mode);
+  }
+
+  // ════ frame 'letterbox'（電影感）：上下黑邊、可見畫面 1:1；開場照片在 2.39:1 細帶裡，切到地圖後黑邊推開 ════
+  // 文字只放在上黑邊（IG 帳號列以下）與畫面內下緣，下黑邊會被 IG 說明文字蓋住所以不放字。
+
+  function withSpacing(ctx, px) { if ('letterSpacing' in ctx) ctx.letterSpacing = px + 'px'; }
+
+  function filmBandTop(H, band) { return (H - band) / 2; }
+
+  function drawFilmBars(ctx, W, H, band) {
+    var top = filmBandTop(H, band);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, Math.ceil(top));
+    ctx.fillRect(0, Math.floor(top + band), W, H - Math.floor(top + band));
+  }
+
+  function drawFilmVignette(ctx, W, H, band) {
+    var cy = H / 2;
+    var g = ctx.createRadialGradient(W / 2, cy, W * 0.32, W / 2, cy, W * 0.86);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.55)');
+    ctx.fillStyle = g; ctx.fillRect(0, filmBandTop(H, band), W, band);
+  }
+
+  // 照片滿版填滿畫面那塊、緩慢推近；edge>0 時頭尾淡入淡出（到站照片），0＝不淡（開場照片，硬切）
+  function drawFilmPhoto(ctx, img, W, H, band, progress, edge) {
+    var top = filmBandTop(H, band);
+    var fade = edge > 0 ? clamp(Math.min(progress / edge, (1 - progress) / edge), 0, 1) : 1;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, top, W, band); ctx.clip();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, top, W, band);
+    var z = 1.02 + progress * 0.1;
+    var s = Math.max(W / img.width, band / img.height) * z;
+    var dw = img.width * s, dh = img.height * s;
+    ctx.drawImage(img, (W - dw) / 2, top + (band - dh) / 2 - progress * 24, dw, dh);
+    ctx.restore();
+    return fade;
+  }
+
+  function drawFilmSubtitle(ctx, text, W, H, band, a) {
+    if (!text || a <= 0) return;
+    ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+    withSpacing(ctx, 4);
+    ctx.font = '600 48px ' + SANS; ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(0,0,0,.85)'; ctx.shadowBlur = 14;
+    ctx.fillText(text, W / 2, filmBandTop(H, band) + band - 64, W - 160);
+    ctx.restore();
+  }
+
+  // 上黑邊：行程名＋地區・日期・交通方式（標題列的「🚗 開車」併在這行）
+  function drawFilmTopBar(ctx, m, W, H, band, mode, a) {
+    if (a <= 0) return;
+    var MODE_ICON = { taxi: '🚕', car: '🚗', scooter: '🛵', walk: '🚶', ferry: '⛴' };
+    var MODE_LABEL = { taxi: '計程車', car: '開車', scooter: '機車', walk: '步行', ferry: '渡輪' };
+    var mm = (mode || m.transportMode || 'car').toLowerCase();
+    var top = filmBandTop(H, band);
+    ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+    withSpacing(ctx, 8);
+    ctx.fillStyle = 'rgba(255,255,255,.92)'; ctx.font = '700 46px ' + SANS;
+    ctx.fillText(m.trip.title, W / 2, top - 98, W - 160);
+    withSpacing(ctx, 3);
+    var meta = [m.trip.region, m.trip.dateLabel, (MODE_ICON[mm] || '🚗') + ' ' + (MODE_LABEL[mm] || '交通')].filter(Boolean).join('  ·  ');
+    ctx.fillStyle = '#9fe3c8'; ctx.font = '500 32px ' + SANS + ',' + EMOJI;
+    ctx.fillText(meta, W / 2, top - 44, W - 160);
+    ctx.restore();
+  }
+
+  // 開場片名：放在 2.39 細帶下方的黑邊（IG 下方安全區之上）
+  function drawFilmOpeningTitle(ctx, m, W, H, band, a) {
+    if (a <= 0) return;
+    var top = filmBandTop(H, band);
+    ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+    withSpacing(ctx, 10);
+    ctx.fillStyle = 'rgba(159,227,200,.85)'; ctx.font = '500 34px ' + SANS;
+    ctx.fillText('旅 程 回 顧', W / 2, top - 56);
+    withSpacing(ctx, 12);
+    ctx.fillStyle = '#fff'; ctx.font = '800 84px ' + SANS;
+    ctx.fillText(m.trip.title, W / 2, top + band + 116, W - 120);
+    withSpacing(ctx, 4);
+    var sub = [m.trip.region, m.trip.dateLabel].filter(Boolean).join('  ·  ');
+    ctx.fillStyle = '#9fe3c8'; ctx.font = '500 38px ' + SANS;
+    if (sub) ctx.fillText(sub, W / 2, top + band + 182, W - 120);
+    ctx.restore();
+  }
+
+  function stopSubtitle(m, idx) {
+    var i = Math.min(idx, m.stops.length - 1);
+    return i > 0 ? '第 ' + i + ' 站 ｜ ' + m.stops[i].name : m.stops[0].name;
+  }
+
+  function renderFilmFrame(ctx, m, world, timing, tMs, viewport, media, basemap) {
+    var W = viewport.w, H = viewport.h, tl = m.timeline;
+    var WIDE = Math.round(W / 2.39), SQUARE = Math.min(W, H);
+    var cover = m.cover || {};
+    var car = posAtTime(m, world, timing, tMs);
+    var cam = cameraAt(m, world, timing, car, tMs, viewport);
+    drawBg(ctx, W, H, world, cam, basemap);
+    var screenPts = world.points.map(function (p) { return cam.toScreen(p); });
+    var carScreen = cam.toScreen({ x: car.x, y: car.y });
+    var coverImg = (cover.style === 'photoCut' && media && media.images) ? media.images[cover.photoStopIndex] : null;
+    var band = SQUARE, topA = 1, sub = '', subA = 0;
+
+    if (tMs < tl.coverMs) {
+      // 開場：照片（2.39 細帶）→ 硬切地圖 → 黑邊推開到 1:1。沒有照片時地圖停在細帶裡放片名，最後 40% 推開
+      var openFrom = coverImg ? cover.photoMs : tl.coverMs * 0.6;
+      var k = ease(clamp((tMs - openFrom) / Math.max(1, tl.coverMs - openFrom), 0, 1));
+      band = lerp(WIDE, SQUARE, k);
+      topA = k;
+      drawRouteBase(ctx, world, cam);
+      if (coverImg && tMs < cover.photoMs) drawFilmPhoto(ctx, coverImg, W, H, band, tMs / Math.max(1, cover.photoMs), 0);
+      var ta = tMs < openFrom ? clamp(Math.min(tMs / 300, (openFrom - tMs) / 200), 0, 1) : 0;
+      drawFilmVignette(ctx, W, H, band);
+      drawFilmBars(ctx, W, H, band);
+      drawFilmOpeningTitle(ctx, m, W, H, band, ta);
+      drawFilmTopBar(ctx, m, W, H, band, m.transportMode, topA);
+    } else if (tMs < timing.routeEnd) {
+      drawRouteBase(ctx, world, cam);
+      var mode = m.transportMode;
+      if (car.dayBreak) {
+        drawRouteProgress(ctx, world, cam, car.progLen, null);
+        drawStops(ctx, screenPts, car.reached);
+        drawDayCard(ctx, W, H, car.day, car.breakProgress);
+      } else {
+        drawRouteProgress(ctx, world, cam, car.progLen, carScreen);
+        drawStops(ctx, screenPts, car.reached);
+        drawVehicle(ctx, carScreen, car.ang);
+        mode = (m.stops[Math.min(car.heading, m.stops.length - 1)].mode) || m.transportMode;
+        var mediaImg = (car.dwelling && media && media.byStop[car.reached]) ? media.images[car.reached] : null;
+        sub = stopSubtitle(m, car.dwelling ? car.reached : car.heading);
+        subA = 1;
+        if (mediaImg) drawFilmPhoto(ctx, mediaImg, W, H, band, car.pulse, 0.16);
+      }
+      drawFilmVignette(ctx, W, H, band);
+      drawFilmSubtitle(ctx, sub, W, H, band, subA);
+      drawFilmBars(ctx, W, H, band);
+      drawFilmTopBar(ctx, m, W, H, band, mode, 1);
+    } else {
+      drawRouteBase(ctx, world, cam);
+      drawRouteProgress(ctx, world, cam, world.fullLen, carScreen);
+      drawStops(ctx, screenPts, m.stops.length - 1);
+      statsCard(ctx, m, W, H, Math.min(1, (tMs - timing.routeEnd) / 500));
+      drawFilmBars(ctx, W, H, band);
+    }
+    drawCaption(ctx, m, W, H, tMs);
+    drawAttribution(ctx, W, H, basemap);
   }
 
   // ── 主入口：對某時刻畫一整幀 ──
@@ -735,6 +884,7 @@
       drawAttribution(ctx, W, H, basemap);
       return;
     }
+    if (isLetterbox(m)) { renderFilmFrame(ctx, m, world, timing, tMs, viewport, media, basemap); return; }
     var car = posAtTime(m, world, timing, tMs);
     var cam = cameraAt(m, world, timing, car, tMs, viewport);
     drawBg(ctx, W, H, world, cam, basemap);   // 底圖需要鏡頭，故先算 car/cam
@@ -764,7 +914,7 @@
         drawRouteProgress(ctx, world, cam, car.progLen, carScreen);
         drawStops(ctx, screenPts, car.reached);
         var mode = (m.stops[Math.min(car.heading, m.stops.length - 1)].mode) || m.transportMode;
-        drawVehicle(ctx, carScreen, car.ang, mode);
+        drawVehicle(ctx, carScreen, car.ang);
         // 到站且該站有照片 → 顯示照片（Ken Burns），此時不畫站名卡（照片自帶標題）
         var mediaImg = (car.dwelling && media && media.byStop[car.reached]) ? media.images[car.reached] : null;
         if (mediaImg) {

@@ -20,7 +20,7 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function (MANIFEST) {
   'use strict';
 
-  // 第 1 版：標準／快節奏／慢遊／電影感開場；第 2 版：Reels（structure 'anchors'，IG 分享優化提案 A11）。
+  // 第 1 版：標準／慢遊／電影感開場（快節奏已併入 Reels）；第 2 版：Reels（structure 'anchors'，IG 分享優化提案 A11）。
   // 後端兩版都收；第 2 版擴充第 1 版：route 可跨站（viaStopIds）、photo 一站多張（assetRefs、hero）、新增 summary。
   var SCHEMA_VERSION = 1;
   var SCHEMA_VERSION_V2 = 2;
