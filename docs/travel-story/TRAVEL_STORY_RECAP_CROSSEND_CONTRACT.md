@@ -51,22 +51,29 @@
 **存放位置**：`micro_trips/{tripId}.routeGeometry`
 ```jsonc
 {
-  "sig": "stopId0|stopId1|...",        // 站點簽章（各站 stopId 依序 join；站序一變即失效）
-  "segments": [ [[lat,lng],[lat,lng],...], ... ],  // 每段一條折線（length = stops-1），每段最多約 120 點
+  "v": 2,
+  "sig": "stopId0|stopId1|...",       // 站點簽章（各站 stopId 依序 join；站序一變即失效）
+  "complete": true,                    // 每一段都是真實道路才寫；有任一段退回直線就不寫，下次重算
+  "segments": [ { "points": [lat, lng, lat, lng, ...] }, ... ],  // 每段一條折線（length = stops-1），每段最多約 120 點
   "updatedAt": 1690000000000
 }
 ```
+> **2026-11-02 改格式（v2）**：Firestore 不接受「陣列裡的陣列」，舊格式 `segments: [[[lat,lng],...]]` 一直寫不進去
+> （查過正式資料庫，沒有任何一趟行程存到 routeGeometry），所以兩端其實從沒共用到。現在每段改成
+> `{ points: [lat, lng, lat, lng, ...] }`；讀到後兩兩一組還原成 `[[lat,lng],...]` 再當 `routePoints` 送出（後端格式不變）。
+> 讀的時候只採用 `v === 2` 且 `complete === true` 的。
+
 **讀取（Web 與 App 相同流程）**：
 1. 算出目前 `sig`（`stops.map(s=>s.stopId).join('|')`）。
-2. 讀 `routeGeometry`；若 `sig` 相符且 `segments.length === stops-1` → 用它當本次 render 的 `routePoints`（跟著 `{trip,photos}` 一起 POST）。
-3. 沒有或 `sig` 不符 → 該端用自己的地圖服務現算 `overview_path`，**寫回** `routeGeometry`（同 `sig`），下次兩端都命中。
+2. 讀 `routeGeometry`；若 `v === 2`、`complete`、`sig` 相符且 `segments.length === stops-1` → 還原成 `[[lat,lng],...]` 後用它當本次 render 的 `routePoints`（跟著 `{trip,photos}` 一起 POST）。
+3. 沒有或 `sig` 不符 → 該端用自己的地圖服務現算 `overview_path`；**每段都成功**才寫回 `routeGeometry`（v2 格式、同 `sig`），下次兩端都命中。
 
 **寫入權限**：owner 直接可寫；editor 需 `firestore.rules` 的 editor 白名單含 `routeGeometry`（本 repo 已加，部署後生效）；viewer 只讀不寫。寫不進去不影響本次生成（該端仍以現算幾何出片）。
 
 > 一致性關鍵：只要 `routeGeometry` 已存在，Web 與 App **讀到並送出同一份 `segments`** → 後端產出**相同影片**。
 > 過渡期（快取尚未建立）某端先現算，另一端讀到後即對齊。
 
-**Web 端參考實作**：`ai-travel-planner-v8.js` 的 `resolveRecapRoutePoints`（讀快取→現算→寫回）、`recapRouteSig`、`computeRecapRoutePoints`。
+**Web 端參考實作**：`ai-travel-planner-v8.js` 的 `resolveRecapRoutePoints`（讀快取→現算→寫回）、`recapRouteSig`、`computeRecapRoutePoints`、`recapRouteToFirestore`／`recapRouteFromFirestore`（格式轉換）。
 
 ## 5. 客戶端各自要做的（僅這些，其餘都在後端）
 1. 蒐集本端行程 → 組出上面的 `trip`（欄位/單位對齊本文件）。

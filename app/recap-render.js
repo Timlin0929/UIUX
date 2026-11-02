@@ -67,6 +67,10 @@
       segStartLen.push(fullCum[fullCum.length - 1]);
     }
     var fullLen = fullCum.length ? fullCum[fullCum.length - 1] : 0;
+    // 只算「有畫出來」的長度（扣掉換日連線）：路線揭曉照這個長度走，跨天那段直接跳過，不會停在空白處
+    var fullVis = [0];
+    for (var v = 1; v < fullCum.length; v++) fullVis.push(fullVis[v - 1] + (fullBreak[v] ? 0 : fullCum[v] - fullCum[v - 1]));
+    var visLen = fullVis[fullVis.length - 1] || 0;
 
     // 邊界含所有折線點（讓鏡頭把整條路線框進來）
     var xs = full.map(function (p) { return p.x; }), ys = full.map(function (p) { return p.y; });
@@ -89,8 +93,20 @@
       points: pts, cosLat: cosLat, bounds: { x0: bx0, x1: bx1, y0: by0, y1: by1 },
       center: center, spanX: spanX, spanY: spanY,
       fitScale: fitScale, followScale: fitScale * 2.4, taiwan: taiwan,
-      full: full, fullCum: fullCum, fullBreak: fullBreak, fullLen: fullLen, segStartLen: segStartLen
+      full: full, fullCum: fullCum, fullBreak: fullBreak, fullLen: fullLen, segStartLen: segStartLen,
+      fullVis: fullVis, visLen: visLen
     };
+  }
+
+  // 「已畫出長度」→ 完整折線上的弧長（落在換日連線上時取連線的終點，也就是下一天第一站）
+  function visToFullLen(world, vis) {
+    var fv = world.fullVis, fc = world.fullCum;
+    if (!fv || fv.length < 2 || vis <= 0) return 0;
+    for (var j = 1; j < fv.length; j++) {
+      if (world.fullBreak[j]) continue;
+      if (vis <= fv[j]) return fc[j - 1] + (vis - fv[j - 1]);
+    }
+    return world.fullLen;
   }
 
   // 沿折線走 dist 弧長 → 該點座標與局部朝向
@@ -375,7 +391,8 @@
       var s = cam.toScreen(world.full[j]);
       br[j] ? ctx.moveTo(s.x, s.y) : ctx.lineTo(s.x, s.y);   // 跨天連線斷開，不畫
     }
-    if (carScreen) ctx.lineTo(carScreen.x, carScreen.y);
+    // 筆尖正落在跨天連線上（j 那條邊是斷開的）→ 不從前一站拉線過去
+    if (carScreen && !(j < world.full.length && br[j])) ctx.lineTo(carScreen.x, carScreen.y);
     ctx.stroke(); ctx.restore();
   }
   // 換日轉場卡：置中「Day N」，隨轉場進度淡入淡出
@@ -676,7 +693,7 @@
 
     if (ph.type === 'reveal') {
       // 路線揭曉：鏡頭看全景，路線由起點畫到終點
-      var revealLen = world.fullLen * ease(local);
+      var revealLen = visToFullLen(world, world.visLen * ease(local));
       var tip = polyAt(world.full, world.fullCum, revealLen);
       drawBg(ctx, W, H, world, fit, basemap);
       drawRouteBase(ctx, world, fit);

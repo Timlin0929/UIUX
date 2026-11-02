@@ -10075,19 +10075,35 @@
     });
   }
 
+  // 回 { segments, complete }：complete＝每一段都拿到真實道路（有任一段退回直線就是 false，不寫快取）
   async function computeRecapRoutePoints(trip) {
     const stops = (trip && trip.stops) || [];
     if (stops.length < 2) return null;
     const out = [];
-    let anyReal = false;
+    let realCount = 0;
     for (let i = 0; i < stops.length - 1; i++) {
       const a = stops[i], b = stops[i + 1];
       const pts = await recapRouteSegment(b.mode || a.mode || trip.transportMode,
         { lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
-      if (pts && pts.length >= 2) { out.push(pts); anyReal = true; }
+      if (pts && pts.length >= 2) { out.push(pts); realCount += 1; }
       else out.push([[a.lat, a.lng], [b.lat, b.lng]]);
     }
-    return anyReal ? out : null;
+    return realCount ? { segments: out, complete: realCount === out.length } : null;
+  }
+
+  // Firestore 不能存「陣列裡的陣列」，所以 routeGeometry 每段存成 { points: [lat, lng, lat, lng, ...] }（v: 2）。
+  function recapRouteToFirestore(segments) {
+    return segments.map((seg) => ({ points: seg.reduce((acc, p) => { acc.push(p[0], p[1]); return acc; }, []) }));
+  }
+  function recapRouteFromFirestore(rg, segCount) {
+    if (!rg || rg.v !== 2 || !rg.complete || !Array.isArray(rg.segments) || rg.segments.length !== segCount) return null;
+    const out = rg.segments.map((seg) => {
+      const flat = seg && Array.isArray(seg.points) ? seg.points : [];
+      const pts = [];
+      for (let i = 0; i + 1 < flat.length; i += 2) pts.push([Number(flat[i]), Number(flat[i + 1])]);
+      return pts;
+    });
+    return out.every((pts) => pts.length >= 2 && pts.every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))) ? out : null;
   }
 
   function recapRouteSig(trip) {
@@ -10109,20 +10125,21 @@
       try {
         const snap = await firebaseDb.collection('micro_trips').doc(tripId).get();
         const rg = snap.exists && snap.data() ? snap.data().routeGeometry : null;
-        if (rg && rg.sig === sig && Array.isArray(rg.segments) && rg.segments.length === segCount) {
-          return rg.segments; // 快取命中：兩端讀同一份幾何 → 影片一致，且不重算
-        }
+        const cached = rg && rg.sig === sig ? recapRouteFromFirestore(rg, segCount) : null;
+        if (cached) return cached; // 快取命中：兩端讀同一份幾何 → 影片一致，且不重算
       } catch (_e) {}
     }
-    const pts = await computeRecapRoutePoints(trip);
-    if (pts && tripId && typeof firebaseDb !== 'undefined' && firebaseDb) {
+    const res = await computeRecapRoutePoints(trip);
+    if (!res) return null;
+    const capped = res.segments.map((seg) => recapDownsample(seg, 120));
+    // 只快取「每段都是真實道路」的結果：有一段退回直線就不寫，下次再重算，免得直線被兩端一直沿用
+    if (res.complete && tripId && typeof firebaseDb !== 'undefined' && firebaseDb) {
       try {
-        const capped = pts.map((seg) => recapDownsample(seg, 120));
         await firebaseDb.collection('micro_trips').doc(tripId).set(
-          { routeGeometry: { sig: sig, segments: capped, updatedAt: Date.now() } }, { merge: true });
-      } catch (_e) { /* 無寫權限（viewer／editor 未部署規則）就跳過，不擋生成 */ }
+          { routeGeometry: { v: 2, sig: sig, complete: true, segments: recapRouteToFirestore(capped), updatedAt: Date.now() } }, { merge: true });
+      } catch (e) { console.warn('[recap] routeGeometry 寫入失敗（不擋生成）：', e && e.message); }
     }
-    return pts;
+    return capped;
   }
 
   // ── 產生物快取：把已完成的回顧短片 mp4 存進 IndexedDB（這台裝置），關工具/重整/重開瀏覽器
