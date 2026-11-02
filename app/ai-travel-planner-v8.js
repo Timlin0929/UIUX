@@ -9409,6 +9409,8 @@
     try { localStorage.setItem(RECAP_TEMPLATE_STORAGE, id); } catch (_e) {}
     const lengthSlot = document.getElementById('recapLengthSlot');
     if (lengthSlot) lengthSlot.outerHTML = renderRecapLengthPicker();
+    const picksSlot = document.getElementById('recapPicksSlot');
+    if (picksSlot) picksSlot.outerHTML = renderRecapPicksPicker();
     const box = document.getElementById('recapTimelinePreview');
     if (box) box.innerHTML = renderRecapTimelinePreview();
     document.querySelectorAll('.recap-template-option[data-template-id]').forEach((el) => {
@@ -9473,6 +9475,78 @@
       </fieldset>`;
   }
 
+  // 主角景點與封面（只有 Reels 這類「照片錨點」樣板吃）。每趟行程各存一份，以 stopId 記，站序變了也對得上。
+  // 主角：空字串＝讓後端挑照片最多的站。封面：空字串＝行程插圖；選了某站就用那站在 photos 裡的第一張。
+  function recapPicksKey() {
+    return 'wai_recap_picks_' + String(currentItineraryId || (memoryStudioState && memoryStudioState.tripId) || '');
+  }
+
+  function recapPicks() {
+    let v = memoryStudioState && memoryStudioState.recapPicks;
+    if (!v) { try { v = JSON.parse(localStorage.getItem(recapPicksKey()) || 'null'); } catch (_e) { v = null; } }
+    return { hero: String((v && v.hero) || ''), cover: String((v && v.cover) || '') };
+  }
+
+  // 封面站在 trip.stops 的位置；那站沒有照片就回 null（退回插圖封面，和 App 一樣不送）
+  function recapCoverStopIndex(trip, photos) {
+    const cover = recapPicks().cover;
+    if (!cover || !trip || !Array.isArray(trip.stops)) return null;
+    const idx = trip.stops.findIndex((st) => st.stopId === cover);
+    return idx >= 0 && (photos || []).some((p) => p.stopIndex === idx) ? idx : null;
+  }
+
+  function memorySetRecapPick(kind, value) {
+    if (!memoryStudioState || (kind !== 'hero' && kind !== 'cover')) return;
+    const picks = recapPicks();
+    const next = String(value || '');
+    if (picks[kind] === next) return;
+    const cur = memoryStudioState.recapTimeline;
+    if (cur && cur.edited && !window.confirm('換主角景點或封面會重新排推薦版本，你改過的秒數與字幕會清掉。確定要換嗎？')) {
+      const slot = document.getElementById('recapPicksSlot');
+      if (slot) slot.outerHTML = renderRecapPicksPicker();
+      return;
+    }
+    memoryStudioState.recapTimeline = null;
+    memoryStudioState.recapUndo = null;
+    try { localStorage.removeItem(recapTimelineStorageKey()); } catch (_e) {}
+    picks[kind] = next;
+    memoryStudioState.recapPicks = picks;
+    try { localStorage.setItem(recapPicksKey(), JSON.stringify(picks)); } catch (_e) {}
+    const box = document.getElementById('recapTimelinePreview');
+    if (box) box.innerHTML = renderRecapTimelinePreview();
+  }
+
+  function renderRecapPicksPicker() {
+    if (!recapTemplateUsesLength()) return '<div id="recapPicksSlot" hidden></div>';
+    const trip = collectRecapTrip();
+    if (trip.stops.length < 2) return '<div id="recapPicksSlot" hidden></div>';
+    const counts = trip.stops.map(() => 0);
+    recapPreviewPhotos(trip).forEach((p) => { if (counts[p.stopIndex] !== undefined) counts[p.stopIndex] += 1; });
+    const picks = recapPicks();
+    const opt = (value, label, selected) => `<option value="${escapeHtml(value)}"${selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+    const heroOpts = [opt('', '自動（照片最多的那站）', !trip.highlightStopId)]
+      .concat(trip.stops.map((st, i) => opt(st.stopId, `${st.name}（${counts[i]} 張照片）`, st.stopId === trip.highlightStopId)));
+    const coverIdx = recapCoverStopIndex(trip, recapPreviewPhotos(trip));
+    const coverOpts = [opt('', '行程插圖', coverIdx === null)]
+      .concat(trip.stops.map((st, i) => (counts[i] > 0 ? opt(st.stopId, `${st.name}的照片`, i === coverIdx) : '')));
+    const coverHint = picks.cover && coverIdx === null ? '<span class="recap-pick-hint">原本選的那站沒有照片了，先用行程插圖</span>' : '';
+    return `
+      <fieldset class="recap-template-field" id="recapPicksSlot">
+        <legend>主角與封面</legend>
+        <div class="recap-pick-grid">
+          <label class="recap-pick-row">
+            <span class="recap-template-desc">主角景點（停留最久、放最多照片）</span>
+            <select onchange="memorySetRecapPick('hero', this.value)">${heroOpts.join('')}</select>
+          </label>
+          <label class="recap-pick-row">
+            <span class="recap-template-desc">封面</span>
+            <select onchange="memorySetRecapPick('cover', this.value)">${coverOpts.join('')}</select>
+            ${coverHint}
+          </label>
+        </div>
+      </fieldset>`;
+  }
+
   function renderRecapTemplatePicker() {
     const lib = window.WAI_RECAP_TEMPLATES;
     if (!lib) return '<div id="recapTemplatePickerSlot" class="memory-title-hint">載入影片節奏選項…</div>';
@@ -9490,7 +9564,8 @@
             </label>`).join('')}
         </div>
       </fieldset>
-      ${renderRecapLengthPicker()}`;
+      ${renderRecapLengthPicker()}
+      ${renderRecapPicksPicker()}`;
   }
 
   // 每站的雲端照片（相簿順序）→ 送給後端的清單。上限與 App 相同：總共 24 張、每站 10 張、同網址只算一次；
@@ -9536,7 +9611,12 @@
   function buildRecapRecommendedTimeline(trip, photos) {
     const lib = window.WAI_RECAP_TIMELINE;
     if (!lib || !trip || trip.stops.length < 2) return null;
-    try { return lib.buildRecommendedTimeline(trip, { templateId: recapTemplateId(), photos, lengthMode: recapLengthMode() }); }
+    try {
+      return lib.buildRecommendedTimeline(trip, {
+        templateId: recapTemplateId(), photos, lengthMode: recapLengthMode(),
+        highlightStopId: trip.highlightStopId || '', coverStopIndex: recapCoverStopIndex(trip, photos)
+      });
+    }
     catch (e) { console.warn('[recap] 推薦時間軸計算失敗：', e && e.message); return null; }
   }
 
@@ -9548,7 +9628,8 @@
   }
 
   function recapTimelineBaseSig(trip, photos) {
-    return [recapTemplateId(), recapLengthMode(), (trip.stops || []).map((st) => st.stopId).join(','),
+    return [recapTemplateId(), recapLengthMode(), trip.highlightStopId || '', recapCoverStopIndex(trip, photos),
+      (trip.stops || []).map((st) => st.stopId).join(','),
       (photos || []).map((p) => `${p.stopIndex}:${p.photoId || p.url}`).join(',')].join('|');
   }
 
@@ -9881,10 +9962,23 @@
     catch (_e) { feedbackToast('複製失敗，請手動選取', 'orange'); }
   };
   // D4：分享時的說明文字＝自訂標題＋hashtag（貼到 IG/LINE 就有現成 caption）
+  // 與 App（RecapShare.kt）同一個格式，同一趟從兩端分享出去文字一樣。
+  // 連結一律放網頁首頁（不放共編邀請連結）；AI 想的 hashtag 去重後接在固定的後面。
   function recapShareCaption() {
-    var t = ((memoryStudioState && memoryStudioState.recapTitle) || '').trim();
-    var tags = ((memoryStudioState && memoryStudioState.recapHashtags) || []).join(' ');
-    return [t || '我的旅程回顧短片', tags].filter(Boolean).join('\n\n');
+    const trip = collectRecapTrip();
+    const title = ((memoryStudioState && memoryStudioState.recapTitle) || '').trim() || trip.title || '我的旅程';
+    const region = String(trip.region || '').replace(/臺/g, '台').trim().replace(/(.{2,})[縣市]$/, '$1');
+    const names = trip.stops.map((st) => st.name).filter(Boolean);
+    const days = trip.stops.reduce((m, st) => Math.max(m, st.dayIndex || 1), 1);
+    const meta = `📍 ${region ? region + '・' : ''}${days} 天 ${names.length} 個景點`;
+    const route = names.length ? names.slice(0, 5).join(' → ') + (names.length > 5 ? `（共 ${names.length} 站）` : '') : '';
+    const tags = ['#TravelLinkAI', '#旅遊回顧'].concat(region ? ['#' + region + '旅遊', '#' + region + '景點'] : []);
+    ((memoryStudioState && memoryStudioState.recapHashtags) || []).forEach((t) => {
+      const tag = String(t || '').trim();
+      if (tag && !tags.includes(tag)) tags.push(tag);
+    });
+    return [title, meta, route, '行程用 TravelLink AI 規劃：travel-link-ai.duckdns.org'].filter(Boolean).join('\n')
+      + '\n\n' + tags.join(' ');
   }
 
   // ── 旅程回顧短片：前端入口（M9）。串後端 /api/recap 渲染 job → 產出可下載 mp4。──
@@ -9929,12 +10023,16 @@
         lat: pos.lat, lng: pos.lng,
         mode,
         stayMin: Math.max(0, Number(s.stayMin) || 0),
-        dayIndex: Math.max(1, Number(s.dayIndex) || 1)
+        dayIndex: Math.max(1, Number(s.dayIndex) || 1),
+        arriveTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s.time || '')) ? String(s.time) : ''
       });
     });
     let distanceKm = 0;
     for (let i = 1; i < stops.length; i++) distanceKm += recapHaversineKm(stops[i - 1], stops[i]);
     const transportMode = Object.keys(modeTally).sort((a, b) => modeTally[b] - modeTally[a])[0] || 'car';
+    let costPerPerson = null;
+    try { costPerPerson = Math.round(estimateTripSpendPerPerson(replanStops).total) || null; } catch (_e) { costPerPerson = null; }
+    const hero = recapPicks().hero;
     return {
       title: currentTripTitle || '我的旅程',
       region: currentTripRegion || '',
@@ -9942,7 +10040,9 @@
       people: '',
       distanceKm: Math.round(distanceKm),
       transportMode,
-      stops
+      stops,
+      costPerPerson,
+      highlightStopId: stops.some((st) => st.stopId === hero) ? hero : ''
     };
   }
 
@@ -10085,7 +10185,7 @@
       const title = (memoryStudioState && typeof memoryStudioState.recapTitle === 'string') ? memoryStudioState.recapTitle.trim() : '';
       const tl = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited ? memoryStudioState.recapTimeline : null;
       const tlSig = tl ? tl.clips.map((c) => `${c.clipId}:${c.durationMs}:${c.caption || ''}`).join(',') : '';
-      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${recapLengthMode()}#${stopSig}#${photoSig}#${tlSig}`;
+      return `${(trip.stops || []).length}#${audio}#${title}#${recapTemplateId()}#${recapLengthMode()}#${JSON.stringify(recapPicks())}#${stopSig}#${photoSig}#${tlSig}`;
     } catch (_e) { return ''; }
   }
 
@@ -10295,7 +10395,8 @@
       const edited = memoryStudioState && memoryStudioState.recapTimeline && memoryStudioState.recapTimeline.edited
         ? memoryStudioState.recapTimeline : null;
       const timeline = edited || buildRecapRecommendedTimeline(trip, photos);
-      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline, lengthMode: recapLengthMode(), tripId: String(currentItineraryId || '') }) });
+      const coverStopIndex = recapCoverStopIndex(trip, photos);
+      let r = await fetch(base + '/recap/render', { method: 'POST', headers: authHeaders, body: JSON.stringify({ trip, photos, routePoints, templateId, timeline, lengthMode: recapLengthMode(), tripId: String(currentItineraryId || ''), coverStopIndex: coverStopIndex === null ? undefined : coverStopIndex }) });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.message || ('建立失敗（' + r.status + '）'));
@@ -10374,7 +10475,7 @@
     memorySetAudioMode,
     memorySetRecapTitle,
     memorySetRecapTemplate,
-    memorySetRecapLength,
+    memorySetRecapLength, memorySetRecapPick,
     memoryResetLayout,
     memoryToggleCropMode,
     memorySetTemplate,
@@ -14949,12 +15050,7 @@
       return;
     }
 
-    const tr = (stops.length >= 2)
-      ? estimateTripTransport(stops, { mode, people, destination })
-      : estimateTransportRough(destination, mode, people, days);
-    // 各站真實門票 + 用餐站餐廳人均（每人）：從可動用預算一併扣除。
-    const feesPerPerson = sumStopFeesPerPerson(stops, destination);
-    const foodPerPerson = sumStopFoodPerPerson(stops, destination);
+    const { tr, feesPerPerson, foodPerPerson } = estimateTripSpendPerPerson(stops);
     const bd = buildBudgetBreakdown(budget, people, tr.totalPerPerson + feesPerPerson + foodPerPerson);
 
     // 交通占人均預算比例（無 budget 時不顯示比例）
@@ -16504,6 +16600,21 @@
     return (Number(r.base) || 0) + (Number(r.perKm) || 0) * km;
   }
   // 精算（卡片/重新規劃用）：逐段距離×費率；非 perPerson 模式按乘載折算每人。回每人金額。
+  // 每人花費＝交通（含離島船票）＋各站真實門票＋用餐站餐廳人均。預算頁與回顧短片攻略卡共用，兩處金額才一致。
+  function estimateTripSpendPerPerson(stops) {
+    const prefs = currentTripPreferences || {};
+    const mode = prefs.transportMode || '';
+    const people = prefs.people || '';
+    const destination = prefs.dest || prefs.destCustom || currentTripRegion || '';
+    const list = Array.isArray(stops) ? stops : [];
+    const tr = (list.length >= 2)
+      ? estimateTripTransport(list, { mode, people, destination })
+      : estimateTransportRough(destination, mode, people, prefs.days || '');
+    const feesPerPerson = sumStopFeesPerPerson(list, destination);
+    const foodPerPerson = sumStopFoodPerPerson(list, destination);
+    return { tr, feesPerPerson, foodPerPerson, total: tr.totalPerPerson + feesPerPerson + foodPerPerson };
+  }
+
   function estimateTripTransport(stops, opts) {
     const o = opts || {};
     const cfg = getCostConfig();

@@ -8906,6 +8906,15 @@ body.poster-viewer-open { overflow: hidden; }
 .recap-template-option:focus-within { outline: 2px solid #2e7d6d; outline-offset: 2px; }
 .recap-template-name { font-size: 14px; font-weight: 800; color: var(--ink, #22201d); }
 .recap-template-desc { font-size: 12px; line-height: 1.45; color: var(--ink3, #8a857c); }
+.recap-pick-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.recap-pick-row { display: grid; gap: 4px; min-width: 0; }
+.recap-pick-row select {
+  width: 100%; min-width: 0; padding: 8px 10px; border-radius: 10px; font-size: 14px;
+  border: 1px solid var(--border, #e0dbd2); background: var(--surface, #fff); color: var(--ink, #22201d);
+}
+.recap-pick-row select:focus { outline: 2px solid #2e7d6d; outline-offset: 1px; }
+.recap-pick-hint { font-size: 12px; color: #b26a00; }
+@media (max-width: 520px) { .recap-pick-grid { grid-template-columns: minmax(0, 1fr); } }
 .recap-timeline-preview { margin: 0 0 12px; border: 1px solid var(--border, #e0dbd2); border-radius: 12px; background: var(--surface2, #f6f3ee); }
 .recap-timeline-preview summary { padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 700; color: #225f52; }
 .recap-timeline-list { list-style: none; margin: 0; padding: 0 12px 4px; display: grid; gap: 4px; }
