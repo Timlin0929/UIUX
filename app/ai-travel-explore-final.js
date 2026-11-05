@@ -2529,9 +2529,9 @@ function isActualEmoji(str) {
 
 // Google／AI 店名常夾營業備註：「墾墨咖啡 Community Cafe'（Last Order 17:00)」「…/FB預約制」。
 // 規則與 crawler/worker.js 的 splitNameNote、planner 的 splitStopNameNote 相同；備註改寫進介紹，不丟資訊。
-const STOP_NAME_NOTE_RE = /\s*[（(]([^（）()]*(?:店休|公休|休息|營業|請(?:看|查|洽|參考)|IG|粉絲|臉書|FB|預約|月底|月初|點餐|訂位|外送|Last\s*Order|最後點餐)[^（）()]*)[）)]+\s*/gi;
+const STOP_NAME_NOTE_RE = /\s*[（(]([^（）()]*(?:店休|公休|休息|營業|請(?:看|查|洽|參考)|IG|粉絲|臉書|FB|預約|月底|月初|點餐|訂位|外送|Last\s*Order|最後點餐|創始|首創|老店|老字號|別無分店|無分店|唯一|正宗|僅此一家|寵物友善|，)[^（）()]*)[）)]+\s*/gi;
 const STOP_NAME_DATE = String.raw`\d{1,2}\/\d{1,2}(?:\s*[（(][^（）()]{1,2}[）)])?`;
-const STOP_TRAILING_NOTE_RE = new RegExp(String.raw`\s*(?:[\/／，,、｜|]\s*)?((?:${STOP_NAME_DATE}\s*(?:[-~–至]\s*${STOP_NAME_DATE}\s*)?)?(?:店休|公休|休息日?|營業時間|營業日)[^（）()]{0,30})$|\s*[\/／]\s*((?:FB|IG)?\s*預約[^（）()\/／]*)$`, 'i');
+const STOP_TRAILING_NOTE_RE = new RegExp(String.raw`\s*(?:[\/／，,、｜|]\s*)?((?:${STOP_NAME_DATE}\s*(?:[-~–至]\s*${STOP_NAME_DATE}\s*)?)?(?:店休|公休|休息(?![區站室])日?|營業時間|營業日)[^（）()]{0,30})$|\s*[\/／]\s*((?:FB|IG)?\s*預約[^（）()\/／]*)$`, 'i');
 const STOP_NAME_SLOGAN_RE = /\s*《([^《》]*(?:必吃|推薦|人氣|銅板|美食|招牌)[^《》]*)》\s*/g;
 function splitStopNameNote(name) {
   const raw = String(name || '');
@@ -2539,6 +2539,8 @@ function splitStopNameNote(name) {
   const clean = raw.replace(STOP_NAME_NOTE_RE, (_m, note) => { notes.push(note.trim()); return ' '; })
     .replace(STOP_TRAILING_NOTE_RE, (_m, a, b) => { notes.push(String(a || b).trim()); return ''; })
     .replace(STOP_NAME_SLOGAN_RE, (_m, note) => { notes.push(note.trim()); return ' '; })
+    .replace(/\s*#([^#]{1,20})#\s*/g, (_m, note) => { notes.push(note.trim()); return ' '; }) // 「#無提供冷氣#」
+    .replace(/\s*[-－–]\s*([^-－–]*[，！!。][^-－–]*)$/, (_m, note) => { notes.push(note.trim()); return ''; }) // 店名後接一句話：「里漾餐廳-餐點現點現做，趕行程…請您跳過我們唷！」
     .replace(/\s+/g, ' ').trim();
   return clean.length >= 2 && notes.length ? { name: clean, note: notes.join('；') } : { name: raw, note: '' };
 }
@@ -2826,6 +2828,7 @@ function ensureMealStops(stops, wizardData, destination) {
         duration: meal.key === 'dinner' ? 60 : 50,
         time: minutesToTimeString(meal.anchor + 30),
         placeVerified: true,
+        mealGuarantee: meal.key, // 排完時間後若 AI 自己排的餐廳也落在這一餐，就把補的這間拿掉
         ...(Number.isFinite(Number(p.costPerPerson)) ? { costPerPerson: Number(p.costPerPerson) } : {}),
         ...(p.costNote ? { costNote: p.costNote } : {}),
         ...(p.nameNote ? { nameNote: p.nameNote } : {}),
@@ -2839,6 +2842,59 @@ function ensureMealStops(stops, wizardData, destination) {
   return out;
 }
 
+// ── 使用者為重：「希望景點」指定的站不被用餐分散、遊客中心、合併規則改動；排出來有疑慮時提醒，不替使用者決定 ──
+let _generationNotices = [];
+function markDesiredStops(stops, wizardData) {
+  const tokens = String((wizardData && wizardData.desiredSpots) || '')
+    .split(/[、，,;；\/\n]+/).map(_osmNorm).filter((t) => t.length >= 2);
+  if (!tokens.length || !Array.isArray(stops)) return stops;
+  stops.forEach((s) => {
+    const n = _osmNorm(s && s.name);
+    if (n.length >= 2 && tokens.some((t) => n.includes(t) || t.includes(n))) s.userDesired = true;
+  });
+  return stops;
+}
+// 排完後檢查使用者指定的站：連續吃喝、兩餐太近、同一處排兩站。只提醒，不改行程。
+function collectDesiredStopNotices(stops) {
+  const notices = [];
+  const mid = (Array.isArray(stops) ? stops : []).filter((s) => s && s.type !== 'start' && s.type !== 'end');
+  const dayOf = (s) => Math.round(Number(s.dayIndex)) || 1;
+  const food = (s) => isFoodStop(s);
+  for (let i = 0; i < mid.length;) {
+    let j = i;
+    while (j < mid.length && food(mid[j]) && dayOf(mid[j]) === dayOf(mid[i])) j++;
+    if (j - i >= 3 && mid.slice(i, j).some((s) => s.userDesired)) {
+      notices.push(`${mid.slice(i, j).map((s) => `「${s.name}」`).join('')}連續 ${j - i} 站都在吃喝，這是照你指定的排法，想分散可以到行程頁調整。`);
+    }
+    i = Math.max(j, i + 1);
+  }
+  const meals = mid.filter((s) => food(s) && !MEAL_SNACK_NAME_RE.test(String(s.name || '')));
+  for (let i = 0; i + 1 < meals.length; i++) {
+    const a = meals[i], b = meals[i + 1];
+    if (dayOf(a) !== dayOf(b) || !(a.userDesired || b.userDesired)) continue;
+    const gap = timeStringToMinutes(String(b.time || '')) - timeStringToMinutes(String(a.time || ''));
+    if (gap > 0 && gap <= 90) notices.push(`「${a.name}」和「${b.name}」都是正餐，只隔大約 ${gap} 分鐘。已照你指定的保留，覺得太趕可以刪掉一間。`);
+  }
+  const desired = mid.filter((s) => s.userDesired && !food(s));
+  const vcNorm = (s) => String(s.name || '').replace(/[（(][^）)]*[）)]/g, '').replace(/臺/g, '台').replace(/\s/g, '');
+  const sameArea = (a, b) => {
+    if (shouldClusterStops(a, b, true)) return true;
+    const test = (vc, o) => {
+      const m = vcNorm(vc).match(VISITOR_CENTER_RE);
+      return !!m && vcNorm(o).startsWith(vcNorm(vc).slice(0, vcNorm(vc).length - m[0].length));
+    };
+    return test(a, b) || test(b, a);
+  };
+  for (let i = 0; i < desired.length; i++) {
+    for (let j = i + 1; j < desired.length; j++) {
+      if (dayOf(desired[i]) === dayOf(desired[j]) && sameArea(desired[i], desired[j])) {
+        notices.push(`你指定的「${desired[i].name}」和「${desired[j].name}」在同一區或很靠近，都幫你排了。不需要的話可以刪掉一站。`);
+      }
+    }
+  }
+  return [...new Set(notices)].slice(0, 4);
+}
+
 // 連續三站以上都是吃喝 → 把串裡「不是正餐」的那站挪到下一個景點之後（同一天內）；
 // 後面沒有景點就挪到前一個景點之前；兩邊都沒有才拿掉。
 function spreadConsecutiveFoodStops(stops) {
@@ -2846,15 +2902,18 @@ function spreadConsecutiveFoodStops(stops) {
   const out = stops.slice();
   const food = (s) => !!s && s.type !== 'start' && s.type !== 'end' && isFoodStop(s);
   const sameDay = (a, b) => (Math.round(Number(a && a.dayIndex)) || 1) === (Math.round(Number(b && b.dayIndex)) || 1);
+  let from = 0; // 整串都是使用者指定的就跳過，往後找下一串
   for (let guard = 0; guard < 12; guard++) {
-    let i = 0;
+    let i = from;
     while (i + 2 < out.length && !(food(out[i]) && food(out[i + 1]) && food(out[i + 2]))) i++;
     if (i + 2 >= out.length) break;
     let j = i;
     while (j < out.length && food(out[j])) j++; // 串＝[i, j)
+    // 使用者在「希望景點」指定的店不挪、不刪：優先動 AI 排的非正餐，其次 AI 排的正餐
     let k = -1;
-    for (let x = j - 1; x >= i; x--) { if (!getStopMealWindow(out[x])) { k = x; break; } }
-    if (k < 0) k = j - 1;
+    for (let x = j - 1; x >= i; x--) { if (!out[x].userDesired && !getStopMealWindow(out[x])) { k = x; break; } }
+    if (k < 0) for (let x = j - 1; x >= i; x--) { if (!out[x].userDesired) { k = x; break; } }
+    if (k < 0) { from = j; continue; } // 全是使用者指定：保留，結尾會提醒
     const moving = out[k];
     if (j < out.length && sameDay(out[j], moving)) {
       out.splice(k, 1);
@@ -2870,6 +2929,34 @@ function spreadConsecutiveFoodStops(stops) {
     console.info('[用餐分散] 「' + (moving && moving.name) + '」挪開，避免連續三站都在吃');
   }
   return out;
+}
+
+// 用餐保底看的是 AI 原本給的時間；AI 把甜湯店排在下午、重排路線後卻移到上午 11 點，
+// 保底又補了一間午餐 → 11:02、12:17 連吃兩間正餐（2026-11-05 實測）。
+// 時間排定後再檢查一次：同一天有 AI 自己排的正餐落在這一餐附近（開餐前 60 分起），就拿掉補上的那間，
+// 由 AI 那間改當這一餐。
+function dropRedundantGuaranteedMeals(stops) {
+  if (!Array.isArray(stops)) return stops;
+  const dayOf = (s) => Math.round(Number(s && s.dayIndex)) || 1;
+  const clockOf = (s) => ((timeStringToMinutes(String((s && s.time) || '').trim()) % 1440) + 1440) % 1440;
+  const isRealMeal = (s) => !!s && !s.mealGuarantee && s.type !== 'start' && s.type !== 'end'
+    && isFoodStop(s) && !MEAL_SNACK_NAME_RE.test(String(s.name || ''));
+  let dropped = false;
+  const out = stops.filter((s) => {
+    if (!s || !s.mealGuarantee) return true;
+    const meal = MEAL_WINDOWS.find((w) => w.key === s.mealGuarantee);
+    if (!meal) return true;
+    const rival = stops.find((o) => o !== s && isRealMeal(o) && dayOf(o) === dayOf(s) && String(o.time || '').trim()
+      && clockOf(o) >= meal.aiFrom - 60 && clockOf(o) <= meal.aiTo);
+    if (!rival) return true;
+    dropped = true;
+    console.info('[用餐保底] 「' + rival.name + '」已排在', rival.time, '，拿掉補上的「' + s.name + '」，改由它當這一餐');
+    // AI 那間接手這一餐：時間改成這一餐的時刻，重跑 placeMealStopsAtMealTimes 時才會被錨定到午／晚餐，
+    // 不會停在 10:32 當早到的午餐。
+    rival.time = s.time;
+    return false;
+  });
+  return dropped ? out : stops;
 }
 
 function applyTripPlanningRules(stops, wizardData = {}) {
@@ -3540,7 +3627,9 @@ function isLodgingStop(stop) {
 }
 
 // 是否該歸入同一大景區（以距離為主）
-function shouldClusterStops(a, b) {
+function shouldClusterStops(a, b, ignoreDesired = false) {
+  // 兩站都是使用者在「希望景點」指定的：照使用者的意思各排一站，不合併（結尾會提醒）
+  if (!ignoreDesired && a && b && a.userDesired && b.userDesired) return false;
   if (isFoodStop(a) || isFoodStop(b)) return false; // 餐廳閘門：用餐站不與他站合併
   if (isLodgingStop(a) || isLodgingStop(b)) return false; // 住宿閘門：住宿站不與他站合併（含同名的隔日住宿站）
   const ca = getStopCoordinate(a);
@@ -3701,6 +3790,7 @@ function dropRedundantVisitorCenters(stops) {
   const norm = (s) => String(s || '').replace(/[（(][^）)]*[）)]/g, '').replace(/臺/g, '台').replace(/\s/g, '');
   return stops.filter((s) => {
     if (!s || s.type === 'start' || s.type === 'end') return true;
+    if (s.userDesired) return true; // 使用者指定的遊客中心不刪，結尾會提醒兩處很近
     const n = norm(s.name);
     const m = n.match(VISITOR_CENTER_RE);
     if (!m) return true;
@@ -3811,6 +3901,7 @@ async function enrichBigAttractionSubSpots(stops, destination) {
   // 閘門條件抽成共用：預抓與決策迴圈用同一組，避免多抓被跳過站的 nearby 浪費呼叫
   const _passesGate = (stop) => {
     if (!stop || stop.type === 'start' || stop.type === 'end') return false;
+    if (stop.userDesired) return false; // 使用者指定的站不改名成附近的大景點
     if (isFoodStop(stop)) return false; // 餐廳閘門：用餐站不被標為合併大景點、不補子景點
     if (isLodgingStop(stop)) return false; // 住宿閘門：住宿站不被標為合併大景點、不補子景點（E2E #4）
     if (/火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站/.test(String(stop.name || ''))) return false; // 交通樞紐閘門
@@ -4194,6 +4285,8 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   _sub('驗證景點真實性中…');
   const verifiedStops = await verifyAndFilterStopsWithPlaces(stopsForVerify, destination, wizardData);
   _genPerf.mark('opt: Places 逐站驗證');
+  _generationNotices = [];
+  markDesiredStops(verifiedStops, wizardData);
   const geographicallySorted = sortStopsByNearestRoute(verifiedStops, wizardData);
   // 合併同一大景區內密集子景點（如三仙台觀景台／跨海步橋 → 單一「三仙台」站）
   const mergedNearby = mergeNearbySubAttractions(dropRedundantVisitorCenters(geographicallySorted));
@@ -4207,12 +4300,17 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   _genPerf.mark('opt: 補時段(fillTripTimeBudget)');
   _sub('整理路線順序中…');
   // 最後輸出前再重排一次，避免合併/補景點後路線南北來回跑
+  markDesiredStops(filledStops, wizardData); // 合併／補站會建新物件，再標一次
   const orderedStops = reorderStopsAlongRoute(filledStops, _startCoords, wizardData, _endCoords);
   // 上面兩次排序只看路線順不順，會把晚餐排到第 3 站；這裡把用餐站移回時鐘走到那一餐的位置
   // 先保底：跨過午／晚餐卻一間餐廳都沒有就補一間；定位後再把連續三站以上的吃喝分散開
   const mealCovered = ensureMealStops(orderedStops, wizardData, destination);
   const mealArrangedStops = spreadConsecutiveFoodStops(placeMealStopsAtMealTimes(mealCovered, wizardData));
-  const ruledStops = applyTripPlanningRules(mealArrangedStops, wizardData);
+  let ruledStops = applyTripPlanningRules(mealArrangedStops, wizardData);
+  const dedupedMeals = dropRedundantGuaranteedMeals(ruledStops);
+  if (dedupedMeals !== ruledStops) {
+    ruledStops = applyTripPlanningRules(spreadConsecutiveFoodStops(placeMealStopsAtMealTimes(dedupedMeals, wizardData)), wizardData);
+  }
   const withTransport = assignTransportModes(ruledStops, wizardData.transportMode);
 
   const enrichedWizardData = {
@@ -4332,7 +4430,13 @@ async function optimizeGeneratedTripStops(stops, wizardData = {}, livePlaces = [
   finalStops.splice(0, finalStops.length, ...scheduledStops);
   // 生成時已經做過鄰站合併與大景點補標籤。標記起來，行程頁載入時就不再改名、搬座標、拉長停留——
   // 否則生成畫面寫 17:13 結束，行程頁變成另一個時間，站名也從「臺東環市自行車道」變「鯉魚山」。
-  finalStops.forEach((s) => { if (s && s.type !== 'start' && s.type !== 'end') s.bigAreaChecked = true; });
+  _generationNotices = collectDesiredStopNotices(finalStops);
+  finalStops.forEach((s) => {
+    if (!s) return;
+    delete s.userDesired;
+    delete s.mealGuarantee; // 只在生成流程內使用，不存進行程
+    if (s.type !== 'start' && s.type !== 'end') s.bigAreaChecked = true;
+  });
   return finalStops;
 }
 
@@ -7650,6 +7754,11 @@ function persistMicroTripInBackground(trip) {
         setTimeout(() => {
           trip.__saving = false;
           saveState(); renderSideMyTrips(); renderMyTrips();
+          if (Array.isArray(trip.generationNotices) && trip.generationNotices.length) {
+            showToast(`📌 ${trip.generationNotices[0]}`, 'orange');
+            clearTimeout(toastTimer); // 句子較長，停留久一點；完整提醒在行程頁
+            toastTimer = setTimeout(() => document.getElementById('toast').classList.remove('show'), 7000);
+          }
         }, 2400);
       } else {
         // 失敗：顯示失敗提示，立即啟用編輯按鍵
@@ -8009,6 +8118,8 @@ async function _doGeneration(trip, wData) {
 
     if (finalPlan && finalPlan.stops) {
       trip.stops = await optimizeGeneratedTripStops(finalPlan.stops, wData, livePlaces);
+      // 排法有疑慮的提醒存進行程：行程頁第一次打開時顯示
+      if (_generationNotices.length) trip.generationNotices = _generationNotices.slice();
       // Plan B：生成時為每站保留附近替代景點＋室內/戶外標記（供 planner 的「查看替換」與天氣驅動替換）
       attachStopAlternatives(trip.stops, wData.dest || wData.destCustom || wData.region || '');
       // 使用者自訂名稱（customTitle）優先：AI 標題只在未自訂時作為別名保存

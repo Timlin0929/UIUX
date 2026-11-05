@@ -2122,12 +2122,12 @@ async function applyFoodIncludes(destKey, center, restaurants, includeMap) {
 // 「日日麵所．Daily Pasta (3月底營業)」。直接當站名會出現在行程卡、語音導覽、地圖標籤上，
 // 所以把括號裡的營業備註拆出來放 nameNote，名稱只留店名。分店名（「台東正氣店」）不含這些字，不受影響。
 // （與 TravelLink_AI-AMD 031c880 同一套規則）
-const NAME_NOTE_RE = /\s*[（(]([^（）()]*(?:店休|公休|休息|營業|請(?:看|查|洽|參考)|IG|粉絲|臉書|FB|預約|月底|月初|點餐|訂位|外送|Last\s*Order|最後點餐)[^（）()]*)[）)]+\s*/gi;
+const NAME_NOTE_RE = /\s*[（(]([^（）()]*(?:店休|公休|休息|營業|請(?:看|查|洽|參考)|IG|粉絲|臉書|FB|預約|月底|月初|點餐|訂位|外送|Last\s*Order|最後點餐|創始|首創|老店|老字號|別無分店|無分店|唯一|正宗|僅此一家|寵物友善|，)[^（）()]*)[）)]+\s*/gi;
 // 括號外、接在店名後面的備註：「綠島哈嘍木木早午餐（…)公休日參考IG」
 // 以及斜線後的備註：「順大新港 黑潮海鮮餐廳/FB預約制」（預約只在有斜線時才拆，避免誤切店名）
 // 公休公告前面可以帶日期區間：「…6/22（ㄧ）-6/24（三）公休3日」整段一起拆（規則同 AMD b2e25fc）
 const NAME_DATE = String.raw`\d{1,2}\/\d{1,2}(?:\s*[（(][^（）()]{1,2}[）)])?`;
-const TRAILING_NOTE_RE = new RegExp(String.raw`\s*(?:[\/／，,、｜|]\s*)?((?:${NAME_DATE}\s*(?:[-~–至]\s*${NAME_DATE}\s*)?)?(?:店休|公休|休息日?|營業時間|營業日)[^（）()]{0,30})$|\s*[\/／]\s*((?:FB|IG)?\s*預約[^（）()\/／]*)$`, 'i');
+const TRAILING_NOTE_RE = new RegExp(String.raw`\s*(?:[\/／，,、｜|]\s*)?((?:${NAME_DATE}\s*(?:[-~–至]\s*${NAME_DATE}\s*)?)?(?:店休|公休|休息(?![區站室])日?|營業時間|營業日)[^（）()]{0,30})$|\s*[\/／]\s*((?:FB|IG)?\s*預約[^（）()\/／]*)$`, 'i');
 // 書名號裡的宣傳詞：「博文臭豆腐《池上必吃銅板美食》」
 const NAME_SLOGAN_RE = /\s*《([^《》]*(?:必吃|推薦|人氣|銅板|美食|招牌)[^《》]*)》\s*/g;
 function splitNameNote(name) {
@@ -2136,6 +2136,8 @@ function splitNameNote(name) {
   const clean = raw.replace(NAME_NOTE_RE, (_m, note) => { notes.push(note.trim()); return ' '; })
     .replace(TRAILING_NOTE_RE, (_m, a, b) => { notes.push(String(a || b).trim()); return ''; })
     .replace(NAME_SLOGAN_RE, (_m, note) => { notes.push(note.trim()); return ' '; })
+    .replace(/\s*#([^#]{1,20})#\s*/g, (_m, note) => { notes.push(note.trim()); return ' '; }) // 「#無提供冷氣#」
+    .replace(/\s*[-－–]\s*([^-－–]*[，！!。][^-－–]*)$/, (_m, note) => { notes.push(note.trim()); return ''; }) // 店名後接一句話：「里漾餐廳-餐點現點現做，趕行程…請您跳過我們唷！」
     .replace(/\s+/g, ' ').trim();
   return clean.length >= 2 && notes.length ? { name: clean, note: notes.join('；') } : { name: raw, note: '' };
 }
