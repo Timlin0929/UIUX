@@ -289,12 +289,26 @@ const VERTEX_ALLOWED_PATH = new RegExp(
   ')$'
 );
 
+// 兩層限流：
+//  - IP 層（登入驗證之前）：只擋灌爆 token 驗證的濫用，給得寬——同一個手機熱點／電信 CGNAT
+//    底下的旅伴共用同一個 IP，原本每 IP 20 次會讓整團一起被擋。
+//  - 帳號層（驗證之後，以 uid 計）：真正的用量上限。2026-11-05 實測：一次行程生成就打了
+//    約 17 次（並行驗站、補站、重排），原本「每 IP 10 分鐘 20 次」生成完只剩兩三次，
+//    管家聊天立刻撞到「請求過於頻繁」。60 次＝約 3 次生成，或生成一次後再聊二、三十句。
 const vertexLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 20, // 每 IP 10 分鐘 20 次（一次行程生成含重試/補站約 3–6 次呼叫）
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'rate limited', message: '請求過於頻繁，請稍後再試。' }
+});
+const vertexUserLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req, res) => (req.user && req.user.uid) || ipKeyGenerator(req, res),
+  message: { error: 'rate limited', message: 'AI 使用次數暫時達到上限，請稍後再試。' }
 });
 
 // 驗證 Firebase ID token（前端登入後由 SDK 取得，隨請求帶在 Authorization 標頭）
@@ -934,7 +948,7 @@ app.post('/api/collab/join-requests/resolve', collabLimiter, requireFirebaseUser
   }
 });
 
-app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, async (req, res) => {
+app.post('/api/vertex/*', vertexLimiter, requireFirebaseUser, vertexUserLimiter, async (req, res) => {
   const upstreamPath = '/' + (req.params[0] || '');
   if (!VERTEX_ALLOWED_PATH.test(upstreamPath)) {
     return res.status(403).json({ error: 'path not allowed' });
