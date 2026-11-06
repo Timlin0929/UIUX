@@ -28,12 +28,13 @@ const { ipKeyGenerator } = require('express-rate-limit');
 // firebase-admin v14 起僅支援模組化 API（admin.credential.* 已移除）
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
-const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
 // API 成本統計（docs/API成本統計-實作計畫.md）
 const pricing = require('./pricing');
 const genRuns = require('./generation-runs');
 const { createUsageTap, modelIdFromPath } = require('./usage-tap');
 const { guardVertexBody } = require('./scope-guard');
+const crowd = require('./crowd-signals');
 // 回顧短片後端渲染 job（M8）：獨立模組，掛在既有代理上
 const { mountRecapJobs } = require('./recap-jobs');
 
@@ -1340,6 +1341,77 @@ async function loadTripCover(user, tripId) {
 }
 
 // 回顧短片渲染 job 端點（需登入 + 每人每小時 5 次 + 序列化渲染）
+// ══════════════ 分流第二、三層（只存人數，不存是誰）══════════════
+const crowdLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' }
+});
+
+// 行程存好後記一次。站與日期一律讀資料庫，不接受前端傳來的內容；同一趟只算一次。
+app.post('/api/crowd/record', crowdLimiter, requireFirebaseUser, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
+  const tripId = String((req.body && req.body.tripId) || '').trim().slice(0, 120);
+  if (!tripId) return res.status(400).json({ error: 'invalid trip' });
+  try {
+    const snap = await adminDb.collection('micro_trips').doc(tripId).get();
+    if (!snap.exists) return res.status(404).json({ error: 'trip not found' });
+    const data = snap.data() || {};
+    if (!isTripOwner(req.user, data)) return res.status(403).json({ error: 'not your trip' });
+    const dest = crowd.stopKey(data.region || (data.wizardData && data.wizardData.dest));
+    if (!dest) return res.json({ ok: true, recorded: false });
+    const counts = crowd.countsFromTrip(data.stops, data.wizardData && data.wizardData.departureDate);
+    // 標記和統計放同一批：統計失敗時標記也不會留下，之後還能重記
+    const batch = adminDb.batch();
+    batch.create(adminDb.collection('crowd_recorded').doc(tripId), { at: Timestamp.now() });
+    const dayUpdates = new Map();
+    const total = {};
+    counts.forEach(({ date, key, slot }) => {
+      total[key] = FieldValue.increment(1);
+      if (!date) return;
+      const day = dayUpdates.get(date) || {};
+      day[key] = { total: FieldValue.increment(1), ...(slot ? { [slot]: FieldValue.increment(1) } : {}) };
+      dayUpdates.set(date, day);
+    });
+    batch.set(adminDb.collection('crowd_stats').doc(`${dest}_total`), { counts: total }, { merge: true });
+    dayUpdates.forEach((counts2, date) => {
+      batch.set(adminDb.collection('crowd_stats').doc(`${dest}_${date}`), { counts: counts2 }, { merge: true });
+    });
+    await batch.commit();
+    return res.json({ ok: true, recorded: true });
+  } catch (err) {
+    if (err && err.code === 6) return res.json({ ok: true, recorded: false }); // ALREADY_EXISTS：這趟已經算過
+    console.error('[proxy] crowd record 失敗：', err && err.message);
+    return res.status(500).json({ error: 'write failed' });
+  }
+});
+
+// 生成前讀：這個目的地的累計人數、當天各時段人數、今天停車已滿的地點
+app.get('/api/crowd/signals', crowdLimiter, requireFirebaseUser, async (req, res) => {
+  if (!adminReady) return res.status(503).json({ error: 'storage unavailable' });
+  const dest = crowd.stopKey(req.query.dest);
+  const date = String(req.query.date || '');
+  if (!dest) return res.status(400).json({ error: 'invalid destination' });
+  try {
+    const stats = adminDb.collection('crowd_stats');
+    const [totalSnap, daySnap, reportSnap] = await Promise.all([
+      stats.doc(`${dest}_total`).get(),
+      crowd.isValidDate(date) ? stats.doc(`${dest}_${date}`).get() : Promise.resolve(null),
+      adminDb.collection('parking_reports').where('updatedAt', '>=', Timestamp.fromMillis(crowd.startOfTaiwanDay())).limit(300).get()
+    ]);
+    return res.json({
+      total: (totalSnap.exists && totalSnap.data().counts) || {},
+      day: (daySnap && daySnap.exists && daySnap.data().counts) || {},
+      fullToday: crowd.fullSpotsFromReports(reportSnap.docs.map((doc) => doc.data()))
+    });
+  } catch (err) {
+    console.error('[proxy] crowd signals 失敗：', err && err.message);
+    return res.status(500).json({ error: 'read failed' });
+  }
+});
+
 mountRecapJobs(app, { requireFirebaseUser, rateLimit, ipKeyGenerator, loadTripCover });
 
 // 全域錯誤處理：必須排在所有路由之後。沒有它時 Express 會回預設 HTML 錯誤頁，
