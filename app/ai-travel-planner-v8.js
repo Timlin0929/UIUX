@@ -3770,14 +3770,14 @@
     { name: '鯉魚山', outline: '鯉魚山公園', aliases: ['龍鳳佛堂'] },
     { name: '台東海濱公園', outline: '海濱公園(馬卡巴嗨公園)', aliases: ['國際地標', '馬卡巴嗨'] },
     { name: '小野柳', outline: '小野柳遊憩區', aliases: ['富岡地質公園'] },
-    { name: '臺東鐵道藝術村 (鐵花新聚落)', outline: '台東鐵道藝術村', aliases: ['鐵花村', '鐵花新聚落', '舊鐵道'] },
+    { name: '臺東鐵道藝術村 (鐵花新聚落)', outline: '台東鐵道藝術村', aliases: ['鐵花新聚落', '舊鐵道'] },
     { name: '台東糖廠文創園區', outline: '台東糖廠', aliases: [] },
     { name: '八仙洞', outline: '八仙洞', aliases: [] },
     { name: '初鹿牧場', outline: '初鹿牧場', aliases: [] },
     { name: '關山親水公園', outline: '關山親水公園', aliases: [] },
     { name: '綠洲山莊', outline: '綠洲山莊(綠島感訓監獄)', aliases: ['八卦樓'] }
   ];
-  const BIG_ATTRACTION_SKIP_RE = /火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站|停車場|公廁|廁所|萬富倉庫/; // 萬富倉庫是糖廠裡的甜點店，獨立一站
+  const BIG_ATTRACTION_SKIP_RE = /火車站|車站|捷運|高鐵|轉運站|客運站|機場|航空站|停車場|公廁|廁所|萬富倉庫|鐵花村/; // 鐵花村音樂聚落在藝術村旁，是另一個場地 // 萬富倉庫是糖廠裡的甜點店，獨立一站
 
   function bigAttractionRing(parent) {
     if (parent.ring !== undefined) return parent.ring;
@@ -4168,6 +4168,13 @@
   }
 
   // 是否為同一大景區的兄弟子景點（名稱共享主體）
+  // 共同前綴要扣掉開頭的鄉鎮名再算：「成功海洋環境教室」和「成功海濱公園」共同前綴「成功海」，其實只差在都在成功鎮。
+  const NAME_TOWN_PREFIX_RE = /^(台東縣|台東市|台東|成功|關山|卑南|鹿野|池上|東河|長濱|太麻里|大武|綠島|蘭嶼|延平|海端|金峰|達仁)/;
+  function isSharedAttractionPrefix(prefix) {
+    const unified = String(prefix || '').replace(/臺/g, '台');
+    const town = unified.match(NAME_TOWN_PREFIX_RE);
+    return town ? unified.length - town[0].length >= 2 : unified.length >= 3;
+  }
   function isSameAttractionFamily(a, b) {
     const aN = normalizeText((a && a.name) || '');
     const bN = normalizeText((b && b.name) || '');
@@ -4176,7 +4183,8 @@
     const shorter = aN.length <= bN.length ? aN : bN;
     if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
     // 正規化後共同前綴 ≥ 3 字（涵蓋「三仙台」案例，避免「台東」這類兩字地名誤判）
-    if (commonNamePrefix([aN, bN]).length >= 3) return true;
+    const sharedPrefix = commonNamePrefix([aN, bN]);
+    if (sharedPrefix.length >= 3 && isSharedAttractionPrefix(sharedPrefix)) return true;
     return false;
   }
 

@@ -3579,6 +3579,13 @@ function subSpotCommonPrefix(names) {
 }
 
 // 是否為同一大景區的兄弟子景點（名稱共享主體）
+// 共同前綴要扣掉開頭的鄉鎮名再算：「成功海洋環境教室」和「成功海濱公園」共同前綴「成功海」，其實只差在都在成功鎮。
+const NAME_TOWN_PREFIX_RE = /^(台東縣|台東市|台東|成功|關山|卑南|鹿野|池上|東河|長濱|太麻里|大武|綠島|蘭嶼|延平|海端|金峰|達仁)/;
+function isSharedAttractionPrefix(prefix) {
+  const unified = String(prefix || '').replace(/臺/g, '台');
+  const town = unified.match(NAME_TOWN_PREFIX_RE);
+  return town ? unified.length - town[0].length >= 2 : unified.length >= 3;
+}
 function isSameAttractionFamily(a, b) {
   const aN = normalizeLookupText((a && a.name) || '');
   const bN = normalizeLookupText((b && b.name) || '');
@@ -3586,7 +3593,8 @@ function isSameAttractionFamily(a, b) {
   const shorter = aN.length <= bN.length ? aN : bN;
   if (shorter.length >= 3 && (aN.includes(bN) || bN.includes(aN))) return true;
   // 正規化後共同前綴 ≥ 3 字（涵蓋「三仙台」案例，避免「台東」這類兩字地名誤判）
-  if (subSpotCommonPrefix([aN, bN]).length >= 3) return true;
+  const sharedPrefix = subSpotCommonPrefix([aN, bN]);
+  if (sharedPrefix.length >= 3 && isSharedAttractionPrefix(sharedPrefix)) return true;
   return false;
 }
 
@@ -3642,6 +3650,10 @@ function shouldClusterStops(a, b, ignoreDesired = false) {
     // 只併「真正同一景區」：同名家族放寬到 2km；不同名僅在極近(同一入口/同一處)才併，
     // 避免市區密集但不同的景點(海濱公園/生命之樹…)被 800m 規則塌成一站、壓縮整日時數。
     if (isSameAttractionFamily(a, b)) return d <= SUB_SPOT_NAME_MERGE_RADIUS_M;
+    // 各有自己的範圍就是兩個景點，就算資料座標靠很近也不併（台東森林公園的座標落在海濱公園旁）
+    if (osmDifferentAttractions(
+      { name: a.name || a.title, lat: ca.lat, lng: ca.lng },
+      { name: b.name || b.title, lat: cb.lat, lng: cb.lng })) return false;
     if (d <= SUB_SPOT_SAME_SPOT_RADIUS_M) return true;
     // 名稱不共用字、但其實在同一個園區（鷺鷥湖在臺東森林公園裡、龍鳳佛堂在鯉魚山上）：看 OSM 輪廓
     return d <= SUB_SPOT_NAME_MERGE_RADIUS_M && osmSameAttraction(
@@ -3697,11 +3709,16 @@ function osmOutlineOf(place) {
   _osmOwnCache.set(key, best);
   return best;
 }
+function osmDifferentAttractions(a, b) {
+  if (![a.lat, a.lng, b.lat, b.lng].every(Number.isFinite)) return false;
+  const oa = osmOutlineOf(a), ob = osmOutlineOf(b);
+  return !!(oa && ob && oa !== ob && !_pointInRing(oa.ring, ob.center) && !_pointInRing(ob.ring, oa.center));
+}
 function osmSameAttraction(a, b) {
   if (![a.lat, a.lng, b.lat, b.lng].every(Number.isFinite)) return false;
   const oa = osmOutlineOf(a), ob = osmOutlineOf(b);
   // 各有自己的輪廓且互不包含 → 是兩個景點。poi-data 的「台東森林公園」座標落在海濱公園裡，只看座標會把兩者合併。
-  if (oa && ob && oa !== ob && !_pointInRing(oa.ring, ob.center) && !_pointInRing(ob.ring, oa.center)) return false;
+  if (osmDifferentAttractions(a, b)) return false;
   if ((oa && _pointInRing(oa.ring, b)) || (ob && _pointInRing(ob.ring, a))) return true;
   return loadOsmOutlines().some((o) => _pointInRing(o.ring, a) && _pointInRing(o.ring, b));
 }
