@@ -2895,6 +2895,16 @@ function collectDesiredStopNotices(stops, wizardData) {
       }
     }
   }
+  // 距離很近但沒有合併：可能是同一處，由使用者決定（最多提醒兩組，避免市區行程被洗版）
+  const nearPairs = [];
+  const sights = mid.filter((s) => !food(s) && getStopCoordinate(s));
+  for (let i = 0; i < sights.length; i++) {
+    for (let j = i + 1; j < sights.length; j++) {
+      if (dayOf(sights[i]) !== dayOf(sights[j]) || (sights[i].userDesired && sights[j].userDesired)) continue;
+      if (getDistanceMeters(getStopCoordinate(sights[i]), getStopCoordinate(sights[j])) <= SUB_SPOT_SAME_SPOT_RADIUS_M) nearPairs.push([sights[i].name, sights[j].name]);
+    }
+  }
+  nearPairs.slice(0, 2).forEach(([a, b]) => notices.push(`「${a}」和「${b}」不到 300 公尺，可能是同一處，也可能可以順路一起逛。不需要的話可以刪掉一站。`));
   return [...new Set(notices)].slice(0, 5);
 }
 
@@ -3561,7 +3571,7 @@ async function verifyAndFilterStopsWithPlaces(stops, destination, wizardData = {
 // 單一「三仙台」站；同名（同前綴家族）再放寬到 2km；缺座標才退回名稱判定。避免景點密集擠在目的地端。
 const SUB_SPOT_MERGE_RADIUS_M = 800;
 const SUB_SPOT_NAME_MERGE_RADIUS_M = 2000;
-const SUB_SPOT_SAME_SPOT_RADIUS_M = 300; // 不同名景點僅在此極近距離內才視為「同一處」而合併
+const SUB_SPOT_SAME_SPOT_RADIUS_M = 300; // 不同名景點在此距離內：不合併，只提醒可能是同一處
 
 // 計算一組名稱的最長共同前綴（作為「大景點」顯示名）
 function subSpotCommonPrefix(names) {
@@ -3647,80 +3657,22 @@ function shouldClusterStops(a, b, ignoreDesired = false) {
   const cb = getStopCoordinate(b);
   if (ca && cb) {
     const d = getDistanceMeters(ca, cb);
-    // 只併「真正同一景區」：同名家族放寬到 2km；不同名僅在極近(同一入口/同一處)才併，
-    // 避免市區密集但不同的景點(海濱公園/生命之樹…)被 800m 規則塌成一站、壓縮整日時數。
+    // 只有名稱明確相關或人工確認清單才合併；距離再近也只提醒（collectDesiredStopNotices）
     if (isSameAttractionFamily(a, b)) return d <= SUB_SPOT_NAME_MERGE_RADIUS_M;
-    // 各有自己的範圍就是兩個景點，就算資料座標靠很近也不併（台東森林公園的座標落在海濱公園旁）
-    if (osmDifferentAttractions(
-      { name: a.name || a.title, lat: ca.lat, lng: ca.lng },
-      { name: b.name || b.title, lat: cb.lat, lng: cb.lng })) return false;
-    if (d <= SUB_SPOT_SAME_SPOT_RADIUS_M) return true;
-    // 名稱不共用字、但其實在同一個園區（鷺鷥湖在臺東森林公園裡、龍鳳佛堂在鯉魚山上）：看 OSM 輪廓
-    return d <= SUB_SPOT_NAME_MERGE_RADIUS_M && osmSameAttraction(
-      { name: a.name || a.title, lat: ca.lat, lng: ca.lng },
-      { name: b.name || b.title, lat: cb.lat, lng: cb.lng });
+    return isListedSamePlace(a, ca, b, cb);
   }
-  return isSameAttractionFamily(a, b); // 缺座標退回名稱判定
+  return isSameAttractionFamily(a, b) || isListedSamePlace(a, null, b, null); // 缺座標只看名稱
 }
 
-// ── 同一園區判斷：OpenStreetMap 景點輪廓（app/osm-boundary-data.js，ODbL；移植自 AMD 031c880）──
-// A 的座標落在 B 的輪廓內、或兩者都在同一個輪廓內，就算同一處。資料檔不存在時一律 false（退回距離＋名稱判斷）。
-let _osmOutlines = null;
-const _osmOwnCache = new Map();
+// 人工確認清單（big-attraction-config.js）：同一個地方的不同名稱，或屬於同一個大景點
+function isListedSamePlace(a, ca, b, cb) {
+  const list = window.WAI_BIG_ATTRACTIONS;
+  return !!list && list.isSamePlace(a && (a.name || a.title), ca, b && (b.name || b.title), cb);
+}
+
+// 比對名稱用：去括號、臺→台、只留文字與數字
 function _osmNorm(s) {
   return String(s || '').replace(/[（(][^）)]*[）)]/g, '').replace(/臺/g, '台').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-}
-function loadOsmOutlines() {
-  if (_osmOutlines) return _osmOutlines;
-  _osmOutlines = [];
-  const data = (typeof window !== 'undefined' && window.WAI_OSM_BOUNDARY_DATA) || null;
-  const list = (data && Array.isArray(data.items)) ? data.items : [];
-  for (const it of list) {
-    if (!it || !it.n || !Array.isArray(it.r) || it.r.length < 3) continue;
-    const ring = it.r.map(([lat, lng]) => ({ lat, lng }));
-    _osmOutlines.push({
-      norm: _osmNorm(it.n),
-      ring,
-      center: { lat: ring.reduce((s, p) => s + p.lat, 0) / ring.length, lng: ring.reduce((s, p) => s + p.lng, 0) / ring.length }
-    });
-  }
-  return _osmOutlines;
-}
-function _pointInRing(ring, p) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const a = ring[i], b = ring[j];
-    if ((a.lat > p.lat) !== (b.lat > p.lat) && p.lng < ((b.lng - a.lng) * (p.lat - a.lat)) / (b.lat - a.lat) + a.lng) inside = !inside;
-  }
-  return inside;
-}
-// 某景點自己的輪廓：OSM 名稱與景點名互相包含、質心在 2 km 內，取最近的一個
-function osmOutlineOf(place) {
-  const n = _osmNorm(place && place.name);
-  if (n.length < 2 || !Number.isFinite(place.lat) || !Number.isFinite(place.lng)) return null;
-  const key = `${n}@${place.lat.toFixed(4)},${place.lng.toFixed(4)}`;
-  if (_osmOwnCache.has(key)) return _osmOwnCache.get(key);
-  let best = null, bestM = Infinity;
-  for (const o of loadOsmOutlines()) {
-    if (!(o.norm.includes(n) || (o.norm.length >= 3 && n.includes(o.norm)))) continue;
-    const m = getDistanceMeters(place, o.center);
-    if (m <= 2000 && m < bestM) { best = o; bestM = m; }
-  }
-  _osmOwnCache.set(key, best);
-  return best;
-}
-function osmDifferentAttractions(a, b) {
-  if (![a.lat, a.lng, b.lat, b.lng].every(Number.isFinite)) return false;
-  const oa = osmOutlineOf(a), ob = osmOutlineOf(b);
-  return !!(oa && ob && oa !== ob && !_pointInRing(oa.ring, ob.center) && !_pointInRing(ob.ring, oa.center));
-}
-function osmSameAttraction(a, b) {
-  if (![a.lat, a.lng, b.lat, b.lng].every(Number.isFinite)) return false;
-  const oa = osmOutlineOf(a), ob = osmOutlineOf(b);
-  // 各有自己的輪廓且互不包含 → 是兩個景點。poi-data 的「台東森林公園」座標落在海濱公園裡，只看座標會把兩者合併。
-  if (osmDifferentAttractions(a, b)) return false;
-  if ((oa && _pointInRing(oa.ring, b)) || (ob && _pointInRing(ob.ring, a))) return true;
-  return loadOsmOutlines().some((o) => _pointInRing(o.ring, a) && _pointInRing(o.ring, b));
 }
 
 // 將多個兄弟子景點合併成一個大景點站
@@ -3967,6 +3919,9 @@ async function enrichBigAttractionSubSpots(stops, destination) {
       if (isFoodStop({ name: p.name })) continue; // 餐廳閘門：附近餐廳 POI 不被拉進景點子景點
       const dist = getDistanceMeters(coord, { lat: p.lat, lng: p.lng });
       if (dist < 60 || dist > SUB_SPOT_MERGE_RADIUS_M) continue;
+      // 只因為在附近不算子景點（中寮漁港不該含綠島燈塔）：要名稱相關或在人工確認清單裡
+      const related = { name: p.name };
+      if (!isSameAttractionFamily(stop, related) && !isListedSamePlace(stop, coord, related, { lat: p.lat, lng: p.lng })) continue;
       cands.push({ name: p.name, lat: p.lat, lng: p.lng, dist });
     }
     cands.sort((a, b) => a.dist - b.dist);
@@ -4001,7 +3956,9 @@ async function enrichBigAttractionSubSpots(stops, destination) {
     const bigName = deriveBigAreaName([parentName, ...subs], nearbyNames);
     const bigNorm = normalizeLookupText(bigName);
     const usedByOthers = stops.some(x => x !== stop && normalizeLookupText(x.name) === bigNorm);
-    if (bigName && bigNorm !== parentNorm && !usedByOthers) {
+    // 改站名也要名稱相關或在清單裡，不能只因為附近有大景點（臺東環市自行車道→鯉魚山）
+    const bigNameRelated = !!bigName && (isSameAttractionFamily(stop, { name: bigName }) || isListedSamePlace(stop, coord, { name: bigName }, null));
+    if (bigName && bigNorm !== parentNorm && !usedByOthers && bigNameRelated) {
       stop.name = bigName;
       subs = [parentName, ...subs];
       stop.isMergedAttraction = true;
