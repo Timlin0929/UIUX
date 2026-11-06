@@ -22,6 +22,8 @@
     "crawl:parking:dry": "node worker.js --crawl-parking --dry-run",
     "clean:food-names": "node worker.js --clean-food-names",
     "clean:food-names:dry": "node worker.js --clean-food-names --dry-run",
+    "fix:poi": "node worker.js --fix-poi",
+    "fix:poi:dry": "node worker.js --fix-poi --dry-run",
     "crawl:parking:osm": "node worker.js --crawl-parking --source=osm",
     "crawl:parking:osm:dry": "node worker.js --crawl-parking --source=osm --dry-run",
     "cleanup:collab": "node worker.js --cleanup-collab",

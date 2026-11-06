@@ -8961,3 +8961,10 @@ body.poster-viewer-open { overflow: hidden; }
 #stopPlaceNotice .stop-place-notice-action { flex-shrink: 0; white-space: nowrap; min-height: 36px; padding: 6px 12px; border: 1px solid rgba(255, 255, 255, .7); border-radius: 999px; background: transparent; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
 #stopPlaceNotice .stop-place-notice-action[hidden] { display: none; }
 #stopPlaceNotice .stop-place-notice-close { flex-shrink: 0; width: 32px; height: 32px; border: 0; background: transparent; color: #fff; font-size: 14px; cursor: pointer; }
+@media (max-width: 480px) {
+  /* 手機：句子佔滿一行，按鈕放下一行，文字才不會被擠成四五行 */
+  #stopPlaceNotice { left: 16px; right: 16px; width: auto; transform: none; flex-wrap: wrap; }
+  #stopPlaceNotice .stop-place-notice-text { flex-basis: calc(100% - 42px); }
+  #stopPlaceNotice .stop-place-notice-close { order: 1; }
+  #stopPlaceNotice .stop-place-notice-action { order: 2; }
+}

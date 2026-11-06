@@ -177,14 +177,28 @@
   }
 
   let routeRefitTimer = null;
+  // AI 重新規劃後還沒做過實測壓縮：這時 tripUserDirty 已是 true，但仍要等車程回來判斷一次，
+  // 否則新站用預設 15 分估算，停留被砍後行程提早結束。
+  let pendingReplanFit = false;
+  let pendingReplanFitTimer = null;
+  // 路線查詢失敗時那段車程永遠回不來：等一段時間就放棄，不留著等到使用者之後的編輯才壓縮
+  function setPendingReplanFit(waiting) {
+    clearTimeout(pendingReplanFitTimer);
+    pendingReplanFit = !!waiting;
+    if (waiting) pendingReplanFitTimer = setTimeout(() => { pendingReplanFit = false; }, 45000);
+  }
   function scheduleDisplayRefit() {
-    if (tripUserDirty) return;
+    if (tripUserDirty && !pendingReplanFit) return;
     clearTimeout(routeRefitTimer);
     routeRefitTimer = setTimeout(() => {
       routeRefitTimer = null;
-      if (tripUserDirty) return;
+      if (tripUserDirty && !pendingReplanFit) return;
       try {
         const fit = fitScheduleToTimeLimit({ requireKnownTransit: true });
+        if (pendingReplanFit && !fit.deferred) {
+          setPendingReplanFit(false);
+          if (fit.changed) schedulePersistTrip();
+        }
         if (fit.changed) {
           renderItineraryDisplay(); // 內部會依新排程更新時間橫幅與 hero 時間
           try { syncRouteStageScheduleTimes(buildReplanSchedule()); } catch (_e) {}
@@ -4139,12 +4153,29 @@
   // 是否為「餐廳／用餐站」：用餐站永不參與合併（既不被景點吸收、也不吸收景點），維持獨立用餐停留。
   // AI 生成的景點無 type 欄位，故以 tag（社群範例）＋ emoji ＋ 名稱關鍵字判定。
   const FOOD_EMOJI_SET = new Set(['🍜','🍱','☕','🍽️','🍽','🍦','🍢','🐟','🍲','🍛','🍔','🍕','🍻','🍸','🧋','🍵','🥟','🍤','🍧','🍨','🥘','🍰']);
+  const NON_FOOD_NAME_RE = /遊客中心|服務中心|原創館|文創|圖書館|博物館|美術館|藝文中心|公園|步道|車站|部落|教堂|教會|廟|宮|寺|佛堂|遺址|漁港|燈塔|海灘|沙灘|牧場/;
+  const SUB_SPOT_JUNK_RE = /公廁|廁所|洗手間|停車場|售票|入口|管理站|服務台/; // 廁所、停車場這類設施不列成子景點
   const FOOD_NAME_RE = /餐廳|食堂|小吃|料理|美食|便當|海鮮|餐酒|甜點|冰淇淋|冰品|火鍋|燒烤|烘焙|早午餐|咖啡|茶館|茶屋|夜市|cafe|coffee|restaurant/i;
+  // restaurant-data.js 收錄的店：名稱有「宮」「部落」也還是餐廳
+  let localRestaurantNames = null;
+  function isKnownLocalRestaurantName(name) {
+    if (!localRestaurantNames) {
+      localRestaurantNames = new Set();
+      const data = window.WAI_RESTAURANT_DATA || {};
+      Object.keys(data).forEach((key) => {
+        if (Array.isArray(data[key])) data[key].forEach((p) => { if (p && p.name) localRestaurantNames.add(normalizeText(p.name)); });
+      });
+    }
+    return localRestaurantNames.has(normalizeText(name));
+  }
+
   function isFoodStop(stop) {
     if (!stop) return false;
     if (stop.tag === 'food') return true;
-    if (stop.emoji && FOOD_EMOJI_SET.has(String(stop.emoji).trim())) return true;
     const name = String(stop.name || stop.title || '');
+    // AI 給的圖示不一定準：🍵 的遊客中心、☕ 的文創館都不是吃喝站
+    if (stop.emoji && FOOD_EMOJI_SET.has(String(stop.emoji).trim())
+      && (!NON_FOOD_NAME_RE.test(name) || isKnownLocalRestaurantName(name))) return true;
     if (!name) return false;
     if (/飯店|飯館|麵店/.test(name)) return false; // 防誤判：飯店（住宿）等含「飯/麵」但非用餐站
     return FOOD_NAME_RE.test(name);
@@ -4217,7 +4248,7 @@
     const subs = [];
     for (const n of (subList || [])) {
       const nn = normalizeText(n);
-      if (!nn || nn === big || seen.has(nn)) continue;
+      if (!nn || nn === big || seen.has(nn) || SUB_SPOT_JUNK_RE.test(String(n))) continue;
       seen.add(nn); subs.push(String(n).trim());
     }
     stop.mergedSubSpots = subs;
@@ -4436,6 +4467,7 @@
         if (dist < 60 || dist > SUB_SPOT_MERGE_RADIUS_M) continue;
         // 只因為在附近不算子景點：要名稱相關或在人工確認清單裡
         const related = { name: p.name };
+        if (SUB_SPOT_JUNK_RE.test(String(p.name))) continue;
         if (!isSameAttractionFamily(stop, related) && !isListedSamePlace(stop, coord, related, { lat: p.lat, lng: p.lng })) continue;
         cands.push({ name: p.name, lat: p.lat, lng: p.lng, dist });
       }
@@ -11722,6 +11754,8 @@
       .replace(STOP_NAME_SLOGAN_RE, (_m, note) => { notes.push(note.trim()); return ' '; })
       .replace(/\s*#([^#]{1,20})#\s*/g, (_m, note) => { notes.push(note.trim()); return ' '; }) // 「#無提供冷氣#」
       .replace(/\s*[-－–]\s*([^-－–]*[，！!。][^-－–]*)$/, (_m, note) => { notes.push(note.trim()); return ''; }) // 店名後接一句話：「里漾餐廳-餐點現點現做，趕行程…請您跳過我們唷！」
+      .replace(/\s*[-－–]\s*((?:設有|提供|附設)[^-－–]*)$/, (_m, note) => { notes.push(note.trim()); return ''; }) // 「麥當勞-台東中華餐廳－設有得來速」
+      .replace(/\s+[*＊]\s*([^*＊]+)$/, (_m, note) => { notes.push(note.trim()); return ''; }) // 前面有空白才算附註（…炒飯 *飛魚卵辣椒醬）；「榕樹下米苔目*小滿雨生」是另一間店，不拆
       .replace(/\s+/g, ' ').trim();
     return clean.length >= 2 && notes.length ? { name: clean, note: notes.join('；') } : { name: raw, note: '' };
   }
@@ -11825,7 +11859,10 @@
     const result = addStopRespectingPlace(template, (tpl) => {
       const newStop = createStopFromTemplate(tpl);
       const targetIndex = preferredTargetId ? replanStops.findIndex((item) => item.id === preferredTargetId) : -1;
-      if (targetIndex >= 0 && replanStops[targetIndex].type !== 'end') {
+      const multiDay = isMultiDayTrip(currentTripPreferences && currentTripPreferences.days);
+      const targetOnOtherDay = multiDay && targetIndex >= 0 && Number(tpl.dayIndex) >= 1
+        && clampDayIndex(replanStops[targetIndex].dayIndex, 1) !== clampDayIndex(tpl.dayIndex, 1);
+      if (targetIndex >= 0 && replanStops[targetIndex].type !== 'end' && !targetOnOtherDay) {
         replanStops.splice(targetIndex + 1, 0, newStop);
       } else {
         replanStops.splice(findNewStopInsertIndex(tpl.dayIndex), 0, newStop);
@@ -14818,6 +14855,7 @@
   }
 
   function cancelReplan() {
+    setPendingReplanFit(false);
     isReplanning = false;
     activeStopMenuId = null;
     closeModifyWindow();
@@ -18084,7 +18122,8 @@
 
       // 重新規劃結果若仍超出設定時長，套用與匯出相同的壓縮（停留最久優先、每站最多縮 35%）
       try {
-        const _rgFit = fitScheduleToTimeLimit();
+        const _rgFit = fitScheduleToTimeLimit({ requireKnownTransit: true });
+        setPendingReplanFit(_rgFit.deferred === true); // 新站還沒有實際車程：回填後再判斷，見 scheduleDisplayRefit
         if (_rgFit.changed && typeof showToast === 'function') {
           const _endStr = _rgFit.limitEndMin != null ? minutesToClock(_rgFit.limitEndMin) : '';
           showToast(_rgFit.fits
@@ -22592,7 +22631,7 @@
                 //   載入路徑必須維持只讀不寫——否則每次重新整理都會用當下路況
                 //   覆寫掉 App 端剛寫入的資料（這是先前特意修過的行為，不可回退）。
                 if (recalculateTransport && tripUserDirty) schedulePersistTrip();
-                else scheduleDisplayRefit(); // 實測比估算長時，顯示端補壓縮
+                if (pendingReplanFit || !(recalculateTransport && tripUserDirty)) scheduleDisplayRefit(); // 實測比估算長時，顯示端補壓縮
               }
             }
 

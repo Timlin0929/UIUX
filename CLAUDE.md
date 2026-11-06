@@ -34,9 +34,12 @@ The only npm project is the **crawler** ([crawler/](crawler/), run from that fol
 | `npm run verify:places` (`-- --force`, `-- --limit N`) | Strict-name-match each scenic point against Google Places; write back precise coords / hours / rating / `place_id` (keeps OpenData name) |
 | `npm run enrich:fees` (`-- --force`, `-- --loose`, `-- --tdx`) | Match real ticket prices (主來源: 台東觀光網 opendata, optional `--tdx` for nationwide TDX) → write `fee`/`feeNote`/`feeSource` back onto `scenic_points` |
 | `npm run export:local` (`export:local:dry`) | `scenic_points` → [app/poi-data.js](app/poi-data.js); also exports `parking_lots` → [app/parking-data.js](app/parking-data.js) when that collection is non-empty |
+| `npm run fix:poi` (`fix:poi:dry`) | No API calls: apply the hand-verified [crawler/poi-corrections.json](crawler/poi-corrections.json) (bad names, coordinates, kinds) to [app/poi-data.js](app/poi-data.js). `export:local` applies the same file. Firestore is shared with the AMD project, so corrections live here instead of changing it |
 | `npm run crawl:food` (`crawl:food:dry`) | Restaurants per destination (Places `searchNearby`, incl. `costPerPerson`/`costNote`) → [app/restaurant-data.js](app/restaurant-data.js) |
 | `npm run clean:food-names` (`clean:food-names:dry`) | No API calls: move business-hour notes out of restaurant names in [app/restaurant-data.js](app/restaurant-data.js) (「（店休不固定…）」「/FB預約制」→ `nameNote`). `crawl:food` does the same automatically |
 | `npm run crawl:parking` (`crawl:parking:dry`) | Taitung County government open-data XLSX (public/private off-street parking lots, [dataset 165292](https://data.gov.tw/dataset/165292)) → geocode addresses → Firestore `parking_lots`. **Needs a non-referrer-restricted `GOOGLE_MAPS_API_KEY`** (`app/weather.env.js`'s key is browser-only and gets 403'd server-side); pass one via `$env:GOOGLE_MAPS_API_KEY` before running. |
+
+After changing POI data or merge rules, run `node tools/pair-audit.js [out.csv]` (no API calls) and review the pairs it flags; record verified relationships in [app/big-attraction-config.js](app/big-attraction-config.js).
 
 A Windows scheduled task **`WanderAI Food Crawl`** runs `crawl:food` biweekly via [crawler/run-food-crawl.bat](crawler/run-food-crawl.bat).
 
